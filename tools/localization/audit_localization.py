@@ -75,6 +75,14 @@ def parse_args() -> argparse.Namespace:
             "for example RU_RU."
         ),
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Exit with status 1 when XML parse errors or "
+            "conflicting writes are found."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -198,6 +206,7 @@ def main() -> None:
                 for key in sorted(missing):
                     print(f"    {key}")
 
+    total_conflicts = 0
     print()
     print("Duplicate writes:")
 
@@ -214,6 +223,7 @@ def main() -> None:
                 {normalize_text(text) for _, text in entries}
             ) > 1
         }
+        total_conflicts += len(conflicts)
         identical_count = len(duplicates) - len(conflicts)
 
         print(
@@ -248,6 +258,19 @@ def main() -> None:
 
         for path, error in parse_errors:
             print(f"  {path}: {error}")
+
+    if args.strict:
+        print()
+
+        if parse_errors or total_conflicts:
+            print(
+                "Strict mode failed: "
+                f"{len(parse_errors)} XML parse errors, "
+                f"{total_conflicts} conflicting writes."
+            )
+            raise SystemExit(1)
+
+        print("Strict mode passed.")
 
 
 if __name__ == "__main__":
