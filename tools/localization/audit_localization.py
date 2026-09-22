@@ -59,6 +59,10 @@ def operation_data(operation: ET.Element) -> tuple[str | None, str]:
     return None, ""
 
 
+def normalize_text(text: str) -> str:
+    return " ".join(text.split())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Audit Lekmod localization tables."
@@ -83,9 +87,9 @@ def main() -> None:
     stats: dict[str, Counter[str]] = defaultdict(Counter)
     files_by_locale: dict[str, set[str]] = defaultdict(set)
     written_keys: dict[str, set[str]] = defaultdict(set)
-    write_sources: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    write_entries: dict[
+        str, dict[str, list[tuple[str, str]]]
+    ] = defaultdict(lambda: defaultdict(list))
     parse_errors: list[tuple[str, str]] = []
     sql_references: dict[str, set[str]] = defaultdict(set)
 
@@ -122,8 +126,9 @@ def main() -> None:
 
                 if operation_type in {"Row", "Update"} and key:
                     written_keys[locale].add(key)
-                    write_sources[locale][key].append(relative_path)
-
+                    write_entries[locale][key].append(
+                        (relative_path, text)
+                    )
                 if text and PLACEHOLDER_RE.search(text):
                     stats[locale]["placeholders"] += 1
 
@@ -194,23 +199,41 @@ def main() -> None:
                     print(f"    {key}")
 
     print()
-    print("Duplicate writes requiring review:")
+    print("Duplicate writes:")
 
-    for locale in sorted(write_sources):
+    for locale in sorted(write_entries):
         duplicates = {
-            key: sources
-            for key, sources in write_sources[locale].items()
-            if len(sources) > 1
+            key: entries
+            for key, entries in write_entries[locale].items()
+            if len(entries) > 1
         }
+        conflicts = {
+            key
+            for key, entries in duplicates.items()
+            if len(
+                {normalize_text(text) for _, text in entries}
+            ) > 1
+        }
+        identical_count = len(duplicates) - len(conflicts)
 
-        print(f"  {locale}: {len(duplicates)}")
+        print(
+            f"  {locale}: {len(duplicates)} total, "
+            f"{len(conflicts)} conflicting, "
+            f"{identical_count} identical"
+        )
 
         if locale == args.locale:
-            for key, sources in sorted(duplicates.items()):
-                print(f"    {key}")
+            for key, entries in sorted(duplicates.items()):
+                status = (
+                    "conflicting"
+                    if key in conflicts
+                    else "identical"
+                )
+                print(f"    {key} [{status}]")
 
-                for source in sources:
+                for source, text in entries:
                     print(f"      {source}")
+                    print(f"        {normalize_text(text)}")
 
     if sql_references:
         print()
