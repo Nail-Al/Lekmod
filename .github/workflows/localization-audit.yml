@@ -1,0 +1,39 @@
+﻿name: Localization Audit
+
+on:
+  push:
+    paths:
+      - "LEKMOD/Art/**"
+      - "tools/localization/**"
+      - ".github/workflows/localization-audit.yml"
+  pull_request:
+    paths:
+      - "LEKMOD/Art/**"
+      - "tools/localization/**"
+      - ".github/workflows/localization-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Validate localization data
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout localization files
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            LEKMOD/Art
+            tools/localization
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Run localization audit
+        run: python tools/localization/audit_localization.py --strict
