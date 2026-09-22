@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
 import re
@@ -58,7 +59,24 @@ def operation_data(operation: ET.Element) -> tuple[str | None, str]:
     return None, ""
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Audit Lekmod localization tables."
+    )
+    parser.add_argument(
+        "--locale",
+        metavar="LOCALE",
+        help=(
+            "Print missing keys and duplicate write sources for one locale, "
+            "for example RU_RU."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     if not ART_ROOT.is_dir():
         raise SystemExit(f"Art directory not found: {ART_ROOT}")
 
@@ -119,6 +137,13 @@ def main() -> None:
         for locale in LANGUAGE_REFERENCE_RE.findall(content):
             sql_references[locale].add(relative_path)
 
+    if args.locale is not None and args.locale not in stats:
+        available_locales = ", ".join(sorted(stats))
+        raise SystemExit(
+            f"Unknown locale: {args.locale}. "
+            f"Available locales: {available_locales}"
+        )
+
     print(f"Scanned XML files: {len(xml_files)}")
     print(f"XML parse errors: {len(parse_errors)}")
     print()
@@ -160,17 +185,32 @@ def main() -> None:
         for locale in sorted(written_keys):
             if locale == "en_US":
                 continue
+
             missing = english_keys - written_keys[locale]
             print(f"  {locale}: {len(missing)}")
+
+            if locale == args.locale:
+                for key in sorted(missing):
+                    print(f"    {key}")
 
     print()
     print("Duplicate writes requiring review:")
 
     for locale in sorted(write_sources):
-        duplicate_count = sum(
-            1 for sources in write_sources[locale].values() if len(sources) > 1
-        )
-        print(f"  {locale}: {duplicate_count}")
+        duplicates = {
+            key: sources
+            for key, sources in write_sources[locale].items()
+            if len(sources) > 1
+        }
+
+        print(f"  {locale}: {len(duplicates)}")
+
+        if locale == args.locale:
+            for key, sources in sorted(duplicates.items()):
+                print(f"    {key}")
+
+                for source in sources:
+                    print(f"      {source}")
 
     if sql_references:
         print()
