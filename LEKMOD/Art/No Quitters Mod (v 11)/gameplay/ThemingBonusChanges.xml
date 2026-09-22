@@ -127,8 +127,8 @@
 		</Row>
 	</Language_PL_PL>
 	<Language_RU_RU>
-		<Delete Tag="TXT_KEY_BUILDING_STONE_WORKS_HELP" />
-		<Row Tag="TXT_KEY_BUILDING_STONE_WORKS_HELP">
+		<Delete Tag="TXT_KEY_LOUVRE_THEMING_BONUS_HELP" />
+		<Row Tag="TXT_KEY_LOUVRE_THEMING_BONUS_HELP">
 			<Text>[COLOR_WARNING_TEXT](RU_RU text) [ENDCOLOR]To maximize your bonus, make sure the Great Work Slots are filled with 2 Great Works of Art and 2 Artifacts with all 4 being from different Eras.</Text>
 		</Row>
 	</Language_RU_RU>
