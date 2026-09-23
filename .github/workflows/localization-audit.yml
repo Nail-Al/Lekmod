@@ -4,11 +4,13 @@ on:
   push:
     paths:
       - "LEKMOD/Art/**"
+      - "LEKMOD/Override/CIV5Units_Mongol.xml"
       - "tools/localization/**"
       - ".github/workflows/localization-audit.yml"
   pull_request:
     paths:
       - "LEKMOD/Art/**"
+      - "LEKMOD/Override/CIV5Units_Mongol.xml"
       - "tools/localization/**"
       - ".github/workflows/localization-audit.yml"
   workflow_dispatch:
@@ -28,6 +30,7 @@ jobs:
         with:
           sparse-checkout: |
             LEKMOD/Art
+            LEKMOD/Override
             tools/localization
 
       - name: Set up Python
@@ -37,3 +40,9 @@ jobs:
 
       - name: Run localization audit
         run: python tools/localization/audit_localization.py --strict
+
+      - name: Audit primary localization source
+        run: python tools/localization/audit_primary_localization.py --strict
+
+      - name: Test localization tools
+        run: python -m unittest discover -s tools/localization/tests -v
