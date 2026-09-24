@@ -51,6 +51,39 @@ The primary audit:
 
 The generated JSON report belongs under `build/localization` and is not committed.
 
+## Translation Catalog
+
+`build_localization_catalog.py` compares the primary English source with a clean Civilization V localization database. It excludes unchanged base-game text and writes one categorized catalog containing Lekmod additions and modified base-game entries.
+
+Run it with:
+
+`python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db"`
+
+The output is `build/localization/catalog.json`. It contains the English source entries, their formatting tokens, and sections for every locale found in the clean database. The script opens the database read-only and never modifies the game or Lekmod source files.
+
+## Repository-wide Source Inventory
+
+`inventory_localization.py` scans repository source areas that may contain localization definitions, key references, or hardcoded text:
+
+- `LEKMOD`, including `Art`, `Override`, Lua, standard UI and EUI `.ignore` templates
+- `Lekmap`
+- `LEKMOD_DLL`
+- `LekmodInstaller`
+
+Run the validation and write the complete local report with:
+
+`python tools/localization/inventory_localization.py --strict --json build/localization/inventory.json`
+
+The inventory records source paths and line numbers. It also reports keys written in multiple source areas and English Art keys absent from the main Override file, without guessing their runtime load order. It does not edit source files or label every code string as player-facing. String candidates are reviewed before any change is proposed.
+
+## Change Workflow
+
+1. The scripts report a problem or a text candidate with its source location.
+2. A developer approves the specific change or a clearly defined bulk update.
+3. A developer tests the approved change in the game.
+
+The tools never perform automatic source fixes. Proposed changes and their test result are recorded in `docs/localization-change-review.md`.
+
 ## Tests
 
 Run the localization tool tests with:
@@ -59,7 +92,7 @@ Run the localization tool tests with:
 
 ## Continuous Integration
 
-The `.github/workflows/localization-audit.yml` workflow runs both strict audits and the test suite when relevant localization files or tools are changed.
+The `.github/workflows/localization-audit.yml` workflow runs the strict audits, the repository-wide inventory, and the test suite when relevant source files or tools are changed.
 
 ## Localization Guidelines
 
@@ -70,7 +103,7 @@ The `.github/workflows/localization-audit.yml` workflow runs both strict audits 
 - Preserve grammar metadata such as `Gender` and `Plurality`
 - Save XML and SQL files as UTF-8
 - Keep the existing English fallback and locale marker until a proper translation is available
-- Run both strict audits and the tests before committing
+- Run all strict audits and the tests before committing
 
 ## Current Scope
 
@@ -81,9 +114,10 @@ The primary audit covers `LEKMOD/Override/CIV5Units_Mongol.xml`, which identifie
 The tools do not currently:
 
 - determine runtime load order
-- distinguish original Civilization V text from Lekmod-specific text
-- collect all hardcoded text from Lua, UI XML, maps, or DLL sources
+- compare non-primary sources with the base-game localization database
 - validate translation quality or gameplay accuracy
 - generate translated game files
+
+The inventory finds literal candidates in source code, but static scanning cannot prove whether every literal is displayed to a player. Text embedded in images or generated only at runtime still requires manual and in-game review.
 
 These areas can be added incrementally after the initial infrastructure is reviewed.

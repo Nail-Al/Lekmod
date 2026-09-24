@@ -3,14 +3,18 @@
 on:
   push:
     paths:
-      - "LEKMOD/Art/**"
-      - "LEKMOD/Override/CIV5Units_Mongol.xml"
+      - "LEKMOD/**"
+      - "Lekmap/**"
+      - "LEKMOD_DLL/**"
+      - "LekmodInstaller/**"
       - "tools/localization/**"
       - ".github/workflows/localization-audit.yml"
   pull_request:
     paths:
-      - "LEKMOD/Art/**"
-      - "LEKMOD/Override/CIV5Units_Mongol.xml"
+      - "LEKMOD/**"
+      - "Lekmap/**"
+      - "LEKMOD_DLL/**"
+      - "LekmodInstaller/**"
       - "tools/localization/**"
       - ".github/workflows/localization-audit.yml"
   workflow_dispatch:
@@ -25,13 +29,8 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Checkout localization files
+      - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          sparse-checkout: |
-            LEKMOD/Art
-            LEKMOD/Override
-            tools/localization
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -43,6 +42,9 @@ jobs:
 
       - name: Audit primary localization source
         run: python tools/localization/audit_primary_localization.py --strict
+
+      - name: Inventory localization sources
+        run: python tools/localization/inventory_localization.py --strict
 
       - name: Test localization tools
         run: python -m unittest discover -s tools/localization/tests -v
