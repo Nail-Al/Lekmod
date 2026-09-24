@@ -92,11 +92,23 @@ def normalize_text(value: object) -> str | None:
     return " ".join(str(value).split())
 
 
+def normalize_metadata(value: object) -> str | None:
+    if value is None:
+        return None
+
+    normalized = " ".join(str(value).split())
+    return normalized or None
+
+
 def catalog_fields(fields: dict[str, object]) -> dict[str, str | None]:
     result = canonical_fields(fields)
 
     if "Text" in result:
         result["Text"] = normalize_text(result["Text"])
+
+    for name in ("Gender", "Plurality"):
+        if name in result:
+            result[name] = normalize_metadata(result[name])
 
     return result
 
@@ -108,8 +120,8 @@ def normalized_fields(fields: dict[str, object]) -> dict[str, str | None]:
         value = fields.get(name)
         if name == "Text":
             value = normalize_text(value)
-        if name in {"Gender", "Plurality"} and value in {None, ""}:
-            value = None
+        elif name in {"Gender", "Plurality"}:
+            value = normalize_metadata(value)
         result[name] = None if value is None else str(value)
 
     return result
@@ -251,13 +263,8 @@ def explicit_metadata_changed(
         if name not in source_fields:
             continue
 
-        source_value = source_fields.get(name)
-        vanilla_value = vanilla_fields.get(name)
-
-        if source_value in {None, ""}:
-            source_value = None
-        if vanilla_value in {None, ""}:
-            vanilla_value = None
+        source_value = normalize_metadata(source_fields.get(name))
+        vanilla_value = normalize_metadata(vanilla_fields.get(name))
 
         if source_value != vanilla_value:
             return True

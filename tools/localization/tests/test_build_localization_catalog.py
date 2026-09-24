@@ -43,6 +43,12 @@ class LocalizationCatalogTests(unittest.TestCase):
                 "INSERT INTO LocalizedText_en_US VALUES (?, ?, ?, ?)",
                 [
                     ("TXT_KEY_UNIT_SAME", "Same [ICON_FOOD]", None, None),
+                    (
+                        "TXT_KEY_UNIT_METADATA_SAME",
+                        "Same metadata",
+                        "neuter:an",
+                        "2",
+                    ),
                     ("TXT_KEY_BUILDING_CHANGED", "Old text", "masculine", None),
                     ("TXT_KEY_POLICY_METADATA", "Metadata only", "masculine", None),
                 ],
@@ -65,8 +71,19 @@ class LocalizationCatalogTests(unittest.TestCase):
 <Replace Tag="TXT_KEY_UNIT_SAME"><Text>
     Same [ICON_FOOD]
 </Text></Replace>
+<Replace Tag="TXT_KEY_UNIT_METADATA_SAME">
+    <Text>Same metadata</Text>
+    <Gender>
+        neuter:an
+    </Gender>
+    <Plurality>
+        2
+    </Plurality>
+</Replace>
 <Replace Tag="TXT_KEY_BUILDING_CHANGED"><Text>New [ICON_PRODUCTION] text</Text><Gender>feminine</Gender></Replace>
-<Replace Tag="TXT_KEY_POLICY_METADATA"><Text>Metadata only</Text><Gender>feminine</Gender></Replace>
+<Replace Tag="TXT_KEY_POLICY_METADATA"><Text>Metadata only</Text><Gender>
+    feminine
+</Gender></Replace>
 <Row Tag="TXT_KEY_PROMOTION_NEW"><Text>New {1_Num} %s</Text></Row>
 </Language_en_US></GameData>''',
             encoding="utf-8",
@@ -79,7 +96,7 @@ class LocalizationCatalogTests(unittest.TestCase):
 
         entries, locales, fingerprint = catalog_builder.load_vanilla_database(database)
 
-        self.assertEqual(len(entries), 3)
+        self.assertEqual(len(entries), 4)
         self.assertEqual(locales, ["DE_DE", "en_US", "RU_RU"])
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(database.read_bytes(), original)
@@ -103,7 +120,7 @@ class LocalizationCatalogTests(unittest.TestCase):
                 "lekmod_new": 1,
                 "vanilla_metadata_only": 1,
                 "vanilla_modified": 1,
-                "vanilla_unchanged": 1,
+                "vanilla_unchanged": 2,
             },
         )
         self.assertEqual(catalog["summary"]["requires_translation"], 2)
@@ -129,6 +146,7 @@ class LocalizationCatalogTests(unittest.TestCase):
             metadata_review["TXT_KEY_POLICY_METADATA"]["fields"]["Gender"],
             "feminine",
         )
+        self.assertNotIn("TXT_KEY_UNIT_METADATA_SAME", metadata_review)
 
     def test_contaminated_database_is_rejected(self):
         with self.assertRaisesRegex(
