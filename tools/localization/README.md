@@ -51,15 +51,47 @@ The primary audit:
 
 The generated JSON report belongs under `build/localization` and is not committed.
 
-## Translation Catalog
+## Translation Workspace
 
-`build_localization_catalog.py` compares the primary English source with a clean Civilization V localization database. It excludes unchanged base-game text and writes one categorized catalog containing Lekmod additions and modified base-game entries.
+`build_localization_catalog.py` builds the working material used for translation review. This is separate from the audits above.
 
-Run it with:
+The generator reads:
 
-`python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db"`
+- the main English source at `LEKMOD/Override/CIV5Units_Mongol.xml`
+- XML and supported localization SQL definitions under `LEKMOD/Art`
+- the official language tables in a clean Civilization V `Localization-Merged.db`
 
-The output is `build/localization/catalog.json`. It contains the English source entries, their formatting tokens, and sections for every locale found in the clean database. The script opens the database read-only and never modifies the game or Lekmod source files.
+Generate one target language with:
+
+`python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db" --locale RU_RU`
+
+Repeat `--locale` to generate several target languages. Omit it to generate every non-English locale found in the clean database.
+
+Generated files are placed under `build/localization`:
+
+- `catalog.json` is the categorized English source index
+- `review/manifest.json` lists generated locales and source conflicts
+- `review/source-conflicts.json` contains only English source disagreements that require developer review
+- `review/<locale>/manifest.json` summarizes one target language
+- `review/<locale>/<category>.json` contains review entries grouped by game category and subcategory
+
+Every review entry shows:
+
+- `official_game` - the official target-language text, or `not_in_vanilla`
+- `lekmod_en_US` - the current Lekmod English text
+- `lekmod_target` - the current Lekmod text for the selected language
+- normalized character counts and Civilization V formatting tokens
+- source paths and database references used for classification
+
+Target text is marked `present`, `missing`, `placeholder`, or `source_conflict`. If English definitions in `Art`, SQL, and the main Override source disagree, the catalog keeps every variant and marks the entry `source_conflict`; it never guesses the runtime winner. These unresolved English entries are excluded from the per-language translation files and placed only in `review/source-conflicts.json` until a developer approves the source resolution.
+
+Categories follow the main Civilization V text areas, including civilizations, city-states, units, buildings, wonders, improvements, resources, technologies, policies, religion, great people, great works, diplomacy, multiplayer, world congress, terrain, scenarios, Civilopedia, gameplay, game options, and UI. Subcategories split large areas into review-sized groups such as city names, leader dialogue, belief names, belief descriptions, help, strategy, Civilopedia text, and interface messages.
+
+Database references are the primary classification source. Deterministic key-name rules refine broad database groups and classify entries that have no database reference. Unknown key families remain visible under `unclassified`; they are never dropped or assigned by guessing from their English prose.
+
+The clean database is opened read-only. Repository SQL is parsed only for a restricted set of localization `INSERT` and `UPDATE` statements and is never executed. Unsupported SQL fails the build instead of being guessed.
+
+All output under `build/localization` is generated and ignored by Git. Official Civilization V strings therefore remain local and are not committed to the repository.
 
 ## Repository-wide Source Inventory
 
@@ -82,7 +114,7 @@ The inventory records source paths and line numbers. It also reports keys writte
 2. A developer approves the specific change or a clearly defined bulk update.
 3. A developer tests the approved change in the game.
 
-The tools never perform automatic source fixes. Proposed changes and their test result are recorded in `docs/localization-change-review.md`.
+The tools never perform automatic source fixes. Start source review with `build/localization/review/source-conflicts.json`. Proposed changes and their test result are recorded in `docs/localization-change-review.md`.
 
 ## Tests
 
@@ -114,7 +146,6 @@ The primary audit covers `LEKMOD/Override/CIV5Units_Mongol.xml`, which identifie
 The tools do not currently:
 
 - determine runtime load order
-- compare non-primary sources with the base-game localization database
 - validate translation quality or gameplay accuracy
 - generate translated game files
 
