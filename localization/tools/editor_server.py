@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, timezone
+import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
@@ -16,6 +17,7 @@ import sys
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 from xml.sax.saxutils import escape
+import zipfile
 
 import build_shipped_localization
 import manage
@@ -105,6 +107,21 @@ class Editor:
         if not self.snapshot.is_file():
             raise CatalogError(f"vanilla snapshot is missing: {self.snapshot}")
         manage.prepare(manage.read_config(), self.snapshot)
+        self.actions: list[dict] = []
+        self.cursor = 0
+
+    def history_state(self) -> dict[str, bool]:
+        """Report whether saved edits can be undone or redone in this session."""
+        return {"undo_available": self.cursor > 0,
+                "redo_available": self.cursor < len(self.actions)}
+
+    def remember(self, action: dict) -> None:
+        """Keep a short session journal and discard redo after a new save."""
+        del self.actions[self.cursor:]
+        self.actions.append(action)
+        if len(self.actions) > 20:
+            del self.actions[0]
+        self.cursor = len(self.actions)
 
     def manifest(self) -> dict:
         """Expose only known language and category filenames."""
@@ -125,7 +142,38 @@ class Editor:
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
             "config": manage.read_config(),
+            **self.history_state(),
         }
+
+    def export_locale(self, locale: str) -> bytes:
+        """Package one approved CSV for a developer without private vanilla text."""
+        if locale not in self.manifest().get("locales", {}):
+            raise CatalogError("unknown language")
+        path = TRANSLATIONS / f"{locale}.csv"
+        read_approvals(TRANSLATIONS)
+        reference = manage.DEFAULT_REFERENCE.read_bytes()
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True,
+            capture_output=True, check=True,
+        ).stdout.strip()
+        metadata = {
+            "locale": locale,
+            "repository_commit": revision,
+            "vanilla_reference_sha256": hashlib.sha256(reference).hexdigest(),
+        }
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"translations/{locale}.csv", path.read_bytes())
+            archive.writestr("manifest.json", json.dumps(metadata, indent=2) + "\n")
+            archive.writestr("README.txt", (
+                "Lekmod localization handoff\n\n"
+                "Send this ZIP to a Lekmod developer or attach it to a review.\n"
+                "The developer should compare the manifest, copy the CSV into\n"
+                "localization/translations/, run localization/tools/manage.py prepare\n"
+                "and check, then review and commit the generated game XML.\n"
+                "This package contains no private vanilla snapshot.\n"
+            ))
+        return stream.getvalue()
 
     def rows(self, locale: str, category: str, query: str, offset: int) -> dict:
         """Search a category and return one page with approval state."""
@@ -216,8 +264,10 @@ class Editor:
         ):
             raise CatalogError("translation must preserve all formatting tokens")
         approved_path = TRANSLATIONS / f"{locale}.csv"
+        game = build_shipped_localization.DEFAULT_SOURCE
         old_approved = approved_path.read_bytes() if approved_path.exists() else None
         old_editor = path.read_bytes()
+        old_game_hash = hashlib.sha256(game.read_bytes()).hexdigest()
         existing = read_approvals(TRANSLATIONS).get(locale, {})
         notes = {}
         if approved_path.is_file():
@@ -258,7 +308,7 @@ class Editor:
             })
             atomic_bytes(path, encoded_csv(rows, list(EDITOR_FIELDNAMES)))
             if apply_to_game:
-                sync_primary_english.atomic_text(build_shipped_localization.DEFAULT_SOURCE, candidate)
+                sync_primary_english.atomic_text(game, candidate)
         except Exception:
             if old_approved is None:
                 approved_path.unlink(missing_ok=True)
@@ -266,9 +316,22 @@ class Editor:
                 atomic_bytes(approved_path, old_approved)
             atomic_bytes(path, old_editor)
             raise
-        return {"applied_to_game": apply_to_game}
+        new_approved = approved_path.read_bytes()
+        new_editor = path.read_bytes()
+        new_game_hash = hashlib.sha256(game.read_bytes()).hexdigest()
+        if (old_approved, old_editor, old_game_hash) != (
+            new_approved, new_editor, new_game_hash
+        ):
+            self.remember({
+                "kind": "translation", "approved_path": approved_path, "editor_path": path,
+                "before_approved": old_approved, "after_approved": new_approved,
+                "before_editor": old_editor, "after_editor": new_editor,
+                "before_game_hash": old_game_hash, "after_game_hash": new_game_hash,
+                "build": manage.read_config()["build"],
+            })
+        return {"applied_to_game": apply_to_game, **self.history_state()}
 
-    def save_primary(self, data: dict) -> dict:
+    def save_primary(self, data: dict, *, record: bool = True) -> dict:
         """Change one English text, then refresh generated XML and draft statuses."""
         source = sync_primary_english.DEFAULT_ENGLISH
         game = build_shipped_localization.DEFAULT_SOURCE
@@ -289,6 +352,7 @@ class Editor:
         replacement = before[:row["text_start"]] + escape(new_text) + before[row["text_end"]:]
         sync_primary_english.validate_source(replacement)
         old_game = game.read_bytes()
+        old_game_hash = hashlib.sha256(old_game).hexdigest()
         atomic_bytes(source, replacement.encode("utf-8"))
         try:
             manage.prepare(manage.read_config(), self.snapshot)
@@ -297,8 +361,71 @@ class Editor:
             atomic_bytes(game, old_game)
             raise
         config = manage.read_config()["build"]
+        new_game_hash = hashlib.sha256(game.read_bytes()).hexdigest()
+        if record and (before != replacement or old_game_hash != new_game_hash):
+            self.remember({
+                "kind": "primary", "index": index, "key": row["key"],
+                "before_text": primary_text(row["text"]), "after_text": new_text,
+                "before_game_hash": old_game_hash, "after_game_hash": new_game_hash,
+                "build": config,
+            })
         return {"key": row["key"], "updated": True,
-                "applied_to_game": config["english"] and config["shipped"]}
+                "applied_to_game": config["english"] and config["shipped"],
+                **self.history_state()}
+
+    def replay(self, *, undo: bool) -> dict:
+        """Reverse or reapply one saved edit, refusing unrelated file changes."""
+        position = self.cursor - 1 if undo else self.cursor
+        if position < 0 or position >= len(self.actions):
+            raise CatalogError("no saved edit to undo" if undo else "no saved edit to redo")
+        action = self.actions[position]
+        if manage.read_config()["build"] != action["build"]:
+            raise CatalogError("build settings changed; restart the editor before undo or redo")
+        game = build_shipped_localization.DEFAULT_SOURCE
+        side = "after" if undo else "before"
+        target = "before" if undo else "after"
+        if hashlib.sha256(game.read_bytes()).hexdigest() != action[f"{side}_game_hash"]:
+            raise CatalogError("game XML changed outside this editor; saved edit was not replayed")
+        if action["kind"] == "primary":
+            result = self.save_primary({
+                "index": action["index"], "key": action["key"],
+                "old_text": action[f"{side}_text"], "text": action[f"{target}_text"],
+            }, record=False)
+        else:
+            approved_path = action["approved_path"]
+            editor_path = action["editor_path"]
+            current_approved = approved_path.read_bytes() if approved_path.exists() else None
+            current_editor = editor_path.read_bytes()
+            if (current_approved, current_editor) != (
+                action[f"{side}_approved"], action[f"{side}_editor"]
+            ):
+                raise CatalogError("translation CSV changed outside this editor; saved edit was not replayed")
+            try:
+                desired = action[f"{target}_approved"]
+                if desired is None:
+                    approved_path.unlink(missing_ok=True)
+                else:
+                    atomic_bytes(approved_path, desired)
+                atomic_bytes(editor_path, action[f"{target}_editor"])
+                if action["build"]["shipped"]:
+                    candidate, _ = build_shipped_localization.build_candidate(
+                        self.snapshot, approvals=TRANSLATIONS,
+                    )
+                    if hashlib.sha256(candidate.encode("utf-8")).hexdigest() != action[f"{target}_game_hash"]:
+                        raise CatalogError("game build changed since this save; saved edit was not replayed")
+                    sync_primary_english.atomic_text(game, candidate)
+            except Exception:
+                if current_approved is None:
+                    approved_path.unlink(missing_ok=True)
+                else:
+                    atomic_bytes(approved_path, current_approved)
+                atomic_bytes(editor_path, current_editor)
+                raise
+            result = {"applied_to_game": action["build"]["shipped"]}
+        if hashlib.sha256(game.read_bytes()).hexdigest() != action[f"{target}_game_hash"]:
+            raise CatalogError("generated game XML differs from the saved edit; restart the editor")
+        self.cursor += -1 if undo else 1
+        return {**result, **self.history_state()}
 
 
 def make_handler(editor: Editor, token: str, port: int):
@@ -308,6 +435,17 @@ def make_handler(editor: Editor, token: str, port: int):
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def download(self, name: str, data: bytes, content_type: str) -> None:
+            """Send a named local export with no private snapshot attached."""
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(data)))
@@ -340,6 +478,13 @@ def make_handler(editor: Editor, token: str, port: int):
                         key=one("key") if "key" in args else None,
                         index=int(one("index")) if "index" in args else None,
                     ))
+                elif url.path == "/api/export":
+                    locale = one("locale")
+                    data = editor.export_locale(locale)
+                    self.download(f"lekmod-{locale}-translations.zip", data, "application/zip")
+                elif url.path == "/api/game-xml":
+                    game = build_shipped_localization.DEFAULT_SOURCE
+                    self.download(game.name, game.read_bytes(), "application/xml")
                 else:
                     self.respond(404, {"error": "not found"})
             except (CatalogError, OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -362,6 +507,10 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.save_translation(data)
                 elif self.path == "/api/primary":
                     result = editor.save_primary(data)
+                elif self.path == "/api/undo":
+                    result = editor.replay(undo=True)
+                elif self.path == "/api/redo":
+                    result = editor.replay(undo=False)
                 else:
                     self.respond(404, {"error": "not found"})
                     return
@@ -390,7 +539,7 @@ def main() -> int:
     except (CatalogError, OSError) as error:
         parser.exit(1, f"Editor failed: {error}\n")
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"Open {url} in this Windows VM; stop with Ctrl+C.", flush=True)
+    print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
     webbrowser.open(url)
     try:
         server.serve_forever()

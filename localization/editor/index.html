@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lekmod · редактор локализации</title>
+  <title>Lekmod Localization Editor</title>
   <style>
     :root { font-family: system-ui, sans-serif; color: #222a35; background: #f5f7fb; }
     body { margin: 0; }
@@ -38,6 +38,7 @@
     .panel textarea { width: min(100%, 960px); min-height: 115px; box-sizing: border-box; resize: both; }
     .fields { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
     .fields input { width: 200px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
     .hint { color: #5d6d80; font-size: .85rem; }
     .stale { color: #a1411d; font-weight: 700; }
     #message { min-height: 21px; font-weight: 600; }
@@ -45,30 +46,37 @@
   </style>
 </head>
 <body>
-<header><h1>Lekmod · локализация</h1><p>Локальный редактор. Игровой XML обновляется после сохранения одобренного перевода.</p></header>
+<header><h1>Lekmod Localization Editor</h1><p>Save approved translations to CSV and the game XML. Undo and redo saved edits during this session.</p></header>
 <main>
   <section class="bar">
-    <label>Язык<select id="locale"></select></label>
-    <label>Категория<select id="category"></select></label>
-    <label>Поиск<input id="search" placeholder="Ключ или часть текста"></label>
-    <label><span>Отображение</span><span><input type="checkbox" id="wrap" checked> Перенос строк</span></label>
-    <details><summary>Столбцы</summary><div class="columns" id="columns"></div></details>
+    <label>Language<select id="locale"></select></label>
+    <label>Category<select id="category"></select></label>
+    <label>Search<input id="search" placeholder="Key or part of the text"></label>
+    <label><span>Display</span><span><input type="checkbox" id="wrap" checked> Wrap lines</span></label>
+    <details><summary>Columns</summary><div class="columns" id="columns"></div></details>
   </section>
   <section class="grid">
     <table id="table"><thead></thead><tbody></tbody></table>
-    <div class="pager"><button id="prev">Назад</button><span id="count"></span><button id="next">Дальше</button></div>
+    <div class="pager"><button id="prev">Previous page</button><span id="count"></span><button id="next">Next page</button></div>
   </section>
   <section class="panel" id="panel">
-    <h2 id="selected">Выберите строку в таблице</h2>
+    <h2 id="selected">Select a row in the table</h2>
     <p id="context" class="hint"></p>
-    <label>Текст<textarea id="translation" disabled></textarea></label>
+    <label>Text<textarea id="translation" disabled></textarea></label>
     <div class="fields" id="grammar">
       <label>Gender<input id="gender" disabled></label>
       <label>Plurality<input id="plurality" disabled></label>
-      <label>Заметка переводчика<input id="note" disabled></label>
+      <label>Translator note<input id="note" disabled></label>
     </div>
     <p id="characters" class="hint"></p>
-    <button id="save" disabled>Сохранить и применить</button>
+    <div class="actions">
+      <button id="save" disabled>Save and apply</button>
+      <button id="undo" disabled>Undo saved edit</button>
+      <button id="redo" disabled>Redo saved edit</button>
+      <button id="share" disabled>Download translation ZIP</button>
+      <button id="gamexml">Download test game XML</button>
+    </div>
+    <p class="hint">The ZIP is for a reviewer. The game XML is for a separate local test copy of Lekmod; it is not a complete mod.</p>
     <p id="message" role="status"></p>
   </section>
 </main>
@@ -76,13 +84,13 @@
   const token = "{{TOKEN}}";
   const byId = id => document.getElementById(id);
   const columns = [
-    ["key", "Ключ"], ["classification", "Тип"], ["vanilla_en_US", "Vanilla EN"],
-    ["vanilla_target", "Vanilla перевод"], ["lekmod_en_US", "Lekmod EN"],
-    ["lekmod_target", "Lekmod перевод"], ["translation", "Мой перевод"],
-    ["translation_status", "Состояние"], ["translation_characters", "Символы"]
+    ["key", "Key"], ["classification", "Type"], ["vanilla_en_US", "Vanilla EN"],
+    ["vanilla_target", "Vanilla translation"], ["lekmod_en_US", "Lekmod EN"],
+    ["lekmod_target", "Existing Lekmod translation"], ["translation", "My translation"],
+    ["translation_status", "Status"], ["translation_characters", "Characters"]
   ];
-  const primaryColumns = [["key", "Ключ"], ["kind", "Операция"],
-    ["text", "Английский текст"], ["characters", "Символы"]];
+  const primaryColumns = [["key", "Key"], ["kind", "Operation"],
+    ["text", "English text"], ["characters", "Characters"]];
   let locales = {}, offset = 0, total = 0, chosen = null, primary = false;
   const selectedColumns = new Set([...columns, ...primaryColumns].map(([name]) => name));
   let pendingSearch;
@@ -95,17 +103,21 @@
     };
     const response = await fetch(path, options);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Не удалось выполнить запрос");
+    if (!response.ok) throw new Error(data.error || "Request failed");
     return data;
   }
   function status(text, error = false) {
     byId("message").textContent = text;
     byId("message").style.color = error ? "#a62d24" : "#1f6b3a";
   }
+  function updateHistoryButtons(state) {
+    byId("undo").disabled = !state.undo_available;
+    byId("redo").disabled = !state.redo_available;
+  }
   function updateCategories() {
     const locale = byId("locale").value, select = byId("category");
     select.replaceChildren();
-    for (const [value, label] of [["primary", "Primary · английский"],
+    for (const [value, label] of [["primary", "Primary · English"],
           ...(locales[locale] || []).map(name => [name, name])]) {
       const option = document.createElement("option");
       option.value = value; option.textContent = label; select.append(option);
@@ -144,33 +156,34 @@
       byId(id).disabled = primary; byId(id).value = row[field] || "";
     }
     byId("context").textContent = primary
-      ? "Источник: localization/en_US/primary.xml · дата последнего коммита загружается…"
-      : "Тип: " + row.classification + " · состояние: " + row.translation_status +
-        (row.translation_status === "stale" ? " · прежний перевод не применяется в игре" : "") +
-        " · обязательные маркеры: " + row.required_format_tokens +
-        " · дата английской строки загружается…";
+      ? "Source: localization/en_US/primary.xml · loading last commit date…"
+      : "Type: " + row.classification + " · status: " + row.translation_status +
+        (row.translation_status === "stale" ? " · old translation is not used in game" : "") +
+        " · required tokens: " + row.required_format_tokens +
+        " · loading English row date…";
     byId("context").className = row.translation_status === "stale" ? "stale" : "hint";
-    byId("characters").textContent = "Символов: " + charCount(byId("translation").value) +
+    byId("characters").textContent = "Characters: " + charCount(byId("translation").value) +
       (primary ? "" : " · English: " + row.lekmod_en_US_characters);
     const historyPath = primary ? "/api/history?index=" + row.index
       : "/api/history?key=" + encodeURIComponent(row.key);
     request(historyPath).then(history => {
       if (chosen !== row) return;
       byId("context").textContent = (primary ? "" : byId("context").textContent.replace(
-        " · дата английской строки загружается…", "") + " · ") +
-        "Последнее изменение английской строки в Git: " +
-        (history.committed_at || "ещё не зафиксировано") +
+        " · loading English row date…", "") + " · ") +
+        "Last committed English edit: " +
+        (history.committed_at || "not committed yet") +
         (history.commit ? " · " + history.commit.slice(0, 8) : "");
     }).catch(() => {
-      if (chosen === row) byId("context").textContent += " · дата изменения в Git недоступна";
+      if (chosen === row) byId("context").textContent += " · Git date unavailable";
     });
     status("");
   }
   async function load() {
     primary = byId("category").value === "primary";
+    byId("share").disabled = primary || !byId("locale").value;
     chosen = null;
     byId("save").disabled = true; byId("translation").disabled = true;
-    byId("selected").textContent = "Выберите строку в таблице";
+    byId("selected").textContent = "Select a row in the table";
     updateColumns();
     try {
       const args = new URLSearchParams({q: byId("search").value, offset});
@@ -187,18 +200,18 @@
         for (const [field] of names) { const td = document.createElement("td"); td.textContent = row[field] || ""; tr.append(td); }
         tr.addEventListener("click", () => showRow(row, tr)); body.append(tr);
       }
-      byId("count").textContent = total ? `${offset + 1}–${Math.min(offset + 60, total)} из ${total}` : "Строк нет";
+      byId("count").textContent = total ? `${offset + 1}–${Math.min(offset + 60, total)} of ${total}` : "No rows";
       byId("prev").disabled = offset === 0; byId("next").disabled = offset + 60 >= total;
       status("");
     } catch (error) { status(error.message, true); }
   }
   byId("translation").addEventListener("input", () => {
-    byId("characters").textContent = "Символов: " + charCount(byId("translation").value) +
+    byId("characters").textContent = "Characters: " + charCount(byId("translation").value) +
       (primary ? "" : " · English: " + (chosen?.lekmod_en_US_characters || ""));
   });
   byId("save").addEventListener("click", async () => {
     if (!chosen) return;
-    byId("save").disabled = true; status("Сохраняю и проверяю…");
+    byId("save").disabled = true; status("Saving and validating…");
     try {
       let saved;
       if (primary) {
@@ -210,10 +223,33 @@
           translation: byId("translation").value, translation_gender: byId("gender").value,
           translation_plurality: byId("plurality").value, translator_note: byId("note").value});
       }
+      updateHistoryButtons(saved);
       await load(); status(saved.applied_to_game === false
-        ? "Изменение сохранено. Сборка XML выключена в config.json."
-        : "Сохранено. Изменённые файлы появятся в Git.");
+        ? "Saved. Game XML generation is Off in config.json."
+        : "Saved. The changed CSV and game XML are ready for review.");
     } catch (error) { status(error.message, true); byId("save").disabled = false; }
+  });
+  for (const operation of ["undo", "redo"]) {
+    byId(operation).addEventListener("click", async () => {
+      byId("undo").disabled = true; byId("redo").disabled = true;
+      try {
+        const result = await request("/api/" + operation, {});
+        updateHistoryButtons(result);
+        await load();
+        status(operation === "undo" ? "Last saved edit undone." : "Saved edit restored.");
+      } catch (error) {
+        status(error.message, true);
+        updateHistoryButtons(await request("/api/meta"));
+      }
+    });
+  }
+  byId("share").addEventListener("click", () => {
+    window.location.href = "/api/export?locale=" + encodeURIComponent(byId("locale").value);
+    status("Translation package download started. Attach the ZIP to your review or message.");
+  });
+  byId("gamexml").addEventListener("click", () => {
+    window.location.href = "/api/game-xml";
+    status("Test XML download started. Use it only with a local test copy of Lekmod.");
   });
   byId("locale").addEventListener("change", () => { offset = 0; updateCategories(); });
   byId("category").addEventListener("change", () => { offset = 0; load(); });
@@ -227,6 +263,7 @@
   byId("next").addEventListener("click", () => { offset += 60; load(); });
   request("/api/meta").then(meta => {
     locales = meta.locales;
+    updateHistoryButtons(meta);
     for (const locale of Object.keys(locales)) {
       const option = document.createElement("option"); option.value = locale; option.textContent = locale;
       byId("locale").append(option);

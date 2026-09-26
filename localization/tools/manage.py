@@ -27,8 +27,11 @@ def read_config(path: Path = CONFIG) -> dict[str, dict[str, bool]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CatalogError(f"cannot read localization config: {error}") from error
-    if not isinstance(raw, dict) or set(raw) != {"schema_version", "checks", "build"} or raw["schema_version"] != 1:
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "checks", "build", "_help"} or raw["schema_version"] != 1:
         raise CatalogError("unsupported localization config")
+    help_text = raw["_help"]
+    if not isinstance(help_text, dict) or set(help_text) != {"checks", "build"}:
+        raise CatalogError("localization config needs English help for checks and build")
     result = {}
     for group, names in (("checks", CHECKS), ("build", BUILD)):
         values = raw.get(group)
@@ -36,6 +39,11 @@ def read_config(path: Path = CONFIG) -> dict[str, dict[str, bool]]:
             raise CatalogError(f"config {group} must contain exactly: {', '.join(names)}")
         if any(value not in ("On", "Off") for value in values.values()):
             raise CatalogError(f"config {group} accepts only On or Off")
+        descriptions = help_text[group]
+        if not isinstance(descriptions, dict) or set(descriptions) != set(names) or any(
+            not isinstance(value, str) or not value.strip() for value in descriptions.values()
+        ):
+            raise CatalogError(f"config _help.{group} must describe each switch")
         result[group] = {name: values[name] == "On" for name in names}
     return result
 
@@ -57,6 +65,20 @@ def migrate_workspace(destination: Path = WORKSPACE, legacy: Path = LEGACY_WORKS
         raise CatalogError(
             "both old and new workspaces exist; move the vanilla snapshot and drafts "
             "manually before continuing"
+        )
+
+
+def ensure_workspace_private(root: Path = REPO_ROOT) -> None:
+    """Reject accidental force-adds of the local vanilla text or CSV drafts."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "localization/workspace"],
+        cwd=root, check=True, capture_output=True,
+    )
+    tracked = [name.decode("utf-8", "replace") for name in result.stdout.split(b"\0") if name]
+    if tracked:
+        raise CatalogError(
+            "localization/workspace contains tracked private files: "
+            + ", ".join(tracked[:5])
         )
 
 
@@ -109,6 +131,7 @@ def main() -> int:
     parser.add_argument("--vanilla-snapshot", type=Path, default=SNAPSHOT)
     args = parser.parse_args()
     try:
+        ensure_workspace_private()
         if not args.ci:
             migrate_workspace()
         config = read_config()

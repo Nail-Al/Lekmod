@@ -12,5 +12,20 @@
     "english": "On",
     "catalog": "On",
     "shipped": "On"
+  },
+  "_help": {
+    "checks": {
+      "art": "Validate existing Art and Override language XML for structural issues.",
+      "primary": "Audit the canonical English source for duplicate and invalid writes.",
+      "english_sync": "Check that shipped English matches en_US/primary.xml.",
+      "inventory": "Scan repository files for localization references and suspicious writes.",
+      "unit_tests": "Run localization unit tests.",
+      "shipped": "Check that generated game XML matches approved CSV translations."
+    },
+    "build": {
+      "english": "Copy canonical English into the game XML during prepare.",
+      "catalog": "Refresh local review reports and editor CSVs during prepare.",
+      "shipped": "Write approved translations and English fallback into the game XML during prepare."
+    }
   }
 }
