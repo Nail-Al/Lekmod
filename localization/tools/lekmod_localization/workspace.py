@@ -92,6 +92,8 @@ def editor_source_fingerprint(
 def target_change(entry: dict[str, object]) -> str:
     """Describe whether existing target text differs from vanilla."""
     target = entry["lekmod_target"]
+    if entry["official_game"]["status"] == "unavailable":
+        return "vanilla_unavailable"
     status = target["status"]
     if status != "present":
         return str(status)

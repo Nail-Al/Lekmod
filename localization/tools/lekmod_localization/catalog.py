@@ -236,7 +236,9 @@ def build_catalog(
                 name: field_values[name]
                 for name in english.get("fields_present", [])
             }
-            if vanilla_fields is None:
+            if vanilla_fields is None and (
+                vanilla_hashes is None or key not in vanilla_hashes
+            ):
                 classification = "lekmod_new"
             elif "Text" in source_fields and (
                 value_hash(source_fields["Text"]) != vanilla_hashes[key]["Text"]
@@ -321,7 +323,7 @@ def build_catalog(
         "vanilla": {
             "database": vanilla_database_name,
             "locale": SOURCE_LOCALE,
-            "entries": len(vanilla_entries),
+            "entries": len(vanilla_hashes) if vanilla_hashes is not None else len(vanilla_entries),
             "content_sha256": vanilla_fingerprint,
         },
         "locales": [SOURCE_LOCALE, *target_locales],
@@ -355,6 +357,8 @@ def build_locale_review(
     repository_localizations: dict[
         str, dict[str, list[dict[str, object]]]
     ],
+    *,
+    baseline_available: bool = True,
 ) -> tuple[dict[str, dict], dict[str, object]]:
     """Compare each eligible key with vanilla and Lekmod target text."""
     target_entries = locale_entries(
@@ -398,6 +402,11 @@ def build_locale_review(
                     vanilla_english,
                     vanilla_english,
                 )
+                if not baseline_available:
+                    # Hashes can classify a source, but cannot reconstruct the
+                    # original sentences. Never call that missing text "new".
+                    official["status"] = "unavailable"
+                    official_english["status"] = "unavailable"
                 status_counts[target["status"]] += 1
                 category_statuses[target["status"]] += 1
                 classification_counts[

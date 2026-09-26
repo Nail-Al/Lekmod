@@ -8,8 +8,8 @@ from pathlib import Path
 import tempfile
 import xml.etree.ElementTree as ET
 
+from lekmod_localization.common import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPO_ROOT / "LEKMOD" / "Override" / "CIV5Units_Mongol.xml"
 SUPPORTED_OPERATIONS = {"Row", "Replace", "Update", "Delete"}
 

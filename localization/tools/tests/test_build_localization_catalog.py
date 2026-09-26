@@ -20,7 +20,7 @@ import build_fallback_preview as fallback_builder
 import build_shipped_localization as shipped_builder
 import sync_primary_english
 from lekmod_localization.vanilla_snapshot import read_snapshot, write_snapshot
-from lekmod_localization.vanilla_reference import write_reference
+from lekmod_localization.vanilla_reference import reference_from_snapshot, write_reference
 from lekmod_localization.fallback import fallback_entries, preview_files, write_preview
 from lekmod_localization.shipped import approved_entries, install_candidate, read_approvals
 from lekmod_localization.workspace import editor_source_fingerprint
@@ -292,6 +292,31 @@ class LocalizationCatalogTests(unittest.TestCase):
             fingerprints["en_US"],
         )
         self.assertEqual(database.read_bytes(), original)
+
+    def test_hash_only_catalog_keeps_classifications_without_vanilla_text(self):
+        """A standalone translator sees mod changes without mislabeling the game."""
+        database, source, vanilla, localizations, references, full = self.build()
+        snapshot = self.root / "vanilla-snapshot.json.gz"
+        write_snapshot(database, snapshot)
+        pinned = reference_from_snapshot(snapshot)
+        hashes = catalog_builder.build_catalog(
+            primary_audit.parse_source(source, "en_US"), {},
+            sorted(pinned["locales"]), "vanilla-fingerprints.json.gz",
+            pinned["locales"]["en_US"], localizations, references,
+            vanilla_hashes=pinned["english"],
+        )
+        self.assertEqual(hashes["summary"]["classifications"],
+                         full["summary"]["classifications"])
+        self.assertEqual(hashes["vanilla"]["entries"], len(vanilla["en_US"]))
+        reviews = catalog_builder.build_locale_review(
+            hashes, "RU_RU", {}, {}, localizations, baseline_available=False,
+        )
+        entries = [entry for document in reviews[0].values()
+                   for group in document["subcategories"].values()
+                   for entry in group.values()]
+        self.assertTrue(entries)
+        self.assertTrue(all(entry["official_game"]["status"] == "unavailable"
+                            for entry in entries))
 
     def test_frozen_snapshot_matches_direct_database_input(self):
         """The catalog receives identical rows and hashes from either input."""

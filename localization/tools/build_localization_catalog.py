@@ -31,7 +31,7 @@ from lekmod_localization.sources import (
 )
 from lekmod_localization.taxonomy import classify_context
 from lekmod_localization.vanilla_snapshot import read_snapshot
-from lekmod_localization.vanilla_reference import DEFAULT_REFERENCE, verify_snapshot_reference
+from lekmod_localization.vanilla_reference import DEFAULT_REFERENCE, read_reference, verify_snapshot_reference
 from lekmod_localization.workspace import (
     EDITOR_EDITABLE_FIELDS,
     EDITOR_FIELDNAMES,
@@ -71,6 +71,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--vanilla-snapshot",
         type=Path,
         help="Previously frozen, local vanilla-snapshot.json.gz.",
+    )
+    vanilla.add_argument(
+        "--vanilla-reference",
+        type=Path,
+        help="Pinned hashes only; original vanilla sentences will be unavailable.",
     )
     parser.add_argument(
         "--locale",
@@ -173,7 +178,7 @@ def main() -> int:
 
     source = args.source.resolve()
     art_root = args.art_root.resolve()
-    vanilla_input = (args.vanilla_db or args.vanilla_snapshot).resolve()
+    vanilla_input = (args.vanilla_db or args.vanilla_snapshot or args.vanilla_reference).resolve()
     source_report = primary_audit.parse_source(
         source,
         SOURCE_LOCALE,
@@ -185,11 +190,18 @@ def main() -> int:
             args.review_output,
             args.editor_output,
         )
-        all_vanilla, fingerprints = (
-            read_snapshot(vanilla_input)
-            if args.vanilla_snapshot
-            else load_vanilla_locales(vanilla_input)
-        )
+        if args.vanilla_reference:
+            reference = read_reference(vanilla_input)
+            fingerprints = reference["locales"]
+            all_vanilla = {locale: {} for locale in fingerprints}
+            vanilla_hashes = reference["english"]
+        else:
+            all_vanilla, fingerprints = (
+                read_snapshot(vanilla_input)
+                if args.vanilla_snapshot
+                else load_vanilla_locales(vanilla_input)
+            )
+            vanilla_hashes = None
         if args.vanilla_snapshot and DEFAULT_REFERENCE.is_file() and (
             args.source.resolve() == DEFAULT_SOURCE.resolve()
         ):
@@ -215,6 +227,7 @@ def main() -> int:
             localizations,
             references,
             repository_summary,
+            vanilla_hashes=vanilla_hashes,
         )
         source_conflicts = build_source_conflict_review(catalog)
         reviews = {
@@ -224,6 +237,7 @@ def main() -> int:
                 all_vanilla[english_locale],
                 all_vanilla[locale],
                 localizations,
+                baseline_available=not args.vanilla_reference,
             )
             for locale in target_locales
         }

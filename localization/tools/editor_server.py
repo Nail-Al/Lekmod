@@ -19,6 +19,7 @@ import webbrowser
 from xml.sax.saxutils import escape
 import zipfile
 
+import build_localization_catalog  # Included explicitly in the frozen editor.
 import build_shipped_localization
 import manage
 import sync_primary_english
@@ -27,6 +28,7 @@ from lekmod_localization.common import (
     PLACEHOLDER_RE, character_count, token_counts,
 )
 from lekmod_localization.shipped import read_approvals
+from lekmod_localization.vanilla_snapshot import read_snapshot
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
 
 
@@ -102,10 +104,12 @@ class Editor:
     """Validate and persist browser edits before touching the shipped XML."""
 
     def __init__(self, snapshot: Path = manage.SNAPSHOT):
-        self.snapshot = snapshot
         manage.migrate_workspace()
-        if not self.snapshot.is_file():
-            raise CatalogError(f"vanilla snapshot is missing: {self.snapshot}")
+        self.snapshot = snapshot if snapshot.is_file() else None
+        self.vanilla_counts = (
+            {locale: len(rows) for locale, rows in read_snapshot(self.snapshot)[0].items()}
+            if self.snapshot is not None else {}
+        )
         manage.prepare(manage.read_config(), self.snapshot)
         self.actions: list[dict] = []
         self.cursor = 0
@@ -142,6 +146,7 @@ class Editor:
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
             "config": manage.read_config(),
+            "vanilla_counts": self.vanilla_counts,
             **self.history_state(),
         }
 
@@ -152,10 +157,12 @@ class Editor:
         path = TRANSLATIONS / f"{locale}.csv"
         read_approvals(TRANSLATIONS)
         reference = manage.DEFAULT_REFERENCE.read_bytes()
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True,
-            capture_output=True, check=True,
-        ).stdout.strip()
+        revision = None
+        if (REPO_ROOT / ".git").exists():
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True,
+                capture_output=True, check=True,
+            ).stdout.strip()
         metadata = {
             "locale": locale,
             "repository_commit": revision,
@@ -229,6 +236,9 @@ class Editor:
         else:
             raise CatalogError("unknown primary row")
         line = document.count("\n", 0, selected["text_start"]) + 1
+        if not (REPO_ROOT / ".git").exists():
+            return {"committed_at": None, "commit": None,
+                    "history_available": False}
         result = subprocess.run(
             ["git", "blame", "--line-porcelain", "-L", f"{line},{line}",
              "--", str(source.relative_to(REPO_ROOT))],
@@ -237,6 +247,7 @@ class Editor:
         timestamp = re.search(r"^author-time (\d+)$", result.stdout, re.MULTILINE)
         commit = result.stdout.split(" ", 1)[0]
         return {
+            "history_available": True,
             "committed_at": (
                 datetime.fromtimestamp(int(timestamp.group(1)), timezone.utc).isoformat()
                 if timestamp and commit.strip("0") else None
@@ -528,19 +539,25 @@ def make_handler(editor: Editor, token: str, port: int):
 def main() -> int:
     """Start the local-only editor and print its browser address."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=0,
+                        help="Local port; 0 chooses an available port")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Start the server without opening a browser")
     args = parser.parse_args()
-    if not 1024 <= args.port <= 65535:
-        parser.error("choose a port from 1024 to 65535")
+    if not 0 <= args.port <= 65535 or 0 < args.port < 1024:
+        parser.error("choose port 0 or a port from 1024 to 65535")
     try:
         editor = Editor()
         token = secrets.token_urlsafe(32)
         server = HTTPServer(("127.0.0.1", args.port), make_handler(editor, token, args.port))
+        # The handler compares the browser Origin with the actual assigned port.
+        server.RequestHandlerClass = make_handler(editor, token, server.server_port)
     except (CatalogError, OSError) as error:
         parser.exit(1, f"Editor failed: {error}\n")
-    url = f"http://127.0.0.1:{args.port}/"
+    url = f"http://127.0.0.1:{server.server_port}/"
     print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
-    webbrowser.open(url)
+    if not args.no_browser:
+        webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

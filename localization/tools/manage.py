@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import shutil
@@ -50,7 +51,25 @@ def read_config(path: Path = CONFIG) -> dict[str, dict[str, bool]]:
 
 def run(*args: str) -> None:
     """Run one tool from the repository root and stop on failure."""
-    subprocess.run([sys.executable, "-B", *args], cwd=REPO_ROOT, check=True)
+    if not getattr(sys, "frozen", False):
+        subprocess.run([sys.executable, "-B", *args], cwd=REPO_ROOT, check=True)
+        return
+    # sys.executable is the editor itself in a frozen build. Dispatch inside
+    # the embedded interpreter so it cannot recursively start another editor.
+    script = Path(args[0]).stem
+    if script not in {"sync_primary_english", "build_localization_catalog",
+                      "build_shipped_localization"}:
+        raise CatalogError(f"unsupported packaged tool: {script}")
+    previous = sys.argv
+    sys.argv = [script, *args[1:]]
+    try:
+        result = importlib.import_module(script).main()
+        if result:
+            raise CatalogError(f"{script} failed with exit code {result}")
+    except SystemExit as error:
+        raise CatalogError(f"{script} failed: {error}") from error
+    finally:
+        sys.argv = previous
 
 
 def migrate_workspace(destination: Path = WORKSPACE, legacy: Path = LEGACY_WORKSPACE) -> None:
@@ -70,6 +89,8 @@ def migrate_workspace(destination: Path = WORKSPACE, legacy: Path = LEGACY_WORKS
 
 def ensure_workspace_private(root: Path = REPO_ROOT) -> None:
     """Reject accidental force-adds of the local vanilla text or CSV drafts."""
+    if not (root / ".git").exists():
+        return  # A portable contributor package has no Git index to inspect.
     result = subprocess.run(
         ["git", "ls-files", "-z", "--", "localization/workspace"],
         cwd=root, check=True, capture_output=True,
@@ -82,15 +103,20 @@ def ensure_workspace_private(root: Path = REPO_ROOT) -> None:
         )
 
 
-def prepare(config: dict[str, dict[str, bool]], snapshot: Path) -> None:
+def prepare(config: dict[str, dict[str, bool]], snapshot: Path | None) -> None:
     """Update generated XML locally before committing its checked-in copy."""
-    verify_snapshot_reference(snapshot)
+    if snapshot is not None:
+        verify_snapshot_reference(snapshot)
     if config["build"]["english"]:
         run(str(TOOLS / "sync_primary_english.py"), "--write")
     if config["build"]["catalog"]:
-        run(str(TOOLS / "build_localization_catalog.py"), "--vanilla-snapshot", str(snapshot))
+        run(str(TOOLS / "build_localization_catalog.py"),
+            "--vanilla-snapshot" if snapshot is not None else "--vanilla-reference",
+            str(snapshot or DEFAULT_REFERENCE))
     if config["build"]["shipped"]:
-        run(str(TOOLS / "build_shipped_localization.py"), "--vanilla-snapshot", str(snapshot), "--write")
+        run(str(TOOLS / "build_shipped_localization.py"),
+            "--vanilla-snapshot" if snapshot is not None else "--vanilla-reference",
+            str(snapshot or DEFAULT_REFERENCE), "--write")
 
 
 def check(config: dict[str, dict[str, bool]], snapshot: Path, *, ci: bool) -> None:
@@ -117,7 +143,8 @@ def check(config: dict[str, dict[str, bool]], snapshot: Path, *, ci: bool) -> No
                 run(str(TOOLS / "build_shipped_localization.py"),
                     "--vanilla-snapshot", str(snapshot), "--check")
             else:
-                raise CatalogError(f"shipped check needs {snapshot}")
+                run(str(TOOLS / "build_shipped_localization.py"),
+                    "--vanilla-reference", str(DEFAULT_REFERENCE), "--check")
         else:
             script, *options = commands[name]
             run(str(script), *options)
@@ -138,7 +165,9 @@ def main() -> int:
         if args.action == "prepare":
             if args.ci:
                 parser.error("--ci is for checks only")
-            prepare(config, args.vanilla_snapshot)
+            if args.vanilla_snapshot != SNAPSHOT and not args.vanilla_snapshot.is_file():
+                raise CatalogError(f"requested vanilla snapshot is missing: {args.vanilla_snapshot}")
+            prepare(config, args.vanilla_snapshot if args.vanilla_snapshot.is_file() else None)
         else:
             check(config, args.vanilla_snapshot, ci=args.ci)
     except (CatalogError, subprocess.CalledProcessError) as error:

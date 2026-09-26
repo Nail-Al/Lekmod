@@ -4,23 +4,24 @@ This folder contains the English source, translation CSVs, a local browser
 editor, and contributor tools. The game reads the generated language sections
 in `LEKMOD/Override/CIV5Units_Mongol.xml`.
 
-## Quick start for a translator (Windows, no IDE)
+## Quick start for a translator (Windows)
 
-1. Use a Git clone of the project. GitHub's "Download ZIP" omits the Git
-   history needed for row dates and some source scans. Install Git for Windows
-   and Python 3.10 or newer if necessary; no VS Code or Python packages are
-   needed. Ask a maintainer for the matching full vanilla snapshot
-   and place it at `localization/workspace/vanilla-snapshot.json.gz`. If you
-   used the earlier version of these tools, your existing snapshot and drafts
-   in `build/localization` move automatically on first launch.
-2. Double-click `localization/start_editor.cmd`. Leave the command window
-   open; your browser should open `http://127.0.0.1:8765/` on the same PC.
-   If the browser does not open by itself, type that address into it. If the
-   command window reports a missing or mismatched snapshot, ask the
-   maintainer for the pinned version. Do not substitute a different game DB.
+1. Open [Localization Editor for Windows](https://github.com/Nail-Al/Lekmod/actions/workflows/localization-editor-windows.yml?query=branch%3Alocalization-infrastructure),
+   choose the latest successful run on `localization-infrastructure`, and
+   download the `LekmodLocalizationEditor-Windows` artifact at the bottom.
+   Unzip the downloaded artifact, then unzip the
+   `LekmodLocalizationEditor-Windows.zip` inside it into a new folder. A
+   maintainer may also send you that inner ZIP directly. No Git, Python,
+   VS Code, or installed game is required to start the editor.
+2. Double-click `LekmodLocalizationEditor.exe` in the extracted folder.
+   Leave its command window open. The browser opens automatically; if it
+   does not, use the `http://127.0.0.1:<port>/` address shown in the window.
+   The app chooses an available port. Do not move the EXE away from its
+   neighboring `localization` and `LEKMOD` folders.
 3. Pick a language (for example `RU_RU`) and a category. Search for a key
    or words. Compare **Vanilla EN**, **Vanilla translation**, **Lekmod EN**,
-   and **My translation**. Select a row, type your translation, preserve tokens
+   and **My translation** when original vanilla text is available. Select a
+   row, type your translation, preserve tokens
    such as `[ICON_...]` and `{1_...}`, then click **Save and apply**. The
    editor writes the approved CSV and regenerates the game XML. Saving an
    empty translation removes its approval. **Primary · English** edits the
@@ -33,11 +34,24 @@ in `LEKMOD/Override/CIV5Units_Mongol.xml`.
    **Download test game XML** downloads the generated Override file, not a
    complete mod. Use a separate local Lekmod test installation and follow its
    normal installation instructions before checking text in game.
-5. Close the command window, or press Ctrl+C in it, when finished.
+5. Close the command window, or press Ctrl+C in it, when finished. Your saved
+   CSV remains in `localization/translations/` inside that extracted folder.
+
+The download contains a shared **hash baseline**, so you can translate Lekmod
+rows immediately. For the original vanilla sentences, copy the team's matching
+`vanilla-snapshot.json.gz` to `localization/workspace/` inside the extracted
+folder before starting the editor again. A different snapshot is refused.
+The currently pinned snapshot has English and Russian entries, but its other
+eight locale tables are empty. In those languages, the vanilla translation
+column remains unavailable even when the snapshot is present. This limitation
+will require a separately reviewed baseline update from complete official
+language databases; do not treat a blank cell as proof that the game lacks a
+translation.
 
 Columns can be hidden and resized, long lines can wrap, and the table shows
 60 results per page. Selecting a row displays its English source's last
-**committed** Git date. A new uncommitted edit has no Git date. A changed
+**committed** Git date when using a developer clone. The portable download
+has no Git history and marks this date unavailable. A changed
 English row keeps the old translation for review but labels it `stale`; the
 game uses English until someone reviews and saves the translation again.
 
@@ -52,12 +66,19 @@ reviews the generated XML, and commits those files.
 | --- | --- | --- |
 | `en_US/primary.xml` | Editable canonical English Civ V operations | Track |
 | `translations/<locale>.csv` | Approved translations and source fingerprints for nine languages | Track |
-| `reference/vanilla-fingerprints.json.gz` | Shared baseline hashes of English fields and ten locale tables | Track |
+| `reference/vanilla-fingerprints.json.gz` | Shared baseline hashes of English fields and ten locale tables (eight currently empty) | Track |
 | `config.json` | `On`/`Off` steps and English help text | Track |
-| `editor/index.html`, `tools/`, `start_editor.cmd` | Contributor editor, launcher, generators and tests | Track for development |
+| `editor/index.html`, `tools/`, `start_editor.cmd` | Contributor editor, source launcher, generators and tests | Track for development |
 | `workspace/editor/<locale>/*.csv` | Generated comparison tables and local drafts | Ignore |
 | `workspace/review/`, `workspace/catalog.json` | Generated reports and source conflicts | Ignore |
 | `workspace/vanilla-snapshot.json.gz` | Full local vanilla text for comparison and preparation | Ignore |
+
+The portable EXE is built by GitHub Actions and delivered as an artifact; its
+ZIP includes the data files used by the editor, but excludes the Python tools,
+tests, complete vanilla text, and unrelated game assets. It is a translation
+workspace, not a complete mod installation. A developer working in a Git
+clone can still double-click `localization/start_editor.cmd` with Python 3.10+
+and Git installed. This source launcher also chooses an available local port.
 
 `workspace/` is a local working directory. The first run moves the old
 `build/localization` directory there if the new directory does not exist.
@@ -67,7 +88,7 @@ reference during ordinary translation work. Its content checks prevent a
 developer's different or mixed game installation from silently changing the
 shared baseline.
 
-The full snapshot includes official game text. A public pull request exposes
+The local snapshot includes official game text. A public pull request exposes
 its files immediately; later deleting a file from the branch does not remove
 it from Git history or downloaded copies. Keep the full snapshot out of a
 public PR unless the team has permission to redistribute it. Maintainers can
@@ -79,10 +100,10 @@ it against the tracked hashes. The optional creation command is:
 python -B localization/tools/freeze_vanilla.py --vanilla-db "PATH_TO_Localization-Merged.db"
 ```
 
-If the team explicitly changes the vanilla base version, review the new full
+If the team explicitly changes the vanilla base version, review the new
 snapshot and run `freeze_vanilla.py --refresh-reference` in a separate change.
-The pinned hash reference alone cannot show the original vanilla words in the
-browser, so the full local snapshot is needed for editing.
+The pinned hash reference cannot show original vanilla words in the browser.
+Translations and English source classification still work without that file.
 
 ## Developer workflow
 
@@ -123,8 +144,13 @@ reviewed; record decisions and in-game checks in `CHANGE_REVIEW.md`.
 
 ### Why is the full vanilla snapshot absent from this public PR?
 
-It contains complete language tables copied from the game, including the
-original text for ten locales. Take-Two's [terms of service](https://www.take2games.com/legal/en-US/)
+This specific file copies roughly 24,525 English and 24,524 Russian game
+entries; its other eight locale tables are empty. It is materially different
+from distributing only original, fan-written Lekmod text. 2K's
+[fan-content policy](https://support.2k.com/hc/en-us/articles/201335153-Policy-on-posting-copyrighted-2K-material)
+generally tolerates some noncommercial fan uses, but discusses footage and
+fan sites, not publication of a whole extracted language table. Take-Two's
+[terms of service](https://www.take2games.com/legal/en-US/)
 reserve rights in game text and limit copying and distribution without
 separate permission. We do not assume that an absence of complaints grants
 permission. A public PR exposes an uploaded file immediately. Deleting it in
@@ -138,6 +164,8 @@ is not a substitute for that permission.
 
 The tracked `reference/vanilla-fingerprints.json.gz` pins hashes of all
 24,525 vanilla English keys plus content fingerprints for all ten locales.
+Only the English and Russian locale tables contain text in the pinned source;
+the other eight empty-table fingerprints cannot supply missing translations.
 The local snapshot is checked against **all** those locale fingerprints before
 preparation. A different or mixed DB fails rather than silently changing the
 catalog or game XML. CI needs only the tracked reference to classify English
@@ -194,11 +222,13 @@ vanilla snapshot or replace the full Lekmod installation.
 
 ### Can someone translate without a coding environment or use an EXE?
 
-No IDE is needed for this version: `start_editor.cmd` opens the browser, but
-the machine still needs Python, Git, a project checkout, and a matching local
-snapshot. A standalone Windows EXE is a separate packaging task: it needs a
-portable data bundle, a supported way to provide vanilla text, and a safe
-test-install path. Do not describe this launcher as a standalone EXE.
+Yes. Download and extract the Windows artifact as described above. Its EXE
+includes Python internally and runs against its neighboring portable project
+files. You can edit and export translations without Git, Python, an IDE, a
+game installation, or a local vanilla snapshot. Git commit dates and original
+vanilla sentences need the corresponding Git clone and local snapshot,
+respectively. The ZIP is a contributor tool; it does not install the complete
+mod in Civilization V.
 
 ## Contributor files and player releases
 

@@ -55,6 +55,7 @@
     <label><span>Display</span><span><input type="checkbox" id="wrap" checked> Wrap lines</span></label>
     <details><summary>Columns</summary><div class="columns" id="columns"></div></details>
   </section>
+  <p id="baseline-notice" class="hint" hidden></p>
   <section class="grid">
     <table id="table"><thead></thead><tbody></tbody></table>
     <div class="pager"><button id="prev">Previous page</button><span id="count"></span><button id="next">Next page</button></div>
@@ -91,7 +92,7 @@
   ];
   const primaryColumns = [["key", "Key"], ["kind", "Operation"],
     ["text", "English text"], ["characters", "Characters"]];
-  let locales = {}, offset = 0, total = 0, chosen = null, primary = false;
+  let locales = {}, vanillaCounts = {}, offset = 0, total = 0, chosen = null, primary = false;
   const selectedColumns = new Set([...columns, ...primaryColumns].map(([name]) => name));
   let pendingSearch;
 
@@ -123,6 +124,15 @@
       option.value = value; option.textContent = label; select.append(option);
     }
     select.value = (locales[locale] || [])[0] || "primary";
+    const notice = byId("baseline-notice");
+    notice.hidden = false;
+    if (!Object.keys(vanillaCounts).length) {
+      notice.textContent = "Using the shared fingerprint baseline. Original vanilla sentences are unavailable on this computer; add a matching local snapshot to compare them.";
+    } else if (!vanillaCounts[locale]) {
+      notice.textContent = "The pinned vanilla snapshot has no " + locale + " entries. Vanilla translations for this language cannot be compared; English classification remains available.";
+    } else {
+      notice.hidden = true;
+    }
     load();
   }
   function updateColumns() {
@@ -171,7 +181,8 @@
       byId("context").textContent = (primary ? "" : byId("context").textContent.replace(
         " · loading English row date…", "") + " · ") +
         "Last committed English edit: " +
-        (history.committed_at || "not committed yet") +
+        (history.history_available === false ? "unavailable in portable package" :
+          history.committed_at || "not committed yet") +
         (history.commit ? " · " + history.commit.slice(0, 8) : "");
     }).catch(() => {
       if (chosen === row) byId("context").textContent += " · Git date unavailable";
@@ -263,6 +274,7 @@
   byId("next").addEventListener("click", () => { offset += 60; load(); });
   request("/api/meta").then(meta => {
     locales = meta.locales;
+    vanillaCounts = meta.vanilla_counts;
     updateHistoryButtons(meta);
     for (const locale of Object.keys(locales)) {
       const option = document.createElement("option"); option.value = locale; option.textContent = locale;
