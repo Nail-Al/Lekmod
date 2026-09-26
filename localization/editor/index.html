@@ -76,6 +76,7 @@
       <button id="redo" disabled>Redo saved edit</button>
       <button id="share" disabled>Download translation ZIP</button>
       <button id="gamexml">Download test game XML</button>
+      <button id="stop">Close editor</button>
     </div>
     <p class="hint">The ZIP is for a reviewer. The game XML is for a separate local test copy of Lekmod; it is not a complete mod.</p>
     <p id="message" role="status"></p>
@@ -261,6 +262,12 @@
   byId("gamexml").addEventListener("click", () => {
     window.location.href = "/api/game-xml";
     status("Test XML download started. Use it only with a local test copy of Lekmod.");
+  });
+  byId("stop").addEventListener("click", async () => {
+    try {
+      await request("/api/stop", {});
+      status("Editor closed. You can close this browser tab.");
+    } catch (error) { status(error.message, true); }
   });
   byId("locale").addEventListener("change", () => { offset = 0; updateCategories(); });
   byId("category").addEventListener("change", () => { offset = 0; load(); });

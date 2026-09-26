@@ -34,7 +34,7 @@ in `LEKMOD/Override/CIV5Units_Mongol.xml`.
    **Download test game XML** downloads the generated Override file, not a
    complete mod. Use a separate local Lekmod test installation and follow its
    normal installation instructions before checking text in game.
-5. Close the command window, or press Ctrl+C in it, when finished. Your saved
+5. Click **Close editor** when finished, or close its command window. Your saved
    CSV remains in `localization/translations/` inside that extracted folder.
 
 The download contains a shared **hash baseline**, so you can translate Lekmod

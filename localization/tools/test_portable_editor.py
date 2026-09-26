@@ -9,9 +9,10 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import zipfile
@@ -90,19 +91,35 @@ def main() -> int:
                 "Origin": base, "X-Editor-Token": token.group(1),
                 "Content-Type": "application/json",
             })
-            with urlopen(undo, timeout=60) as response:
-                assert json.load(response)["redo_available"]
+            try:
+                with urlopen(undo, timeout=60) as response:
+                    assert json.load(response)["redo_available"]
+            except HTTPError as error:
+                raise RuntimeError(f"undo failed: {error.read().decode('utf-8')}") from error
             assert hashlib.sha256(game.read_bytes()).digest() == before
             print("Portable editor launch, classification, save, and undo passed.")
         except Exception:
             print(log.read_text(encoding="utf-8", errors="replace")[-8000:])
             raise
         finally:
-            process.terminate()
+            if process.poll() is None:
+                try:
+                    stop = Request(base + "/api/stop", data=b"{}", headers={
+                        "Origin": base, "X-Editor-Token": token.group(1),
+                        "Content-Type": "application/json",
+                    })
+                    with urlopen(stop, timeout=5):
+                        pass
+                except (NameError, AttributeError, URLError, TimeoutError):
+                    pass
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                                   capture_output=True)
+                else:
+                    process.terminate()
                 process.wait(timeout=10)
     return 0
 

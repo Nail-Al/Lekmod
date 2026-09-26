@@ -84,6 +84,14 @@ class EnglishSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(CatalogError, "markers"):
             sync.synchronize(self.source, self.game_xml, write=True)
 
+    def test_generated_xml_preserves_windows_checkout_line_endings(self):
+        """Save/undo hashes must remain stable for CRLF files on Windows."""
+        self.game_xml.write_bytes(self.original.replace("\n", "\r\n").encode("utf-8"))
+        original = self.game_xml.read_bytes()
+        sync.atomic_text(self.game_xml, self.original)
+        self.assertEqual(self.game_xml.read_bytes(), original)
+        self.assertEqual(sync.encoded_text(self.game_xml, self.original), original)
+
 
 if __name__ == "__main__":
     unittest.main()

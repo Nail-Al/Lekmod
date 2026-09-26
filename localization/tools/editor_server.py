@@ -14,6 +14,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 from xml.sax.saxutils import escape
@@ -347,6 +348,7 @@ class Editor:
         source = sync_primary_english.DEFAULT_ENGLISH
         game = build_shipped_localization.DEFAULT_SOURCE
         before = source.read_text(encoding="utf-8")
+        old_source = source.read_bytes()
         index = data.get("index")
         if not isinstance(index, int):
             raise CatalogError("invalid primary row")
@@ -364,11 +366,11 @@ class Editor:
         sync_primary_english.validate_source(replacement)
         old_game = game.read_bytes()
         old_game_hash = hashlib.sha256(old_game).hexdigest()
-        atomic_bytes(source, replacement.encode("utf-8"))
+        sync_primary_english.atomic_text(source, replacement)
         try:
             manage.prepare(manage.read_config(), self.snapshot)
         except Exception:
-            atomic_bytes(source, before.encode("utf-8"))
+            atomic_bytes(source, old_source)
             atomic_bytes(game, old_game)
             raise
         config = manage.read_config()["build"]
@@ -422,7 +424,7 @@ class Editor:
                     candidate, _ = build_shipped_localization.build_candidate(
                         self.snapshot, approvals=TRANSLATIONS,
                     )
-                    if hashlib.sha256(candidate.encode("utf-8")).hexdigest() != action[f"{target}_game_hash"]:
+                    if hashlib.sha256(sync_primary_english.encoded_text(game, candidate)).hexdigest() != action[f"{target}_game_hash"]:
                         raise CatalogError("game build changed since this save; saved edit was not replayed")
                     sync_primary_english.atomic_text(game, candidate)
             except Exception:
@@ -522,6 +524,10 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.replay(undo=True)
                 elif self.path == "/api/redo":
                     result = editor.replay(undo=False)
+                elif self.path == "/api/stop":
+                    self.respond(200, {"stopping": True})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
                 else:
                     self.respond(404, {"error": "not found"})
                     return

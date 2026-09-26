@@ -73,15 +73,24 @@ def atomic_text(path: Path, content: str) -> None:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", newline="", dir=path.parent,
+            mode="wb", dir=path.parent,
             prefix=f".{path.name}.", delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            handle.write(content)
+            handle.write(encoded_text(path, content))
         temporary.replace(path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def encoded_text(path: Path, content: str) -> bytes:
+    """Keep a Windows checkout's CRLF style in generated XML and hash checks."""
+    if path.is_file():
+        previous = path.read_bytes()
+        if previous.count(b"\r\n") and previous.count(b"\r\n") == previous.count(b"\n"):
+            content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+    return content.encode("utf-8")
 
 
 def bootstrap(source: Path, game_xml: Path) -> None:
