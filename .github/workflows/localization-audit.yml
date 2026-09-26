@@ -7,7 +7,6 @@ on:
       - "Lekmap/**"
       - "LEKMOD_DLL/**"
       - "LekmodInstaller/**"
-      - "tools/localization/**"
       - "localization/**"
       - ".github/workflows/localization-audit.yml"
   pull_request:
@@ -16,7 +15,6 @@ on:
       - "Lekmap/**"
       - "LEKMOD_DLL/**"
       - "LekmodInstaller/**"
-      - "tools/localization/**"
       - "localization/**"
       - ".github/workflows/localization-audit.yml"
   workflow_dispatch:
@@ -39,17 +37,5 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run localization audit
-        run: python tools/localization/audit_localization.py --strict
-
-      - name: Audit primary localization source
-        run: python tools/localization/audit_primary_localization.py --strict
-
-      - name: Check generated English game text
-        run: python tools/localization/sync_primary_english.py
-
-      - name: Inventory localization sources
-        run: python tools/localization/inventory_localization.py --strict
-
-      - name: Test localization tools
-        run: python -m unittest discover -s tools/localization/tests -v
+      - name: Run configured read-only checks
+        run: python -B localization/tools/manage.py check --ci

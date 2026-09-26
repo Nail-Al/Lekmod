@@ -17,6 +17,7 @@ from .common import (
 )
 from .sources import locale_entries
 from .taxonomy import classify_context
+from .vanilla_reference import value_hash
 
 
 def text_variant(
@@ -192,8 +193,9 @@ def build_catalog(
     ) = None,
     references: dict[str, list[dict[str, str]]] | None = None,
     repository_summary: dict[str, object] | None = None,
+    vanilla_hashes: dict[str, dict[str, str | None]] | None = None,
 ) -> dict:
-    """Classify English keys against frozen vanilla and group by context."""
+    """Classify against full local vanilla text or the pinned text-free index."""
     if source_report["summary"]["errors"]:
         raise CatalogError(
             "primary localization source contains audit errors"
@@ -237,13 +239,19 @@ def build_catalog(
             if vanilla_fields is None:
                 classification = "lekmod_new"
             elif "Text" in source_fields and (
-                source_fields.get("Text")
-                != vanilla_fields.get("Text")
+                value_hash(source_fields["Text"]) != vanilla_hashes[key]["Text"]
+                if vanilla_hashes is not None
+                else source_fields["Text"] != vanilla_fields.get("Text")
             ):
                 classification = "vanilla_modified"
-            elif explicit_metadata_changed(
-                source_fields,
-                vanilla_fields,
+            elif (
+                any(
+                    name in source_fields and value_hash(source_fields[name], metadata=True)
+                    != vanilla_hashes[key][name]
+                    for name in ("Gender", "Plurality")
+                )
+                if vanilla_hashes is not None
+                else explicit_metadata_changed(source_fields, vanilla_fields)
             ):
                 classification = "vanilla_metadata_only"
             else:

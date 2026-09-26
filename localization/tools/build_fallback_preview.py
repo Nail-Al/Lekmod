@@ -16,7 +16,7 @@ from lekmod_localization.sources import load_repository_localizations
 from lekmod_localization.vanilla_snapshot import read_snapshot
 
 
-DEFAULT_PREVIEW = REPO_ROOT / "build" / "localization" / "fallback-preview"
+DEFAULT_PREVIEW = REPO_ROOT / "localization" / "workspace" / "fallback-preview"
 
 
 def build_preview(

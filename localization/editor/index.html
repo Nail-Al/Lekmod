@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lekmod · редактор локализации</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #222a35; background: #f5f7fb; }
+    body { margin: 0; }
+    header { padding: 18px 24px; background: #172b44; color: white; }
+    h1 { font-size: 1.3rem; margin: 0 0 5px; }
+    header p { margin: 0; color: #c7d6e8; font-size: .9rem; }
+    main { padding: 16px 24px; display: grid; gap: 14px; }
+    .bar, .panel, .grid { background: white; border: 1px solid #dce3eb; border-radius: 9px; }
+    .bar { padding: 12px; display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+    label { font-size: .85rem; display: grid; gap: 4px; }
+    select, input, textarea, button { font: inherit; }
+    select, input, textarea { border: 1px solid #aebbc9; border-radius: 5px; padding: 7px 9px; background: white; }
+    #search { min-width: 260px; }
+    button { border: 0; border-radius: 5px; padding: 9px 14px; background: #20578e; color: white; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    details { position: relative; }
+    details summary { cursor: pointer; }
+    .columns { position: absolute; z-index: 2; right: 0; width: 225px; max-height: 320px; overflow: auto;
+      padding: 12px; box-shadow: 0 8px 18px #162c4350; background: white; border: 1px solid #dce3eb; }
+    .columns label { display: flex; align-items: center; gap: 7px; padding: 3px 0; }
+    .grid { overflow: auto; max-height: 59vh; }
+    table { border-collapse: collapse; width: 100%; min-width: 1080px; table-layout: auto; }
+    th, td { border-bottom: 1px solid #e6ebf0; padding: 9px; text-align: left; vertical-align: top;
+      min-width: 115px; max-width: 430px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    th { position: sticky; top: 0; background: #edf3f8; resize: horizontal; overflow: auto; z-index: 1; }
+    tr:hover, tr.selected { background: #e8f1fa; cursor: pointer; }
+    table.nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pager { display: flex; gap: 12px; align-items: center; padding: 8px 12px; }
+    .panel { padding: 16px; }
+    .panel h2 { font-size: 1.1rem; margin: 0 0 8px; }
+    .panel p { margin: 5px 0 12px; }
+    .panel textarea { width: min(100%, 960px); min-height: 115px; box-sizing: border-box; resize: both; }
+    .fields { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+    .fields input { width: 200px; }
+    .hint { color: #5d6d80; font-size: .85rem; }
+    .stale { color: #a1411d; font-weight: 700; }
+    #message { min-height: 21px; font-weight: 600; }
+    @media (max-width: 720px) { main { padding: 10px; } .bar { align-items: stretch; } #search { min-width: 0; } }
+  </style>
+</head>
+<body>
+<header><h1>Lekmod · локализация</h1><p>Локальный редактор. Игровой XML обновляется после сохранения одобренного перевода.</p></header>
+<main>
+  <section class="bar">
+    <label>Язык<select id="locale"></select></label>
+    <label>Категория<select id="category"></select></label>
+    <label>Поиск<input id="search" placeholder="Ключ или часть текста"></label>
+    <label><span>Отображение</span><span><input type="checkbox" id="wrap" checked> Перенос строк</span></label>
+    <details><summary>Столбцы</summary><div class="columns" id="columns"></div></details>
+  </section>
+  <section class="grid">
+    <table id="table"><thead></thead><tbody></tbody></table>
+    <div class="pager"><button id="prev">Назад</button><span id="count"></span><button id="next">Дальше</button></div>
+  </section>
+  <section class="panel" id="panel">
+    <h2 id="selected">Выберите строку в таблице</h2>
+    <p id="context" class="hint"></p>
+    <label>Текст<textarea id="translation" disabled></textarea></label>
+    <div class="fields" id="grammar">
+      <label>Gender<input id="gender" disabled></label>
+      <label>Plurality<input id="plurality" disabled></label>
+      <label>Заметка переводчика<input id="note" disabled></label>
+    </div>
+    <p id="characters" class="hint"></p>
+    <button id="save" disabled>Сохранить и применить</button>
+    <p id="message" role="status"></p>
+  </section>
+</main>
+<script>
+  const token = "{{TOKEN}}";
+  const byId = id => document.getElementById(id);
+  const columns = [
+    ["key", "Ключ"], ["classification", "Тип"], ["vanilla_en_US", "Vanilla EN"],
+    ["vanilla_target", "Vanilla перевод"], ["lekmod_en_US", "Lekmod EN"],
+    ["lekmod_target", "Lekmod перевод"], ["translation", "Мой перевод"],
+    ["translation_status", "Состояние"], ["translation_characters", "Символы"]
+  ];
+  const primaryColumns = [["key", "Ключ"], ["kind", "Операция"],
+    ["text", "Английский текст"], ["characters", "Символы"]];
+  let locales = {}, offset = 0, total = 0, chosen = null, primary = false;
+  const selectedColumns = new Set([...columns, ...primaryColumns].map(([name]) => name));
+  let pendingSearch;
+
+  async function request(path, body) {
+    const options = body === undefined ? {} : {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Editor-Token": token},
+      body: JSON.stringify(body)
+    };
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Не удалось выполнить запрос");
+    return data;
+  }
+  function status(text, error = false) {
+    byId("message").textContent = text;
+    byId("message").style.color = error ? "#a62d24" : "#1f6b3a";
+  }
+  function updateCategories() {
+    const locale = byId("locale").value, select = byId("category");
+    select.replaceChildren();
+    for (const [value, label] of [["primary", "Primary · английский"],
+          ...(locales[locale] || []).map(name => [name, name])]) {
+      const option = document.createElement("option");
+      option.value = value; option.textContent = label; select.append(option);
+    }
+    select.value = (locales[locale] || [])[0] || "primary";
+    load();
+  }
+  function updateColumns() {
+    const items = primary ? primaryColumns : columns;
+    byId("columns").replaceChildren();
+    for (const [name, title] of items) {
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox"; check.checked = selectedColumns.has(name);
+      check.addEventListener("change", () => {
+        check.checked ? selectedColumns.add(name) : selectedColumns.delete(name);
+        load();
+      });
+      label.append(check, document.createTextNode(title));
+      byId("columns").append(label);
+    }
+  }
+  function charCount(value) {
+    return Array.from(value.trim().replace(/\s+/g, " ")).length;
+  }
+  function showRow(row, tr) {
+    chosen = row;
+    document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
+    tr.classList.add("selected");
+    byId("selected").textContent = row.key + (primary ? " · English" : " · " + byId("locale").value);
+    byId("translation").disabled = false; byId("save").disabled = false;
+    byId("translation").value = primary ? row.text : row.translation;
+    byId("grammar").hidden = primary;
+    for (const [field, id] of [["translation_gender", "gender"], ["translation_plurality", "plurality"],
+                               ["translator_note", "note"]]) {
+      byId(id).disabled = primary; byId(id).value = row[field] || "";
+    }
+    byId("context").textContent = primary
+      ? "Источник: localization/en_US/primary.xml · дата последнего коммита загружается…"
+      : "Тип: " + row.classification + " · состояние: " + row.translation_status +
+        (row.translation_status === "stale" ? " · прежний перевод не применяется в игре" : "") +
+        " · обязательные маркеры: " + row.required_format_tokens +
+        " · дата английской строки загружается…";
+    byId("context").className = row.translation_status === "stale" ? "stale" : "hint";
+    byId("characters").textContent = "Символов: " + charCount(byId("translation").value) +
+      (primary ? "" : " · English: " + row.lekmod_en_US_characters);
+    const historyPath = primary ? "/api/history?index=" + row.index
+      : "/api/history?key=" + encodeURIComponent(row.key);
+    request(historyPath).then(history => {
+      if (chosen !== row) return;
+      byId("context").textContent = (primary ? "" : byId("context").textContent.replace(
+        " · дата английской строки загружается…", "") + " · ") +
+        "Последнее изменение английской строки в Git: " +
+        (history.committed_at || "ещё не зафиксировано") +
+        (history.commit ? " · " + history.commit.slice(0, 8) : "");
+    }).catch(() => {
+      if (chosen === row) byId("context").textContent += " · дата изменения в Git недоступна";
+    });
+    status("");
+  }
+  async function load() {
+    primary = byId("category").value === "primary";
+    chosen = null;
+    byId("save").disabled = true; byId("translation").disabled = true;
+    byId("selected").textContent = "Выберите строку в таблице";
+    updateColumns();
+    try {
+      const args = new URLSearchParams({q: byId("search").value, offset});
+      if (!primary) { args.set("locale", byId("locale").value); args.set("category", byId("category").value); }
+      const result = await request((primary ? "/api/primary?" : "/api/rows?") + args);
+      total = result.total;
+      const names = (primary ? primaryColumns : columns).filter(([name]) => selectedColumns.has(name));
+      const head = document.createElement("tr");
+      for (const [, label] of names) { const th = document.createElement("th"); th.textContent = label; head.append(th); }
+      document.querySelector("thead").replaceChildren(head);
+      const body = document.querySelector("tbody"); body.replaceChildren();
+      for (const row of result.rows) {
+        const tr = document.createElement("tr");
+        for (const [field] of names) { const td = document.createElement("td"); td.textContent = row[field] || ""; tr.append(td); }
+        tr.addEventListener("click", () => showRow(row, tr)); body.append(tr);
+      }
+      byId("count").textContent = total ? `${offset + 1}–${Math.min(offset + 60, total)} из ${total}` : "Строк нет";
+      byId("prev").disabled = offset === 0; byId("next").disabled = offset + 60 >= total;
+      status("");
+    } catch (error) { status(error.message, true); }
+  }
+  byId("translation").addEventListener("input", () => {
+    byId("characters").textContent = "Символов: " + charCount(byId("translation").value) +
+      (primary ? "" : " · English: " + (chosen?.lekmod_en_US_characters || ""));
+  });
+  byId("save").addEventListener("click", async () => {
+    if (!chosen) return;
+    byId("save").disabled = true; status("Сохраняю и проверяю…");
+    try {
+      let saved;
+      if (primary) {
+        saved = await request("/api/primary", {index: chosen.index, key: chosen.key,
+          old_text: chosen.text, text: byId("translation").value});
+      } else {
+        saved = await request("/api/translate", {locale: byId("locale").value, category: byId("category").value,
+          key: chosen.key, source_fingerprint: chosen.source_fingerprint,
+          translation: byId("translation").value, translation_gender: byId("gender").value,
+          translation_plurality: byId("plurality").value, translator_note: byId("note").value});
+      }
+      await load(); status(saved.applied_to_game === false
+        ? "Изменение сохранено. Сборка XML выключена в config.json."
+        : "Сохранено. Изменённые файлы появятся в Git.");
+    } catch (error) { status(error.message, true); byId("save").disabled = false; }
+  });
+  byId("locale").addEventListener("change", () => { offset = 0; updateCategories(); });
+  byId("category").addEventListener("change", () => { offset = 0; load(); });
+  byId("search").addEventListener("input", () => {
+    clearTimeout(pendingSearch); pendingSearch = setTimeout(() => { offset = 0; load(); }, 250);
+  });
+  byId("wrap").addEventListener("change", () => {
+    byId("table").classList.toggle("nowrap", !byId("wrap").checked);
+  });
+  byId("prev").addEventListener("click", () => { offset -= 60; load(); });
+  byId("next").addEventListener("click", () => { offset += 60; load(); });
+  request("/api/meta").then(meta => {
+    locales = meta.locales;
+    for (const locale of Object.keys(locales)) {
+      const option = document.createElement("option"); option.value = locale; option.textContent = locale;
+      byId("locale").append(option);
+    }
+    byId("locale").value = locales.RU_RU ? "RU_RU" : Object.keys(locales)[0];
+    updateCategories();
+  }).catch(error => status(error.message, true));
+</script>
+</body>
+</html>

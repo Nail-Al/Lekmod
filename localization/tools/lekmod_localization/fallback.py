@@ -109,8 +109,8 @@ def write_preview(
 ) -> None:
     """Replace only generated review output, never a game or input directory."""
     destination = destination.resolve()
-    if not destination.is_relative_to((root / "build" / "localization").resolve()):
-        raise CatalogError("fallback preview must stay under build/localization")
+    if not destination.is_relative_to((root / "localization" / "workspace").resolve()):
+        raise CatalogError("fallback preview must stay under localization/workspace")
     if snapshot.resolve().is_relative_to(destination):
         raise CatalogError("fallback preview cannot contain the vanilla snapshot")
     destination.parent.mkdir(parents=True, exist_ok=True)

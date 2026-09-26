@@ -22,7 +22,7 @@ developer approval and an in-game test.
   and stops when a draft has become stale.
 - Conflicting English sources remain in `review/source-conflicts.json`; the
   generator neither chooses a winner nor applies a fix.
-- The editor and review workspaces remain under ignored `build/localization`
+- The editor and review workspaces remain under ignored `localization/workspace`
   paths. The separate `build_shipped_localization.py --write` command updates
   only a marked section of the loaded Override XML after source checks.
 - Game verification of fallback, Art load order, and approved translations is

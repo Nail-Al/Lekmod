@@ -605,7 +605,7 @@ def write_report(destination: Path, report: dict, root: Path, inputs: list[str])
     if destination.suffix.lower() != ".json":
         raise ValueError("The report path must end in .json")
     if destination in {(root / p).resolve() for p in inputs}:
-        raise ValueError("The report must not overwrite a repository input; use build/localization/inventory.json")
+        raise ValueError("The report must not overwrite a repository input; use localization/workspace/inventory.json")
     if destination.is_relative_to(root):
         relative = destination.relative_to(root)
         if relative.parts[0] in SOURCE_ROOTS:

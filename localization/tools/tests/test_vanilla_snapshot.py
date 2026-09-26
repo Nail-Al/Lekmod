@@ -17,6 +17,9 @@ from lekmod_localization.vanilla_snapshot import (
     verify_snapshot,
     write_snapshot,
 )
+from lekmod_localization.vanilla_reference import (
+    read_reference, verify_snapshot_reference, write_reference,
+)
 
 
 class VanillaSnapshotTests(unittest.TestCase):
@@ -65,6 +68,26 @@ class VanillaSnapshotTests(unittest.TestCase):
         self.assertEqual(read_snapshot(self.snapshot)[0]["RU_RU"][
             "TXT_KEY_BUILDING_MARKET"
         ]["Text"], "Рынок")
+
+    def test_pinned_reference_rejects_a_different_locale_without_storing_text(self):
+        """A team member cannot silently switch to another vanilla database."""
+        write_snapshot(self.database, self.snapshot)
+        reference = self.snapshot.parent / "vanilla-fingerprints.json.gz"
+        write_reference(self.snapshot, reference)
+        verify_snapshot_reference(self.snapshot, reference)
+        data = read_reference(reference)
+        self.assertEqual(len(data["english"]), 1)
+        self.assertNotIn("Рынок", str(data))
+        with closing(sqlite3.connect(self.database)) as database:
+            database.execute(
+                "UPDATE Language_RU_RU SET Text=? WHERE Tag=?",
+                ("Другой текст", "TXT_KEY_BUILDING_MARKET"),
+            )
+            database.commit()
+        changed = self.snapshot.parent / "changed.json.gz"
+        write_snapshot(self.database, changed)
+        with self.assertRaisesRegex(CatalogError, "pinned team reference"):
+            verify_snapshot_reference(changed, reference)
 
     def test_tampered_snapshot_or_lekmod_sentinel_is_rejected(self):
         """Loaders reject changed rows and databases containing Lekmod text."""

@@ -47,6 +47,7 @@ EDITOR_FIELDNAMES = (
     "target_change",
     "required_format_tokens",
     "source_fingerprint",
+    "translation_source_fingerprint",
     "translation",
     "translation_characters",
     "translation_gender",
@@ -261,6 +262,9 @@ def build_editor_rows(
                         "source_fingerprint": (
                             editor_source_fingerprint(key, entry)
                         ),
+                        "translation_source_fingerprint": (
+                            editor_source_fingerprint(key, entry)
+                        ),
                         "translation": translation,
                         "translation_characters": (
                             character_count(translation)
@@ -318,7 +322,8 @@ def load_editor_edits(
 
     if manifest.get("schema_version") != 1:
         raise CatalogError("unsupported editor workspace schema")
-    if manifest.get("fieldnames") != list(EDITOR_FIELDNAMES):
+    old_fieldnames = [name for name in EDITOR_FIELDNAMES if name != "translation_source_fingerprint"]
+    if manifest.get("fieldnames") not in (list(EDITOR_FIELDNAMES), old_fieldnames):
         raise CatalogError("editor workspace columns have changed")
 
     expected_files = {
@@ -345,10 +350,7 @@ def load_editor_edits(
             ) as handle:
                 reader = csv.DictReader(handle)
                 fieldnames = reader.fieldnames or []
-                if (
-                    len(fieldnames) != len(EDITOR_FIELDNAMES)
-                    or set(fieldnames) != set(EDITOR_FIELDNAMES)
-                ):
+                if fieldnames not in (list(EDITOR_FIELDNAMES), old_fieldnames):
                     raise CatalogError(
                         f"unexpected columns in editor CSV: {path}"
                     )
@@ -369,6 +371,9 @@ def load_editor_edits(
                         "source_fingerprint": row.get(
                             "source_fingerprint", ""
                         ),
+                        "translation_source_fingerprint": row.get(
+                            "translation_source_fingerprint"
+                        ) or row.get("source_fingerprint", ""),
                         "lekmod_target_status": row.get(
                             "lekmod_target_status", ""
                         ),
@@ -423,13 +428,6 @@ def merge_editor_edits(
             )
 
         row = rows_by_identity[identity]
-        if edit["source_fingerprint"] != row["source_fingerprint"]:
-            locale, key = identity
-            raise CatalogError(
-                "Lekmod English changed after the editor row was "
-                f"created: {locale}/{key}; review it before refreshing"
-            )
-
         old_target_was_present = (
             edit["lekmod_target_status"] == "present"
         )
@@ -454,9 +452,12 @@ def merge_editor_edits(
                 )
             )
 
-        if edit["translator_note"] or not translation_was_default:
+        if edit["translator_note"] or not translation_was_default or (
+            edit["translation_source_fingerprint"] != edit["source_fingerprint"]
+        ):
             for field in EDITOR_TRANSLATION_FIELDS:
                 row[field] = edit[field]
+            row["translation_source_fingerprint"] = edit["translation_source_fingerprint"]
         row["translator_note"] = edit["translator_note"]
 
         translation = str(row["translation"])
@@ -474,6 +475,10 @@ def merge_editor_edits(
                 "plurality": row["lekmod_target_plurality"],
             },
         )
+        if row["translation_source_fingerprint"] != row["source_fingerprint"] and (
+            translation or row["translator_note"]
+        ):
+            row["translation_status"] = "stale"
 
 
 def write_json_atomic(path: Path, value: object) -> None:

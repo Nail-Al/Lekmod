@@ -239,7 +239,7 @@ UPDATE Language_RU_RU SET Gender='feminine' WHERE Tag='TXT_KEY_SQL';''')
         with self.assertRaises(ValueError):
             inv.write_report(self.root / "report.xml", report, self.root, self.paths)
         self.assertEqual(source.read_text(), '{"keep": true}')
-        output = self.root / "build/localization/inventory.json"
+        output = self.root / "localization/workspace/inventory.json"
         inv.write_report(output, report, self.root, self.paths)
         inv.write_report(output, report, self.root, self.paths)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8")), report)

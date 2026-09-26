@@ -20,6 +20,7 @@ import build_fallback_preview as fallback_builder
 import build_shipped_localization as shipped_builder
 import sync_primary_english
 from lekmod_localization.vanilla_snapshot import read_snapshot, write_snapshot
+from lekmod_localization.vanilla_reference import write_reference
 from lekmod_localization.fallback import fallback_entries, preview_files, write_preview
 from lekmod_localization.shipped import approved_entries, install_candidate, read_approvals
 from lekmod_localization.workspace import editor_source_fingerprint
@@ -329,7 +330,7 @@ class LocalizationCatalogTests(unittest.TestCase):
         self.assertEqual(manifest["empty_english_text_keys"], [])
         self.assertEqual(manifest["status"], "review_only_not_installed")
 
-        output = self.root / "build" / "localization" / "fallback-preview"
+        output = self.root / "localization" / "workspace" / "fallback-preview"
         write_preview(output, files, database, root=self.root)
         self.assertEqual((output / "RU_RU.xml").read_bytes(), files["RU_RU.xml"])
         (output / "RU_RU.xml").write_text("manual edit", encoding="utf-8")
@@ -378,7 +379,7 @@ class LocalizationCatalogTests(unittest.TestCase):
         english_source = self.root / "localization" / "en_US" / "primary.xml"
         sync_primary_english.bootstrap(english_source, source)
         art = self.art()
-        output = self.root / "build" / "localization" / "fallback-preview"
+        output = self.root / "localization" / "workspace" / "fallback-preview"
         summary = fallback_builder.build_preview(
             snapshot, output, source, english_source, art, root=self.root,
         )
@@ -455,9 +456,20 @@ class LocalizationCatalogTests(unittest.TestCase):
         )
         self.assertEqual((candidate, summary), (second, second_summary))
 
+        reference = self.root / "vanilla-fingerprints.json.gz"
+        write_reference(snapshot, reference)
+        from_reference, reference_summary = shipped_builder.build_candidate(
+            None, source, english_source, self.root / "LEKMOD" / "Art",
+            approval_path, root=self.root, reference_path=reference,
+        )
+        self.assertEqual((candidate, summary), (from_reference, reference_summary))
+
         approval["source_fingerprint"] = "stale"
-        with self.assertRaisesRegex(catalog_builder.CatalogError, "stale"):
-            approved_entries(catalog, ["RU_RU", "DE_DE"], {"RU_RU": {key: approval}})
+        stale_entries, stale_counts = approved_entries(
+            catalog, ["RU_RU", "DE_DE"], {"RU_RU": {key: approval}},
+        )
+        self.assertEqual(stale_counts["RU_RU"], 0)
+        self.assertEqual(stale_entries["RU_RU"][key]["Text"], "New building")
         approval["source_fingerprint"] = editor_source_fingerprint(key, entry)
         approval["text"] = "Оборвана {1_Num}"
         with self.assertRaisesRegex(catalog_builder.CatalogError, "tokens"):
@@ -902,7 +914,7 @@ WHERE Tag IN ('TXT_KEY_SQL');
         )
 
     def test_editor_csv_preserves_edits_and_detects_stale_sources(self):
-        """Preserve drafts but stop refreshes after English source changes."""
+        """Preserve drafts and mark them stale after English changes."""
         (
             database,
             source,
@@ -1060,24 +1072,22 @@ WHERE Tag IN ('TXT_KEY_SQL');
             str(len("Перевод, с запятой и новой строкой")),
         )
 
-        # A changed English source blocks stale drafts before replacement.
-        before_failed_refresh = buildings_path.read_bytes()
+        # A changed English source keeps the draft but withholds approval.
         review[0]["buildings"]["subcategories"]["names"][
             "TXT_KEY_BUILDING_CHANGED"
         ]["lekmod_en_US"]["text"] = "Changed after translation"
-        with self.assertRaisesRegex(
-            catalog_builder.CatalogError,
-            "English changed",
-        ):
-            catalog_builder.write_editor_workspace(
-                output,
-                {"RU_RU": review},
-                source,
-                database,
+        catalog_builder.write_editor_workspace(
+            output, {"RU_RU": review}, source, database,
+        )
+        with buildings_path.open(encoding="utf-8-sig", newline="") as handle:
+            stale = next(
+                row for row in csv.DictReader(handle)
+                if row["key"] == "TXT_KEY_BUILDING_CHANGED"
             )
-        self.assertEqual(
-            buildings_path.read_bytes(),
-            before_failed_refresh,
+        self.assertEqual(stale["translation"], draft)
+        self.assertEqual(stale["translation_status"], "stale")
+        self.assertNotEqual(
+            stale["translation_source_fingerprint"], stale["source_fingerprint"],
         )
 
     def test_generated_workspace_is_atomic_and_protects_inputs(self):

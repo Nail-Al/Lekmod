@@ -40,6 +40,7 @@ LEKMOD_DLL/CvGameCoreDLL_Expansion2/BuildTemp/
 
 
 # Python
+/localization/workspace/
 __pycache__/
 *.py[cod]
 *$py.class

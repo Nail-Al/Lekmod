@@ -31,6 +31,7 @@ from lekmod_localization.sources import (
 )
 from lekmod_localization.taxonomy import classify_context
 from lekmod_localization.vanilla_snapshot import read_snapshot
+from lekmod_localization.vanilla_reference import DEFAULT_REFERENCE, verify_snapshot_reference
 from lekmod_localization.workspace import (
     EDITOR_EDITABLE_FIELDS,
     EDITOR_FIELDNAMES,
@@ -189,6 +190,10 @@ def main() -> int:
             if args.vanilla_snapshot
             else load_vanilla_locales(vanilla_input)
         )
+        if args.vanilla_snapshot and DEFAULT_REFERENCE.is_file() and (
+            args.source.resolve() == DEFAULT_SOURCE.resolve()
+        ):
+            verify_snapshot_reference(vanilla_input)
         available = sorted(all_vanilla, key=str.casefold)
         english_locale, target_locales = select_locales(
             args.locale,

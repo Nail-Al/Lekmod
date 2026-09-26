@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
-from .common import CatalogError, PLACEHOLDER_RE, SOURCE_LOCALE, token_counts
+from .common import CatalogError, KEY_RE, PLACEHOLDER_RE, SOURCE_LOCALE, token_counts
 from .fallback import fallback_entries
 from .workspace import editor_source_fingerprint
 
@@ -21,7 +22,33 @@ EMPTY_LANGUAGE = re.compile(
 
 
 def read_approvals(path: Path) -> dict:
-    """Require explicit, pinned approval; a draft CSV is never shipped."""
+    """Read tracked per-language CSV approvals, or a legacy JSON fixture."""
+    if path.is_dir():
+        result = {}
+        for file in sorted(path.glob("*.csv")):
+            locale = file.stem
+            if not re.fullmatch(r"[A-Za-z0-9_]+", locale):
+                raise CatalogError(f"invalid translation filename: {file}")
+            with file.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                expected = ["key", "source_fingerprint", "text", "gender", "plurality", "translator_note"]
+                if reader.fieldnames != expected:
+                    raise CatalogError(f"invalid translation columns: {file}")
+                rows = {}
+                for row in reader:
+                    key = row["key"]
+                    fingerprint = row["source_fingerprint"]
+                    if not KEY_RE.fullmatch(key) or key in rows or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                        raise CatalogError(f"invalid or repeated translation key: {file} {key}")
+                    if not row["text"] or None in row or any(value is None for value in row.values()):
+                        raise CatalogError(f"incomplete translation: {file} {key}")
+                    rows[key] = {
+                        "source_fingerprint": fingerprint,
+                        "text": row["text"],
+                        **{field: row[field] for field in ("gender", "plurality") if row[field]},
+                    }
+                result[locale] = rows
+        return result
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -62,10 +89,10 @@ def approved_entries(
         for key, approval in translated.items():
             if key not in source or not isinstance(approval, dict):
                 raise CatalogError(f"unknown approved key: {locale} {key}")
-            if approval.get("source_fingerprint") != editor_source_fingerprint(
-                key, source[key]
-            ):
-                raise CatalogError(f"stale approved translation: {locale} {key}")
+            if approval.get("source_fingerprint") != editor_source_fingerprint(key, source[key]):
+                # Preserve the old CSV row for review; the game receives English
+                # fallback until someone approves it against the new English.
+                continue
             text = approval.get("text")
             if not isinstance(text, str) or (not text and fallback[key]["Text"]):
                 raise CatalogError(f"empty approved translation: {locale} {key}")

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "checks": {
+    "art": "On",
+    "primary": "On",
+    "english_sync": "On",
+    "inventory": "On",
+    "unit_tests": "On",
+    "shipped": "On"
+  },
+  "build": {
+    "english": "On",
+    "catalog": "On",
+    "shipped": "On"
+  }
+}

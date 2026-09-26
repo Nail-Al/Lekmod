@@ -13,9 +13,10 @@ DEFAULT_SOURCE = (
     REPO_ROOT / "LEKMOD" / "Override" / "CIV5Units_Mongol.xml"
 )
 DEFAULT_ART_ROOT = REPO_ROOT / "LEKMOD" / "Art"
-DEFAULT_OUTPUT = REPO_ROOT / "build" / "localization" / "catalog.json"
-DEFAULT_REVIEW_OUTPUT = REPO_ROOT / "build" / "localization" / "review"
-DEFAULT_EDITOR_OUTPUT = REPO_ROOT / "build" / "localization" / "editor"
+WORKSPACE = REPO_ROOT / "localization" / "workspace"
+DEFAULT_OUTPUT = WORKSPACE / "catalog.json"
+DEFAULT_REVIEW_OUTPUT = WORKSPACE / "review"
+DEFAULT_EDITOR_OUTPUT = WORKSPACE / "editor"
 SOURCE_LOCALE = "en_US"
 TRANSLATABLE_FIELDS = ("Text", "Gender", "Plurality")
 
