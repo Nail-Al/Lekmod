@@ -15,12 +15,14 @@ SUPPORTED_OPERATIONS = {"Row", "Replace", "Update", "Delete"}
 
 
 def local_name(tag: object) -> str:
+    """Remove an XML namespace from an operation or column tag."""
     if not isinstance(tag, str):
         return ""
     return tag.rsplit("}", 1)[-1]
 
 
 def read_columns(element: ET.Element) -> tuple[dict[str, str], list[str]]:
+    """Read XML attributes and child columns, normalizing their names."""
     columns = dict(element.attrib)
     warnings: list[str] = []
 
@@ -45,6 +47,7 @@ def read_columns(element: ET.Element) -> tuple[dict[str, str], list[str]]:
 
 
 def parse_source(path: Path, locale: str) -> dict:
+    """Apply ordered English operations and report malformed selectors."""
     issues: list[dict[str, object]] = []
     operations: list[dict[str, object]] = []
 
@@ -180,6 +183,7 @@ def parse_source(path: Path, locale: str) -> dict:
 
 
 def source_name(path: Path) -> str:
+    """Describe a source path relative to the repository when possible."""
     try:
         return path.resolve().relative_to(REPO_ROOT).as_posix()
     except ValueError:
@@ -187,6 +191,7 @@ def source_name(path: Path) -> str:
 
 
 def write_report(path: Path, report: dict, source: Path) -> None:
+    """Write the JSON audit outside shipped game data atomically."""
     destination = path.resolve()
     if destination.suffix.lower() != ".json":
         raise ValueError("report path must end in .json")
@@ -208,6 +213,7 @@ def write_report(path: Path, report: dict, source: Path) -> None:
 
 
 def main() -> int:
+    """Run the primary English audit and optional key inspection."""
     parser = argparse.ArgumentParser(
         description="Audit the primary English localization XML used by Lekmod."
     )

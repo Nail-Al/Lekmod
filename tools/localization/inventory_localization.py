@@ -48,9 +48,11 @@ class XmlNode:
 
     @property
     def text(self) -> str:
+        """Join text chunks retained from an XML node and its children."""
         return "".join(self.parts)
 
     def child(self, name: str) -> XmlNode | None:
+        """Look up the first direct XML child with this local name."""
         return next((c for c in self.children if c.tag == name), None)
 
 
@@ -61,6 +63,7 @@ def parse_xml(data: bytes) -> XmlNode:
     roots: list[XmlNode] = []
 
     def start(name: str, attrs: dict[str, str]) -> None:
+        """Record a source line and push a new XML node onto the stack."""
         node = XmlNode(name.rsplit("}", 1)[-1], attrs, parser.CurrentLineNumber)
         if stack:
             stack[-1].children.append(node)
@@ -69,16 +72,19 @@ def parse_xml(data: bytes) -> XmlNode:
         stack.append(node)
 
     def end(name: str) -> None:
+        """Close an XML node and propagate only relevant scalar text."""
         node = stack.pop()
         # Only scalar values need their text. Do not duplicate entire documents.
         if stack and stack[-1].tag in {"Text", "Gender", "Plurality", "Tag"}:
             stack[-1].parts.append(node.text)
 
     def characters(value: str) -> None:
+        """Retain character data needed for localization fields."""
         if stack:
             stack[-1].parts.append(value)
 
     def reject_doctype(*args: object) -> None:
+        """Reject external declarations before accepting an XML document."""
         raise ValueError("DOCTYPE declarations are not supported by the inventory")
 
     parser.StartElementHandler = start
@@ -90,6 +96,7 @@ def parse_xml(data: bytes) -> XmlNode:
 
 
 def columns(node: XmlNode | None) -> dict[str, str]:
+    """Read operation fields from XML attributes and scalar children."""
     if node is None:
         return {}
     values = dict(node.attrs)
@@ -101,6 +108,7 @@ def columns(node: XmlNode | None) -> dict[str, str]:
 
 
 def effective_extension(path: str) -> str:
+    """Choose an extension even for assets with an ignore suffix."""
     name = path.lower()
     if name.endswith(".ignore"):
         name = name[:-7]
@@ -108,6 +116,7 @@ def effective_extension(path: str) -> str:
 
 
 def scope_for(path: str) -> str:
+    """Classify a source path by repository area."""
     if path.startswith("LEKMOD/Override/"):
         return "override"
     if path.startswith("LEKMOD/Art/"):
@@ -127,14 +136,21 @@ def scope_for(path: str) -> str:
 
 def git_files(root: Path) -> list[str]:
     # Git's list includes .ignore templates and tracked files ignored by .gitignore.
+    """List versioned repository inputs through Git without editing them."""
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=root, capture_output=True, check=True,
     )
-    return sorted(set(p for p in result.stdout.decode("utf-8").split("\0") if p))
+    paths = {
+        path
+        for path in result.stdout.decode("utf-8").split("\0")
+        if path and (root / path).is_file()
+    }
+    return sorted(paths)
 
 
 def add_issue(report: dict, severity: str, path: str, line: int, code: str, message: str) -> None:
+    """Append a source diagnostic to the inventory report."""
     report["issues"].append({
         "severity": severity, "path": path, "line": line,
         "code": code, "message": message,
@@ -143,6 +159,7 @@ def add_issue(report: dict, severity: str, path: str, line: int, code: str, mess
 
 def add_literal(report: dict, path: str, line: int, kind: str, value: str, context: str) -> None:
     # Source-language escapes in code literals are intentionally not evaluated.
+    """Record a text candidate and any exact TXT_KEY tokens inside it."""
     record = {
         "path": path, "line": line, "scope": scope_for(path), "kind": kind,
         "value": value, "context": context,
@@ -162,6 +179,7 @@ def add_literal(report: dict, path: str, line: int, kind: str, value: str, conte
 
 
 def scan_xml(report: dict, path: str, data: bytes) -> str:
+    """Parse an XML file with line numbers and inventory its fields."""
     try:
         root = parse_xml(data)
     except (expat.ExpatError, ValueError) as error:
@@ -190,6 +208,7 @@ def scan_xml(report: dict, path: str, data: bytes) -> str:
     block_index = 0
 
     def visit(node: XmlNode, parent: str) -> None:
+        """Walk XML nodes and collect language writes and text references."""
         nonlocal block_index
         language = LANGUAGE_RE.fullmatch(node.tag)
         if language:
@@ -317,6 +336,7 @@ def source_tokens(text: str, extension: str) -> Iterator[tuple[int, int, str, st
 
 
 def scan_code(report: dict, path: str, data: bytes, extension: str) -> str:
+    """Lexically inspect code literals without executing source code."""
     try:
         if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
             text = data.decode("utf-32")
@@ -370,6 +390,7 @@ def scan_code(report: dict, path: str, data: bytes, extension: str) -> str:
 
 
 def summarize(report: dict) -> dict:
+    """Count coverage, collisions, and unresolved inventory findings."""
     groups: dict[tuple[str, str], Counter] = defaultdict(Counter)
     keys: dict[tuple[str, str], set[str]] = defaultdict(set)
     writes: dict[tuple[str, str, str], list[int]] = defaultdict(list)
@@ -460,6 +481,7 @@ def summarize(report: dict) -> dict:
 
 
 def inventory(root: Path, paths: list[str], require_primary: bool = True) -> dict:
+    """Classify tracked files and assemble a read-only source report."""
     root = root.resolve()
     report: dict = {
         "schema_version": 1,
@@ -522,6 +544,7 @@ def inventory(root: Path, paths: list[str], require_primary: bool = True) -> dic
 
 
 def print_summary(report: dict) -> None:
+    """Display the compact inventory and first reported issues."""
     summary = report["summary"]
     print(f"Inventoried files: {summary['files']}")
     print("XML writes by source area (not effective runtime strings):")
@@ -559,6 +582,7 @@ def print_summary(report: dict) -> None:
 
 
 def print_key(report: dict, key: str) -> None:
+    """Show every recorded occurrence of one exact text key."""
     print(f"\nOccurrences of {key}:")
     found = False
     for op in report["operations"]:
@@ -576,6 +600,7 @@ def print_key(report: dict, key: str) -> None:
 
 
 def write_report(destination: Path, report: dict, root: Path, inputs: list[str]) -> None:
+    """Persist the complete JSON report outside game source files."""
     destination = destination.resolve()
     if destination.suffix.lower() != ".json":
         raise ValueError("The report path must end in .json")
@@ -600,6 +625,7 @@ def write_report(destination: Path, report: dict, root: Path, inputs: list[str])
 
 
 def main() -> int:
+    """Run the repository inventory with optional JSON and key output."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT, help="Git working tree to inventory")
     parser.add_argument("--json", type=Path, metavar="PATH", help="Write the complete inventory to a new JSON report")

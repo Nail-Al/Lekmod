@@ -1,0 +1,2 @@
+# Imported verbatim from shipped XML. Normalize only through an audited migration.
+localization/en_US/primary.xml -whitespace

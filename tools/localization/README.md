@@ -1,154 +1,277 @@
-﻿# Localization Tools
+# Lekmod Localization Tools
 
-This directory contains tools for checking and maintaining Lekmod localization data.
+This directory contains checks, source synchronization, and the translation
+workspace generator. Game XML changes require an explicit write command;
+conflicting English sources are still kept for developer review.
 
-## Requirements
+Requirements: Python 3.10 or newer. No third-party packages are required.
+Run every command from the repository root.
 
-- Python 3.10 or newer
-- No third-party Python packages
+This is the single entry point for maintainers. `localization/en_US/primary.xml`
+and `localization/approved-translations.json` are editable inputs;
+`LEKMOD/Override/CIV5Units_Mongol.xml` is the loaded game file with generated
+language sections. Python files in `tests/` are current regression checks,
+not obsolete scripts. `__pycache__/` and `*.pyc` are disposable Python caches
+already ignored by Git. Git ignore rules do not hide files in VS Code's
+Explorer. Use `python -B` for future runs if you do not want Python to create
+those caches; existing caches can be removed without affecting source code.
 
-Run all commands from the repository root.
+## Practical scenarios
 
-## Art Localization Audit
+| When | Edit or run | Expected result |
+| --- | --- | --- |
+| Add a new civilization or a new `TXT_KEY_*` | Add gameplay references to the appropriate game-data file and English text to `localization/en_US/primary.xml`; run `sync_primary_english.py --write`, then `build_shipped_localization.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz --write` | English source stays editable in one place; generated game XML gains English and non-English fallback. |
+| Change a vanilla description | Edit its English operation in `primary.xml`; run the two `--write` commands above | The changed key receives English fallback in target locales; untouched vanilla keys are omitted. |
+| Prepare a translation | Run `build_localization_catalog.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz`, edit only the translator columns in `build/localization/editor/<locale>/*.csv`, then have a reviewer copy the chosen text and its `source_fingerprint` into `localization/approved-translations.json` | The next shipped build uses approved text for that locale and rejects a stale English fingerprint or broken formatting tokens. Draft CSV text never ships automatically. |
+| Review a source conflict | Open `build/localization/review/source-conflicts.json`, compare its English variants with actual gameplay, then record the chosen correction in `CHANGE_REVIEW.md` | Conflicting keys remain withheld until the source disagreement is corrected and the catalog rebuilt. |
+| Verify before a release | Run the commands in [Validation](#validation), `build_shipped_localization.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz --check`, and test a non-English client in Civ V | Static checks and generated game XML agree; the game test verifies load order and displayed text. |
 
-`audit_localization.py` checks localization files under `LEKMOD/Art`.
+Examples in the table use script names relative to `tools/localization/`;
+prefix them with `python tools/localization/` when running from the repo root.
 
-- `python tools/localization/audit_localization.py` - show the summary
-- `python tools/localization/audit_localization.py --locale RU_RU` - show details for one locale
-- `python tools/localization/audit_localization.py --strict` - run strict validation
-- `python tools/localization/audit_localization.py --help` - show all options
+## Layout
 
-The audit reports XML parsing errors, locale coverage, fallback placeholders, Cyrillic text, duplicate writes, conflicting writes, and SQL files that reference language tables.
+| Path | Responsibility |
+| --- | --- |
+| `audit_localization.py` | Validate localization definitions under `LEKMOD/Art` |
+| `audit_primary_localization.py` | Validate the primary English table in `LEKMOD/Override/CIV5Units_Mongol.xml` |
+| `inventory_localization.py` | Find localization definitions, key references, and text candidates across the repository |
+| `build_localization_catalog.py` | Build categorized JSON review data and per-language CSV files |
+| `sync_primary_english.py` | Keep the shipped English block in sync with its editable source |
+| `freeze_vanilla.py` | Create or verify one local reference of official language tables |
+| `build_fallback_preview.py` | Preview English fallback for new and changed keys without installing it |
+| `build_shipped_localization.py` | Generate and verify non-English rows in the loaded Override XML |
+| `lekmod_localization/` | Internal source loading, taxonomy, catalog, and workspace modules |
+| `tests/` | Regression and safety tests for the tools |
+| `CHANGE_REVIEW.md` | Developer approval and in-game test log for source changes |
 
-Strict mode fails when an XML file cannot be parsed or when different texts are assigned to the same key in one locale. Missing translations and fallback placeholders are reported but do not fail validation.
+The top-level Python files are the supported command-line entry points.
+Internal implementation is split by responsibility so source parsing, game
+classification, and output writing can be reviewed independently.
 
-## Primary Localization Audit
+## Validation
 
-`audit_primary_localization.py` checks the main English localization source:
+Run the checks individually:
 
-`LEKMOD/Override/CIV5Units_Mongol.xml`
+- `python tools/localization/audit_localization.py --strict`
+- `python tools/localization/audit_primary_localization.py --strict`
+- `python tools/localization/sync_primary_english.py`
+- `python tools/localization/inventory_localization.py --strict`
+- `python -m unittest discover -s tools/localization/tests -v`
 
-Run the validation with:
+The Art audit fails on invalid XML or conflicting writes within one locale.
+The primary audit validates ordered `Row`, `Replace`, `Update`, and `Delete`
+operations in `CIV5Units_Mongol.xml`. The repository inventory reports source
+locations and unsupported data without treating every code literal as
+player-facing text.
 
-`python tools/localization/audit_primary_localization.py --strict`
+The audits report evidence without automatic repairs. English synchronization
+has a separate explicit `--write` mode; its default is read-only.
 
-Inspect all operations for one key with:
+## English Source and Game XML
 
-`python tools/localization/audit_primary_localization.py --key TXT_KEY_LEKMOD_VERSION`
+The editable primary English source is `localization/en_US/primary.xml`. Its
+ordered `Language_en_US` operations were extracted verbatim from
+`LEKMOD/Override/CIV5Units_Mongol.xml`. The latter remains the installed game
+file: the editable file is not an XML include. Its English section is generated
+and protected by CI, while its gameplay tables remain in place. There is one
+manually maintained copy, although the game file necessarily contains a
+generated copy.
 
-Create a complete local JSON report with:
+For a new civilization, add gameplay rows and `TXT_KEY_*` references to the
+appropriate game-data file as usual. Add its English `<Row Tag="TXT_KEY_...">`
+entries **only** to `localization/en_US/primary.xml`. For a revised vanilla
+description, edit the existing `<Replace Tag="TXT_KEY_...">` there. Preserve
+formatting tokens, operation order, and any `Gender`/`Plurality` fields. Then:
 
-`python tools/localization/audit_primary_localization.py --strict --json build/localization/primary.json`
+```text
+python tools/localization/sync_primary_english.py --write
+python tools/localization/sync_primary_english.py
+python tools/localization/audit_primary_localization.py --strict
+python -m unittest discover -s tools/localization/tests -v
+```
 
-The primary audit:
-
-- reads `Row`, `Replace`, `Update`, and `Delete` operations
-- preserves their source order
-- retains `Text`, `Gender`, `Plurality`, and other columns
-- reports repeated write targets
-- accepts column names with different casing while reporting a warning
-- never modifies the source XML
-
-The generated JSON report belongs under `build/localization` and is not committed.
+Commit both the source and generated game XML. Do not manually edit the
+marked section of `CIV5Units_Mongol.xml`: CI rejects differences. Independent
+English definitions in `LEKMOD/Art` are not consolidated yet; the existing
+`source-conflicts.json` review remains necessary before that step.
 
 ## Translation Workspace
 
-`build_localization_catalog.py` builds the working material used for translation review. This is separate from the audits above.
+The generator compares three sources:
 
-The generator reads:
+- official Civilization V language tables from a clean
+  `Localization-Merged.db`;
+- current Lekmod English from `LEKMOD/Override/CIV5Units_Mongol.xml` and
+  supported localization files under `LEKMOD/Art`;
+- current Lekmod text for each target locale found under `LEKMOD/Art`.
 
-- the main English source at `LEKMOD/Override/CIV5Units_Mongol.xml`
-- XML and supported localization SQL definitions under `LEKMOD/Art`
-- the official language tables in a clean Civilization V `Localization-Merged.db`
+The database must come from an unmodified Civilization V cache. It is opened
+read-only and rejected if known Lekmod keys are present. This sentinel check
+cannot prove that every official string is pristine: verify the game
+installation before freezing the reference. Repository SQL is parsed as data
+using a restricted localization grammar and is never executed.
 
-Generate one target language with:
+Freeze the official tables once, and optionally verify them later:
 
-`python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db" --locale RU_RU`
+```text
+python tools/localization/freeze_vanilla.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db"
+python tools/localization/freeze_vanilla.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db" --check
+```
 
-Repeat `--locale` to generate several target languages. Omit it to generate every non-English locale found in the clean database.
+This creates `build/localization/vanilla-snapshot.json.gz` with every locale
+and a fingerprint per language. It refuses to overwrite an existing snapshot.
+Subsequent catalog runs can use `--vanilla-snapshot` instead of `--vanilla-db`,
+so changes to another installation cannot silently alter the reference. The
+full-text snapshot is ignored by Git and is not bundled in this patch. Check
+redistribution rights before adding official game strings to a public repo.
 
-Generated files are placed under `build/localization`:
+Generate every non-English locale present in the database:
 
-- `catalog.json` is the categorized English source index
-- `review/manifest.json` lists generated locales and source conflicts
-- `review/source-conflicts.json` contains only English source disagreements that require developer review
-- `review/<locale>/manifest.json` summarizes one target language
-- `review/<locale>/<category>.json` contains review entries grouped by game category and subcategory
+- `python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db"`
 
-Every review entry shows:
+Or use the frozen input:
 
-- `official_game` - the official target-language text, or `not_in_vanilla`
-- `lekmod_en_US` - the current Lekmod English text
-- `lekmod_target` - the current Lekmod text for the selected language
-- normalized character counts and Civilization V formatting tokens
-- source paths and database references used for classification
+- `python tools/localization/build_localization_catalog.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz`
 
-Target text is marked `present`, `missing`, `placeholder`, or `source_conflict`. If English definitions in `Art`, SQL, and the main Override source disagree, the catalog keeps every variant and marks the entry `source_conflict`; it never guesses the runtime winner. These unresolved English entries are excluded from the per-language translation files and placed only in `review/source-conflicts.json` until a developer approves the source resolution.
+Generate only selected locales by repeating `--locale`:
 
-Categories follow the main Civilization V text areas, including civilizations, city-states, units, buildings, wonders, improvements, resources, technologies, policies, religion, great people, great works, diplomacy, multiplayer, world congress, terrain, scenarios, Civilopedia, gameplay, game options, and UI. Subcategories split large areas into review-sized groups such as city names, leader dialogue, belief names, belief descriptions, help, strategy, Civilopedia text, and interface messages.
+- `python tools/localization/build_localization_catalog.py --vanilla-db "PATH_TO_CLEAN_Localization-Merged.db" --locale RU_RU --locale DE_DE`
 
-Database references are the primary classification source. Deterministic key-name rules refine broad database groups and classify entries that have no database reference. Unknown key families remain visible under `unclassified`; they are never dropped or assigned by guessing from their English prose.
+### Generated Output
 
-The clean database is opened read-only. Repository SQL is parsed only for a restricted set of localization `INSERT` and `UPDATE` statements and is never executed. Unsupported SQL fails the build instead of being guessed.
+All output is written under ignored `build/localization` paths.
 
-All output under `build/localization` is generated and ignored by Git. Official Civilization V strings therefore remain local and are not committed to the repository.
+| Output | Purpose |
+| --- | --- |
+| `catalog.json` | Language-independent categorized source index |
+| `review/source-conflicts.json` | English definitions that disagree and require developer review |
+| `review/<locale>/<category>.json` | Detailed comparison grouped by category and subcategory |
+| `editor/<locale>/<category>.csv` | UTF-8 spreadsheet used for translation work |
 
-## Repository-wide Source Inventory
+The generator creates one editor directory for every requested vanilla locale.
+Each locale receives the same game-oriented category files, including units,
+buildings, civilizations, city-states, policies, religion, UI, and other text
+areas found in the source.
 
-`inventory_localization.py` scans repository source areas that may contain localization definitions, key references, or hardcoded text:
+Each CSV row shows:
 
-- `LEKMOD`, including `Art`, `Override`, Lua, standard UI and EUI `.ignore` templates
-- `Lekmap`
-- `LEKMOD_DLL`
-- `LekmodInstaller`
+- official vanilla English and its character count;
+- official vanilla text for the target locale;
+- current Lekmod English and its character count;
+- current Lekmod target text;
+- whether the entry is new, changed, missing, a placeholder, or already present;
+- required Civilization V formatting tokens and source paths.
 
-Run the validation and write the complete local report with:
+Character counts use normalized stored text and include formatting tokens. They
+are comparison aids, not proven UI limits.
 
-`python tools/localization/inventory_localization.py --strict --json build/localization/inventory.json`
+Only these columns are intended for manual editing:
 
-The inventory records source paths and line numbers. It also reports keys written in multiple source areas and English Art keys absent from the main Override file, without guessing their runtime load order. It does not edit source files or label every code string as player-facing. String candidates are reviewed before any change is proposed.
+- `translation`
+- `translation_gender`
+- `translation_plurality`
+- `translator_note`
+
+Regeneration preserves those fields while the corresponding English source
+fingerprint is unchanged. If that source changes, generation stops before
+overwriting the existing editor workspace so a stale translation cannot be
+carried forward silently.
+
+English source conflicts are excluded from translator CSV files and kept in
+`review/source-conflicts.json`. A developer must approve the intended source
+before those entries enter translation work.
+
+### English Fallback Preview
+
+After freezing vanilla, create a review-only XML per non-English locale:
+
+```text
+python tools/localization/build_fallback_preview.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz
+```
+
+The output under `build/localization/fallback-preview` contains one XML file
+per locale and a manifest with source fingerprints, row counts, and withheld
+conflicts. Every XML contains only keys classified as `lekmod_new` or
+`vanilla_modified`; unchanged vanilla translations stay in the game. Each
+row currently carries Lekmod English and its formatting metadata. Conflicting
+English definitions are withheld, and the manifest records their count. An
+explicitly empty English `<Text>` remains empty in the preview; the manifest
+lists these keys under `empty_english_text_keys` for source review. A missing
+`Text` still stops generation.
+
+This preview is evidence for developer review, **not** a release artifact.
+The preview files are ignored by Git and are not loaded by Civ V. The separate
+shipped builder below generates a game file from the same comparison.
+
+### Shipped Fallback and Approved Translations
+
+Use the same frozen vanilla reference to build the non-English blocks in the
+already loaded `LEKMOD/Override/CIV5Units_Mongol.xml`:
+
+```text
+python tools/localization/build_shipped_localization.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz --write
+python tools/localization/build_shipped_localization.py --vanilla-snapshot build/localization/vanilla-snapshot.json.gz --check
+python tools/localization/sync_primary_english.py
+```
+
+The default mode is a dry run. `--write` removes legacy empty language blocks
+and writes a marked generated section for all nine target locales. Re-running
+it with unchanged inputs makes no changes. It includes 5,620 new and 415
+modified keys per locale. Unchanged official keys are omitted, so their
+existing translations remain in the game. The 126 conflicting English source
+keys are excluded until a developer decides which definition is correct.
+The catalog loader ignores the generated target-language section on later
+runs, keeping the comparison independent of its own output.
+
+No draft translation from `build/localization/editor` ships automatically.
+After review, copy the translated text and its `source_fingerprint` from the
+CSV into `localization/approved-translations.json` like this:
+
+```json
+{
+  "schema_version": 1,
+  "translations": {
+    "RU_RU": {
+      "TXT_KEY_EXAMPLE": {
+        "source_fingerprint": "64-character fingerprint from the editor CSV",
+        "text": "Проверенный перевод"
+      }
+    }
+  }
+}
+```
+
+Optional `gender` and `plurality` fields override the English metadata.
+Unknown keys, stale fingerprints, missing text, placeholders, and mismatched
+formatting tokens stop the build. Approved translations take precedence over
+English fallback in the generated XML. The game must be tested with at least
+one non-English client before releasing: this repository cannot determine
+which independently loaded Art files might later write the same key.
+
+The editor is deliberately export-only at this stage: it does not write XML,
+SQL, `CIV5Units_Mongol.xml`, or any other shipped file.
 
 ## Change Workflow
 
-1. The scripts report a problem or a text candidate with its source location.
-2. A developer approves the specific change or a clearly defined bulk update.
-3. A developer tests the approved change in the game.
+1. A script reports a source issue or translation candidate with evidence.
+2. A developer approves the specific fix or a defined bulk update.
+3. A developer tests the approved game-file change in Civilization V.
 
-The tools never perform automatic source fixes. Start source review with `build/localization/review/source-conflicts.json`. Proposed changes and their test result are recorded in `docs/localization-change-review.md`.
-
-## Tests
-
-Run the localization tool tests with:
-
-`python -m unittest discover -s tools/localization/tests -v`
+Record source changes and test results in `CHANGE_REVIEW.md`.
 
 ## Continuous Integration
 
-The `.github/workflows/localization-audit.yml` workflow runs the strict audits, the repository-wide inventory, and the test suite when relevant source files or tools are changed.
+`.github/workflows/localization-audit.yml` runs the strict audits, repository
+inventory, and test suite when relevant source or tool files change. Workspace
+generation is not run in CI because official full-text input is local and not
+committed. CI also checks that the shipped primary English block matches its
+editable source.
 
-## Localization Guidelines
+## Current Boundaries
 
-- Use the correct `Language_<locale>` table
-- Keep every `Tag` identical to its corresponding English key
-- Do not translate identifiers such as `Type`, `Tag`, or `TXT_KEY_*`
-- Preserve formatting tokens such as `[ICON_*]`, `[NEWLINE]`, and `[COLOR_*]`
-- Preserve grammar metadata such as `Gender` and `Plurality`
-- Save XML and SQL files as UTF-8
-- Keep the existing English fallback and locale marker until a proper translation is available
-- Run all strict audits and the tests before committing
-
-## Current Scope
-
-The Art audit covers XML and SQL localization data under `LEKMOD/Art`.
-
-The primary audit covers `LEKMOD/Override/CIV5Units_Mongol.xml`, which identifies itself as generated by MP Modpacks Maker. The audit treats the checked-in file as the current released localization source. It does not recreate the modpack generation process.
-
-The tools do not currently:
-
-- determine runtime load order
-- validate translation quality or gameplay accuracy
-- generate translated game files
-
-The inventory finds literal candidates in source code, but static scanning cannot prove whether every literal is displayed to a player. Text embedded in images or generated only at runtime still requires manual and in-game review.
-
-These areas can be added incrementally after the initial infrastructure is reviewed.
+The tools do not determine runtime load order, validate translation quality,
+prove that every code literal is player-facing, or extract text embedded in
+image assets. The generated Override XML requires an in-game test; 126
+English source disagreements still need review. Unknown keys remain visible
+under `unclassified`.

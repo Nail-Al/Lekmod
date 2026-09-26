@@ -12,17 +12,22 @@ import audit_primary_localization as audit
 
 
 class PrimaryLocalizationAuditTests(unittest.TestCase):
+    """Protect parsing of the shipped primary English localization source."""
+
     def setUp(self):
+        """Create an isolated source tree for every parser test."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
     def source(self, text: str) -> Path:
+        """Write one fixture without depending on repository game data."""
         path = self.root / "source.xml"
         path.write_text(text, encoding="utf-8")
         return path
 
     def test_operations_follow_source_order_and_preserve_metadata(self):
+        """Apply supported operations in order while retaining all columns."""
         source = self.source('''<GameData><Language_en_US>
 <Row Tag="TXT_KEY_A"><Text>First</Text><Gender>masculine</Gender></Row>
 <Replace Tag="TXT_KEY_A"><Text>  Second [ICON_FOOD]\n  </Text><Plurality>2</Plurality></Replace>
@@ -45,6 +50,7 @@ class PrimaryLocalizationAuditTests(unittest.TestCase):
         self.assertEqual(report["summary"]["errors"], 0)
 
     def test_unsupported_and_ambiguous_operations_are_errors(self):
+        """Reject shapes whose runtime meaning cannot be inferred safely."""
         source = self.source('''<GameData><Language_en_US>
 <Merge Tag="TXT_KEY_A"/>
 <Row Tag="TXT_KEY_A" tag="TXT_KEY_B"><Text>A</Text></Row>
@@ -56,6 +62,7 @@ class PrimaryLocalizationAuditTests(unittest.TestCase):
         self.assertTrue(all(operation["invalid"] for operation in report["operations"]))
 
     def test_missing_locale_and_invalid_xml_fail(self):
+        """Treat unusable XML and absent language tables as hard errors."""
         missing = audit.parse_source(self.source("<GameData/>"), "en_US")
         self.assertEqual(missing["summary"]["errors"], 1)
 
@@ -63,6 +70,7 @@ class PrimaryLocalizationAuditTests(unittest.TestCase):
         self.assertEqual(broken["summary"]["errors"], 1)
 
     def test_json_report_does_not_modify_source(self):
+        """Write reports atomically without touching the checked source."""
         source = self.source(
             '<GameData><Language_en_US><Row Tag="TXT_KEY_A" Text="A"/></Language_en_US></GameData>'
         )
@@ -80,6 +88,7 @@ class PrimaryLocalizationAuditTests(unittest.TestCase):
             audit.write_report(audit.REPO_ROOT / "LEKMOD" / "report.json", report, source)
 
     def test_repository_primary_source_is_covered(self):
+        """Keep the parser compatible with the full checked-in modpack XML."""
         report = audit.parse_source(audit.DEFAULT_SOURCE, "en_US")
 
         self.assertEqual(report["summary"]["errors"], 0)

@@ -17,12 +17,14 @@ CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 def local_name(tag: object) -> str:
+    """Strip an XML namespace before comparing an element name."""
     if not isinstance(tag, str):
         return ""
     return tag.rsplit("}", 1)[-1]
 
 
 def child_named(element: ET.Element, name: str) -> ET.Element | None:
+    """Find the first direct child with the requested local tag."""
     for child in element:
         if local_name(child.tag) == name:
             return child
@@ -30,6 +32,7 @@ def child_named(element: ET.Element, name: str) -> ET.Element | None:
 
 
 def operation_data(operation: ET.Element) -> tuple[str | None, str]:
+    """Extract the selected key and text from a language operation."""
     operation_type = local_name(operation.tag)
 
     if operation_type == "Row":
@@ -60,10 +63,12 @@ def operation_data(operation: ET.Element) -> tuple[str | None, str]:
 
 
 def normalize_text(text: str) -> str:
+    """Collapse spacing so duplicate writes can be compared."""
     return " ".join(text.split())
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the Art audit's locale and strict-mode options."""
     parser = argparse.ArgumentParser(
         description="Audit Lekmod localization tables."
     )
@@ -87,6 +92,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Scan Art language files and report coverage and duplicate writes."""
     args = parse_args()
 
     if not ART_ROOT.is_dir():

@@ -8,6 +8,7 @@ on:
       - "LEKMOD_DLL/**"
       - "LekmodInstaller/**"
       - "tools/localization/**"
+      - "localization/**"
       - ".github/workflows/localization-audit.yml"
   pull_request:
     paths:
@@ -16,6 +17,7 @@ on:
       - "LEKMOD_DLL/**"
       - "LekmodInstaller/**"
       - "tools/localization/**"
+      - "localization/**"
       - ".github/workflows/localization-audit.yml"
   workflow_dispatch:
 
@@ -42,6 +44,9 @@ jobs:
 
       - name: Audit primary localization source
         run: python tools/localization/audit_primary_localization.py --strict
+
+      - name: Check generated English game text
+        run: python tools/localization/sync_primary_english.py
 
       - name: Inventory localization sources
         run: python tools/localization/inventory_localization.py --strict
