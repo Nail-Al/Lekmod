@@ -155,7 +155,8 @@ function updateBaselineNotice() {
   const locale = el("locale").value, counts = meta.vanilla_counts;
   notice.hidden = false;
   if (!Object.keys(counts).length) {
-    notice.textContent = "Original vanilla sentences are unavailable. Import the matching snapshot in Settings to compare them.";
+    notice.textContent = meta.snapshot_error ||
+      "Original vanilla sentences are unavailable. Import the matching snapshot in Settings to compare them.";
   } else if (!counts[locale]) {
     notice.textContent = "The pinned vanilla snapshot contains no " + locale +
       " entries. An empty vanilla cell does not mean the game has no translation.";
@@ -450,7 +451,7 @@ function fillSettings() {
   const counts = Object.values(meta.vanilla_counts || {}).reduce((sum, value) => sum + value, 0);
   el("vanilla-summary").textContent = counts ?
     "Original vanilla text available for comparison." :
-    "Optional comparison: original vanilla text is not loaded.";
+    (meta.snapshot_error || "Optional comparison: original vanilla text is not loaded.");
   sectionMessage("snapshot", "");
   updateDownload();
   if (!downloadTimer) downloadTimer = setInterval(updateDownload, 1000);
@@ -508,6 +509,13 @@ async function refresh() {
   el("prefill").checked = prefs.prefill;
   el("page-size").value = pageSize();
   el("editor-version").textContent = "v" + (meta.editor_version || "unknown");
+  const notice = meta.update_notice;
+  if (notice && notice.result === "failure" &&
+      sessionStorage.getItem("last-update-alert") !== notice.at) {
+    sessionStorage.setItem("last-update-alert", notice.at);
+    message("The update failed; the previous editor was restored. Open Logs or " +
+      "localization/workspace/editor-updates/update.log for the cause, then retry.", true);
+  }
   renderConnections();
   const select = el("locale");
   select.replaceChildren();
@@ -959,7 +967,8 @@ el("update-install").addEventListener("click", async () => {
   try {
     const result = await api("/api/editor-update", {});
     el("settings-dialog").close();
-    message("Editor v" + result.version + " staged. This window will close; the new editor will open.");
+    message("Editor v" + result.version + " verified. The editor will restart automatically; " +
+      "your project and settings stay here.");
   } catch (error) {
     el("update-install").disabled = false;
     el("update-status").textContent = "Editor update failed: " + error.message;

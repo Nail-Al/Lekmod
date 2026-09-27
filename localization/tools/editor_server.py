@@ -206,6 +206,15 @@ class Editor:
             self.connection_error = str(error)
         home_snapshot = APP_HOME / "localization/workspace/vanilla-snapshot.json.gz"
         self.snapshot = next((path for path in (snapshot, home_snapshot) if path.is_file()), None)
+        self.snapshot_error = ""
+        if self.snapshot is not None:
+            try:
+                verify_snapshot_reference(self.snapshot)
+            except CatalogError:
+                # A newly reviewed team reference may supersede the private old
+                # file. Keep it for recovery while allowing the editor to open.
+                self.snapshot = None
+                self.snapshot_error = "The saved vanilla snapshot belongs to an older team baseline. Download the current encrypted reference in Settings."
         self.vanilla_counts = (
             {locale: len(rows) for locale, rows in read_snapshot(self.snapshot)[0].items()}
             if self.snapshot is not None else {}
@@ -347,10 +356,13 @@ class Editor:
                         for locale, details in manifest["locales"].items()},
             "config": manage.read_config() if self.ready else {},
             "vanilla_counts": self.vanilla_counts,
+            "snapshot_error": self.snapshot_error,
             "ready": self.ready,
             "connection_error": self.connection_error,
             "project": self.project_info,
             "editor_version": editor_manifest()["version"],
+            "update_notice": next((item for item in reversed(self.events)
+                                   if item.get("action") == "editor-update-install"), None),
             "included_source": REPO_ROOT == APP_HOME,
             "release": release_version(REPO_ROOT) if self.ready else "",
             "game": {"path": game_path, "mods": mods, "selected_mod": selected_mod,
@@ -399,10 +411,15 @@ class Editor:
             handle.write(data)
         try:
             verify_snapshot_reference(temporary)
+            if destination.is_file() and destination.read_bytes() != data:
+                backup = destination.parent / ("vanilla-snapshot-previous-" +
+                    datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json.gz")
+                shutil.copy2(destination, backup)
             temporary.replace(destination)
         finally:
             temporary.unlink(missing_ok=True)
         self.snapshot = destination
+        self.snapshot_error = ""
         self.vanilla_counts = {locale: len(rows) for locale, rows in
                                read_snapshot(destination)[0].items()}
         if self.ready:
@@ -1204,7 +1221,10 @@ def main() -> int:
                         help="Local port; 0 chooses an available port")
     parser.add_argument("--no-browser", action="store_true",
                         help="Start the server without opening a browser")
+    parser.add_argument("--update-ticket", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.update_ticket and not re.fullmatch(r"[0-9a-f]{32}", args.update_ticket):
+        parser.error("invalid update ticket")
     if not 0 <= args.port <= 65535 or 0 < args.port < 1024:
         parser.error("choose port 0 or a port from 1024 to 65535")
     try:
@@ -1217,6 +1237,11 @@ def main() -> int:
         parser.exit(1, f"Editor failed: {error}\n")
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
+    if args.update_ticket:
+        ready = APP_HOME / "localization/workspace/editor-updates" / (
+            "ready-" + args.update_ticket + ".json")
+        atomic_bytes(ready, json.dumps({"ticket": args.update_ticket, "pid": os.getpid(),
+                                       "port": server.server_port}).encode("utf-8"))
     if not args.no_browser:
         webbrowser.open(url)
     try:
@@ -1226,11 +1251,22 @@ def main() -> int:
     finally:
         server.server_close()
     if getattr(server, "update_script", None):
-        subprocess.Popen([
-            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-            "-File", str(server.update_script), "-OldPid", str(os.getpid()),
-            "-Stage", str(server.update_stage), "-EditorRoot", str(APP_HOME),
-        ], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        try:
+            subprocess.Popen([
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(server.update_script), "-OldPid", str(os.getpid()),
+                "-Stage", str(server.update_stage), "-EditorRoot", str(APP_HOME),
+            ], cwd=APP_HOME, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+               creationflags=subprocess.CREATE_NO_WINDOW)
+        except OSError as error:
+            editor.record_event("editor-update-install", "failure")
+            with (APP_HOME / "localization/workspace/editor-updates/update.log").open(
+                "a", encoding="utf-8") as log:
+                log.write(f"Could not launch installer: {error}\n")
+            command = [sys.executable, "--port", str(server.server_port)]
+            subprocess.Popen(command, cwd=APP_HOME,
+                             env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
     elif getattr(server, "restart_requested", False):
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--port", str(server.server_port)]

@@ -16,6 +16,22 @@ from lekmod_localization.common import CatalogError
 
 
 class EditorViewTests(unittest.TestCase):
+    def test_old_private_snapshot_does_not_block_new_editor_baseline(self):
+        """After a team reference update, Settings must remain available."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            old = home / "old-snapshot.json.gz"
+            old.write_bytes(b"old private text")
+            with patch("editor_server.APP_HOME", home), \
+                 patch("editor_server.manage.migrate_workspace"), \
+                 patch("editor_server.validate_project", side_effect=ValueError("disconnected")), \
+                 patch("editor_server.verify_snapshot_reference",
+                       side_effect=CatalogError("old reference")):
+                editor = Editor(snapshot=old)
+            self.assertIsNone(editor.snapshot)
+            self.assertTrue(editor.snapshot_error)
+            self.assertEqual(old.read_bytes(), b"old private text")
+
     def test_multiline_xml_indentation_is_not_editor_content(self):
         raw = "\n\t\t\t[COLOR_POSITIVE_TEXT]LEKMOD v35.3[ENDCOLOR]\n\t\t"
         self.assertEqual(primary_text(raw), "[COLOR_POSITIVE_TEXT]LEKMOD v35.3[ENDCOLOR]")

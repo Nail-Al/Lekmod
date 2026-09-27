@@ -28,11 +28,13 @@ START = """Lekmod Localization Editor for Windows
    your team in Settings. The app verifies the shared fingerprints. To
    share a verified snapshot, use Vanilla reference > Encrypt and download
    .enc; the EXE needs no Python installation for this operation.
-6. For future editor versions, check Settings > Editor updates. If you
-   used an older unversioned EXE, install this release manually once.
-   If an automatic update from v0.2/v0.3 failed, start this release from a new
-   folder and reconnect your existing project. Do not delete its old folder
-   if the project was downloaded under localization/workspace/projects.
+6. For future editor versions, use Settings > Editor updates > Check latest
+   version > Download and update. The app verifies the download, waits for
+   the new EXE to start, and keeps the same settings, projects and snapshot.
+   A legacy EXE with a broken updater can be repaired once from a current
+   project checkout with localization/tools/repair_editor.py --editor-root
+   "<folder containing your old LekmodLocalizationEditor.exe>". Close the
+   old editor first. The repair command downloads the release itself.
 
 The standalone package is a translation workspace, not an installable
 Civilization V mod. Close both the browser tab and console when finished.

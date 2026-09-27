@@ -38,7 +38,7 @@ jobs:
       - name: Smoke test PowerShell updater
         shell: pwsh
         run: |
-          python -B localization/tools/test_windows_updater.py
+          python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip
       - name: Verify snapshot encryption on Windows
         shell: pwsh
         run: |

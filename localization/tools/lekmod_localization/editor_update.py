@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import urllib.request
+import uuid
 import zipfile
 
 from .connections import APP_HOME, editor_manifest
@@ -92,16 +93,20 @@ def stage_release(release: dict, home: Path = APP_HOME) -> Path:
         if stage.is_symlink():
             raise ValueError("pending editor update path is a link; choose a fresh folder")
         if stage.exists():
-            # A failed helper leaves an intact stage. Reuse it only after comparing
-            # every byte with this freshly authenticated release archive.
-            if not stage.is_dir() or {p.relative_to(stage).as_posix()
-                                      for p in stage.rglob("*") if p.is_file()} != names or any(
-                                          (stage / name).is_symlink() or
-                                          (stage / name).read_bytes() != archive.read(name)
-                                          for name in UPDATE_FILES):
-                raise ValueError("pending update differs from the verified release; "
-                                 "close the editor and remove that editor-v folder")
-            return stage
+            # Never trust a previous attempt. Preserve a damaged staging folder for
+            # diagnosis, but let the next click create a fresh verified copy.
+            existing = list(stage.rglob("*")) if stage.is_dir() else []
+            valid = stage.is_dir() and not any(p.is_symlink() for p in existing) and {
+                p.relative_to(stage).as_posix() for p in existing if p.is_file()} == names
+            if valid:
+                valid = all(not (stage / name).is_symlink() and
+                            (stage / name).read_bytes() == archive.read(name)
+                            for name in UPDATE_FILES)
+            if valid:
+                if editor_manifest(stage)["version"] != release["latest"]:
+                    raise ValueError("downloaded editor version differs from release tag")
+                return stage
+            stage.rename(folder / (tag + ".failed-" + uuid.uuid4().hex))
         with tempfile.TemporaryDirectory(dir=folder, prefix=".stage-") as temporary:
             temp = Path(temporary)
             for name in UPDATE_FILES:
@@ -118,7 +123,7 @@ def write_windows_updater(stage: Path, home: Path = APP_HOME) -> Path:
     """Create a separate PowerShell process that can replace a closed EXE."""
     script = home / "localization/workspace/editor-updates/install-update.ps1"
     files = ",\n  ".join("'" + name + "'" for name in UPDATE_FILES)
-    content = r"""param([int]$OldPid, [string]$Stage, [string]$EditorRoot)
+    content = r"""param([int]$OldPid, [string]$Stage, [string]$EditorRoot, [switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $files = @(
   FILES
@@ -129,6 +134,9 @@ $events = Join-Path $EditorRoot 'localization/workspace/editor-actions.jsonl'
 $backup = $null
 $copyStarted = $false
 $existed = @{}
+$started = $null
+$ticket = [Guid]::NewGuid().ToString('N')
+$ready = Join-Path $updates ("ready-$ticket.json")
 function Record-Update([string]$state, [string]$detail) {
   $when = [DateTime]::UtcNow.ToString('o')
   Add-Content -LiteralPath $log -Value "$when  $state  $detail" -Encoding UTF8
@@ -166,10 +174,30 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
     Copy-Item -LiteralPath $source -Destination $target -Force
   }
-  Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot
-  Record-Update 'success' "Editor installed from $Stage; backup: $backup"
+  $launchArgs = @('--update-ticket', $ticket)
+  if ($NoBrowser) { $launchArgs += '--no-browser' }
+  Record-Update 'starting' "Starting updated editor from $Stage"
+  $started = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -ArgumentList $launchArgs -PassThru
+  $confirmed = $false
+  for ($attempt = 0; $attempt -lt 300; $attempt++) {
+    if (Test-Path -LiteralPath $ready -PathType Leaf) {
+      $signal = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
+      if ($signal.ticket -eq $ticket -and $signal.pid -eq $started.Id) {
+        $confirmed = $true
+        break
+      }
+    }
+    if ($started.HasExited) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  if (-not $confirmed) { throw 'The updated editor did not start within 60 seconds; restoring the previous version.' }
+  Record-Update 'success' "Editor installed from $Stage; backup: $backup; pid: $($started.Id); port: $($signal.port)"
 } catch {
   $failure = $_.ToString()
+  if ($started -and -not $started.HasExited) {
+    try { Stop-Process -Id $started.Id -Force -ErrorAction Stop; $started.WaitForExit(10000) }
+    catch { $failure += "; could not stop new editor: $_" }
+  }
   if ($copyStarted) {
     foreach ($file in $files) {
       try {
@@ -183,9 +211,21 @@ try {
     }
   }
   Record-Update 'failure' $failure
-  Write-Error "Editor update failed. See $log. $failure"
+  if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) -and
+      (Test-Path -LiteralPath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -PathType Leaf)) {
+    try {
+      if ($NoBrowser) {
+        $restored = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -ArgumentList @('--no-browser') -PassThru
+      } else {
+        $restored = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -PassThru
+      }
+      Record-Update 'failure' "Previous editor reopened after failed update; pid: $($restored.Id)"
+    } catch { Record-Update 'failure' "Could not restart the previous editor: $_" }
+  }
+  [Console]::Error.WriteLine("Editor update failed. See $log. $failure")
   exit 1
 }
+Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue
 try { Remove-Item -LiteralPath $Stage -Recurse -Force } catch {
   Record-Update 'warning' "Installed editor, but could not remove staged files: $_"
 }

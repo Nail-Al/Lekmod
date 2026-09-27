@@ -52,8 +52,16 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(private.read_text(), "private settings")
             with patch("lekmod_localization.editor_update._download", return_value=content):
                 self.assertEqual(stage_release(found, home), stage)
+            (stage / "localization/editor/app.js").write_text("damaged")
+            with patch("lekmod_localization.editor_update._download", return_value=content):
+                self.assertEqual(stage_release(found, home), stage)
+            self.assertEqual((stage / "localization/editor/app.js").read_bytes(),
+                             b"fixture")
+            self.assertEqual(len(list(stage.parent.glob("editor-v0.4.failed-*"))), 1)
             script = write_windows_updater(stage, home)
             self.assertIn("Wait-Process", script.read_text())
+            self.assertIn("ready-$ticket.json", script.read_text())
+            self.assertIn("restoring the previous version", script.read_text())
             self.assertIn("[string]$EditorRoot", script.read_text())
             self.assertNotIn("[string]$Home", script.read_text())
             self.assertIn("editor-update-install", script.read_text())
