@@ -11,21 +11,23 @@ from lekmod_localization.common import CatalogError, REPO_ROOT
 
 START = """Lekmod Localization Editor for Windows
 
-1. Extract the complete ZIP into a new folder. Keep the LEKMOD and
-   localization folders next to LekmodLocalizationEditor.exe.
+1. Extract the complete ZIP into a new writable folder. Keep the
+   localization folder next to LekmodLocalizationEditor.exe.
 2. Double-click LekmodLocalizationEditor.exe. Leave its window open while
    the browser editor is running. No Python, Git, VS Code, or game install
-   is needed to start translating new and changed Lekmod text.
-3. On the first run, Settings opens. Use the included source or select a full
-   compatible Lekmod project folder. Select your language, translate a row,
-   and click Save and apply. Exports can prepare a ZIP for a developer.
+   is needed to open it.
+3. In Settings, select a complete compatible Lekmod project folder or click
+   Download selected source. A plain Civilization V installation is not a
+   project. Save connections, then select a language and translate.
 4. For in-game testing, connect to the Civilization V installation in
    Settings, select its installed Lekmod DLC, and click Apply to installed
    game after saving. This checks versions and backs up the existing XML.
    Install the matching complete Lekmod release separately first.
-5. To compare original vanilla sentences, ask the team for the matching
-   vanilla-snapshot.json.gz and import it in Settings. The app checks it
-   against the pinned shared fingerprints.
+5. To compare original vanilla sentences, import the matching local
+   vanilla-snapshot.json.gz or use an encrypted link and password from
+   your team in Settings. The app verifies the shared fingerprints.
+6. For future editor versions, check Settings > Editor updates. If you
+   used an older unversioned EXE, install this release manually once.
 
 The standalone package is a translation workspace, not an installable
 Civilization V mod. Close both the browser tab and console when finished.
@@ -37,21 +39,12 @@ def package(executable: Path, output: Path, root: Path = REPO_ROOT) -> int:
     if not executable.is_file():
         raise CatalogError(f"Windows editor executable is missing: {executable}")
     required = [
-        Path("LEKMOD/VERSION"),
-        Path("LEKMOD/Override/CIV5Units_Mongol.xml"),
-        Path("localization/en_US/primary.xml"),
-        Path("localization/config.json"),
         Path("localization/README.md"),
-        Path("localization/reference/vanilla-fingerprints.json.gz"),
         Path("localization/editor/index.html"),
         Path("localization/editor/app.js"),
+        Path("localization/editor/version.json"),
         Path("LekmodInstaller/github_setup/versions.json"),
     ]
-    required.extend(sorted(Path("LEKMOD/Art") / path.relative_to(root / "LEKMOD/Art")
-                           for path in (root / "LEKMOD/Art").rglob("*")
-                           if path.is_file() and path.suffix.casefold() in {".xml", ".sql"}))
-    required.extend(sorted(Path("localization/translations") / path.name
-                           for path in (root / "localization/translations").glob("*.csv")))
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=9) as archive:

@@ -4,17 +4,24 @@ const token = document.querySelector('meta[name="editor-token"]').content;
 const el = id => document.getElementById(id);
 const translatorColumns = [
   ["key", "Key"], ["classification", "Type"], ["vanilla_en_US", "Vanilla EN"],
+  ["vanilla_en_US_characters", "Vanilla EN characters"],
   ["vanilla_target", "Vanilla translation"], ["lekmod_en_US", "Lekmod EN"],
+  ["lekmod_en_US_characters", "Lekmod EN characters"],
   ["lekmod_target", "Existing Lekmod translation"], ["translation", "My translation"],
-  ["translation_status", "Status"], ["translation_characters", "Characters"],
+  ["translation_status", "Status"], ["translation_characters", "My characters"],
+  ["english_edited_at", "English edited"], ["translation_updated_at", "Translation edited"],
   ["translator_note", "Translator note"]
 ];
 const developerColumns = [["key", "Key"], ["kind", "Operation"],
-  ["text", "English text"], ["characters", "Characters"]];
+  ["text", "English text"], ["characters", "Characters"],
+  ["english_edited_at", "English edited"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
   "lekmod_en_US", "lekmod_target", "text"]);
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
 let visible = new Set(), widths = {}, searchTimer, requestId = 0;
+let toastTimer;
+let inLogs = false;
+function logUI(name) { api("/api/event", {name}).catch(() => {}); }
 
 async function api(path, body) {
   const options = body === undefined ? {} : {
@@ -29,6 +36,13 @@ async function api(path, body) {
 function message(value, error = false) {
   el("message").textContent = value;
   el("message").style.color = error ? "#a22d24" : "#246a39";
+  if (!value) return;
+  const toast = el("toast");
+  toast.textContent = value;
+  toast.classList.toggle("error", error);
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, error ? 5500 : 3200);
 }
 function dialogMessage(value, error = false) {
   el("settings-status").textContent = value;
@@ -45,6 +59,21 @@ function countText() {
   el("characters").textContent = "Characters: " + Array.from(value).length +
     " · spaces: " + (value.match(/ /g) || []).length +
     (chosen && !developer() ? " · English: " + chosen.lekmod_en_US_characters : "");
+}
+function grammarValue(name) {
+  return el(name).value === "__custom__" ? el(name + "-custom").value.trim() : el(name).value;
+}
+function setGrammar(name, value) {
+  const select = el(name), custom = el(name + "-custom");
+  select.value = Array.from(select.options).some(option => option.value === value)
+    ? value : "__custom__";
+  custom.hidden = select.value !== "__custom__";
+  custom.disabled = custom.hidden || select.disabled;
+  custom.value = custom.hidden ? "" : value;
+}
+async function copyText(value) {
+  try { await navigator.clipboard.writeText(value); logUI("copy"); message("Copied to clipboard."); }
+  catch (error) { message("Clipboard access was denied by the browser.", true); }
 }
 function updateHistory(state) {
   el("undo").disabled = !state.undo_available;
@@ -65,8 +94,8 @@ function renderConnections() {
     : game.path ? "Game: no installed Lekmod selected" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
   el("game-apply").disabled = !matches || !meta.ready;
-  el("workspace").hidden = !meta.ready;
-  el("no-source").hidden = meta.ready;
+  el("workspace").hidden = !meta.ready || inLogs;
+  el("no-source").hidden = meta.ready || inLogs;
   el("connection-error").textContent = meta.connection_error || "";
 }
 function updateBaselineNotice() {
@@ -91,9 +120,10 @@ function changeMode() {
   el("grammar").hidden = developer();
   el("note-help").hidden = developer();
   el("run-checks").hidden = !developer();
-  el("text-label").firstChild.textContent = developer()
-    ? "Canonical English text (localization/en_US/primary.xml)"
-    : "My translation (approved language CSV and generated game XML)";
+  el("text-heading").textContent = developer() ? "English source text" : "My translation text";
+  el("text-help").textContent = developer()
+    ? "Saved in primary.xml; changes make previous translations stale."
+    : "Saved in the language CSV; the project's game XML is rebuilt.";
   el("save").textContent = developer() ? "Save English and rebuild" : "Save and apply";
   el("rename-key").disabled = !chosen || !developer();
   updateBaselineNotice();
@@ -102,7 +132,8 @@ function changeMode() {
     : [...translatorColumns, ...developerColumns].map(item => item[0]));
   if (!developer() && !prefs.visible_columns.length) {
     if (!Object.keys(meta.vanilla_counts).length) {
-      visible.delete("vanilla_en_US"); visible.delete("vanilla_target");
+      visible.delete("vanilla_en_US"); visible.delete("vanilla_en_US_characters");
+      visible.delete("vanilla_target");
     } else if (!meta.vanilla_counts[el("locale").value]) {
       visible.delete("vanilla_target");
     }
@@ -133,6 +164,7 @@ function renderColumnChoices() {
     check.addEventListener("change", async () => {
       check.checked ? visible.add(field) : visible.delete(field);
       await preference({visible_columns: Array.from(visible)});
+      logUI("columns-changed");
       renderTable(window.currentRows || []);
     });
     label.append(check, document.createTextNode(title));
@@ -171,6 +203,7 @@ function renderTable(rows) {
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", end);
         preference({column_widths: widths}).catch(err => message(err.message, true));
+        logUI("columns-changed");
       }
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", end);
@@ -195,8 +228,7 @@ function renderTable(rows) {
         copy.textContent = "⧉";
         copy.addEventListener("click", async event => {
           event.stopPropagation();
-          try { await navigator.clipboard.writeText(value); message("Copied to clipboard."); }
-          catch (error) { message("Clipboard access was denied by the browser.", true); }
+          await copyText(value);
         });
         content.append(span, copy); td.append(content);
       } else {
@@ -214,6 +246,7 @@ function tableWidth(cols) {
   el("table").style.width = cols.reduce((sum, [field]) => sum + colWidth(field), 0) + "px";
 }
 function selectRow(row, tr) {
+  logUI("row-selected");
   chosen = row;
   document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
   tr.classList.add("selected");
@@ -225,44 +258,39 @@ function selectRow(row, tr) {
   for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer();
   if (el("prefill").checked) {
     el("translation").value = developer() ? row.text
-      : row.translation || row.lekmod_target || row.lekmod_en_US || "";
+      : row.translation || row.lekmod_target || "";
   } else {
     el("translation").value = "";
   }
-  el("gender").value = row.translation_gender || "";
-  el("plurality").value = row.translation_plurality || "";
+  setGrammar("gender", row.translation_gender || "");
+  setGrammar("plurality", row.translation_plurality || "");
   el("note").value = row.translator_note || "";
   countText();
   if (developer()) {
-    el("context").textContent = "This edits the canonical English source. Existing translations become stale when its text changes. A new text key still needs a gameplay reference.";
+    el("context").textContent = "English edited: " + (row.english_edited_at || "unknown") +
+      ". Existing translations become stale when this text changes. New keys need a gameplay reference.";
     el("token-help").hidden = true;
   } else {
-    el("context").textContent = "Type: " + row.classification + " · translation: " +
-      row.translation_status + (row.translation_status === "stale"
-        ? " (the game currently shows English until you review and save)" : "");
+    el("context").textContent = "Type: " + row.classification + " · status: " +
+      row.translation_status + " · English edited: " + (row.english_edited_at || "unknown") +
+      " · translation edited: " + (row.translation_updated_at || "unknown") +
+      (row.translation_status === "stale"
+        ? " · Game text falls back to English until reviewed." :
+        row.translation_status === "applied" ? " · Applied to the project XML; game install is separate." : "");
     let tokens = {};
     try { tokens = JSON.parse(row.required_format_tokens); } catch (error) {}
     const entries = Object.entries(tokens);
     el("token-help").hidden = !entries.length;
     el("tokens").replaceChildren();
     for (const [name, amount] of entries) {
-      const chip = document.createElement("code");
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.title = "Copy token " + name;
       chip.textContent = name + (amount > 1 ? " × " + amount : "");
+      chip.addEventListener("click", () => copyText(name));
       el("tokens").append(chip);
     }
   }
-  const rowIdentity = row;
-  const path = developer() ? "/api/history?index=" + row.index
-    : "/api/history?key=" + encodeURIComponent(row.key);
-  api(path).then(history => {
-    if (chosen !== rowIdentity) return;
-    el("context").textContent += " · Last English commit: " +
-      (history.history_available === false ? "unavailable in this package" :
-       history.committed_at || "not committed yet");
-  }).catch(() => {
-    if (chosen === rowIdentity) el("context").textContent += " · Git date unavailable";
-  });
-  message("");
 }
 async function load() {
   if (!meta.ready) return;
@@ -271,6 +299,8 @@ async function load() {
   el("save").disabled = true;
   el("rename-key").disabled = true;
   el("translation").disabled = true;
+  for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
+    el(field).disabled = true;
   el("selected").textContent = "Select a row";
   const args = new URLSearchParams({q: el("search-input").value, offset});
   if (!developer()) {
@@ -291,6 +321,8 @@ async function load() {
 function fillSettings() {
   el("project-path").value = prefs.project_path;
   el("game-path").value = prefs.game_path || meta.game.path;
+  el("snapshot-url").value = prefs.snapshot_url || "";
+  el("snapshot-password").value = "";
   const select = el("game-mod");
   select.replaceChildren(new Option("Select an installed version", ""));
   for (const mod of meta.game.mods) {
@@ -318,6 +350,7 @@ async function refresh() {
   el("wrap").checked = prefs.wrap;
   el("table").classList.toggle("nowrap", !prefs.wrap);
   el("prefill").checked = prefs.prefill;
+  el("editor-version").textContent = "v" + (meta.editor_version || "unknown");
   renderConnections();
   const select = el("locale");
   select.replaceChildren();
@@ -326,9 +359,12 @@ async function refresh() {
   categories();
   updateHistory(meta);
   if (meta.ready) changeMode();
-  if (!prefs.onboarded) { fillSettings(); el("settings-dialog").showModal(); }
+  if (!prefs.onboarded && !el("settings-dialog").open) {
+    fillSettings(); el("settings-dialog").showModal();
+  }
 }
 el("settings-button").addEventListener("click", () => {
+  logUI("settings-open");
   fillSettings(); el("settings-dialog").showModal();
 });
 el("settings-close").addEventListener("click", () => el("settings-dialog").close());
@@ -401,13 +437,28 @@ el("snapshot-import").addEventListener("click", async () => {
     await refresh();
   } catch (error) { dialogMessage(error.message, true); }
 });
+el("snapshot-cloud").addEventListener("click", async () => {
+  const password = el("snapshot-password").value;
+  try {
+    dialogMessage("Downloading and verifying the encrypted snapshot…");
+    const result = await api("/api/snapshot-cloud", {
+      url: el("snapshot-url").value.trim(), password});
+    el("snapshot-password").value = "";
+    await refresh();
+    dialogMessage("Snapshot verified against this project's reference.");
+    message("Vanilla comparison is available for locales in the snapshot.");
+  } catch (error) {
+    el("snapshot-password").value = "";
+    dialogMessage(error.message, true);
+  }
+});
 el("mode").addEventListener("click", async () => {
   try {
     await preference({mode: developer() ? "translator" : "developer"});
     changeMode();
+    logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
   } catch (error) {
-    message(error.message + " Connect a full project in Settings.", true);
-    fillSettings(); el("settings-dialog").showModal();
+    message(error.message + " Connect a full compatible project in Settings.", true);
   }
 });
 el("locale").addEventListener("change", async () => {
@@ -425,11 +476,58 @@ el("search-input").addEventListener("input", () => {
 el("wrap").addEventListener("change", async () => {
   el("table").classList.toggle("nowrap", !el("wrap").checked);
   await preference({wrap: el("wrap").checked});
+  logUI("wrap-changed");
 });
-el("prefill").addEventListener("change", () => preference({prefill: el("prefill").checked}));
+el("prefill").addEventListener("change", async () => {
+  await preference({prefill: el("prefill").checked});
+  logUI("prefill-changed");
+  if (!el("prefill").checked && el("translation").value) {
+    el("prefill-dialog").showModal();
+  } else if (el("prefill").checked && chosen && !el("translation").value) {
+    el("translation").value = developer() ? chosen.text :
+      chosen.translation || chosen.lekmod_target || "";
+    countText();
+  }
+});
+el("prefill-keep").addEventListener("click", () => {
+  el("prefill-dialog").close(); message("Auto-fill off; your text was kept.");
+});
+el("prefill-clear").addEventListener("click", () => {
+  el("translation").value = ""; countText(); el("prefill-dialog").close();
+  message("Auto-fill off; edit box cleared.");
+});
+for (const name of ["gender", "plurality"]) el(name).addEventListener("change", () => {
+  const custom = el(name + "-custom");
+  custom.hidden = el(name).value !== "__custom__";
+  custom.disabled = custom.hidden;
+  if (!custom.hidden) custom.focus();
+});
 el("translation").addEventListener("input", countText);
-el("prev").addEventListener("click", () => { offset -= 60; load(); });
-el("next").addEventListener("click", () => { offset += 60; load(); });
+el("prev").addEventListener("click", () => { offset -= 60; logUI("page-changed"); load(); });
+el("next").addEventListener("click", () => { offset += 60; logUI("page-changed"); load(); });
+async function openLogs() {
+  inLogs = true;
+  logUI("logs-open");
+  el("workspace").hidden = true;
+  el("no-source").hidden = true;
+  el("logs-view").hidden = false;
+  try {
+    const result = await api("/api/logs");
+    el("logs-list").textContent = result.events.map(event =>
+      event.at + "  " + event.action + "  " + event.result).join("\n") || "No actions recorded yet.";
+  } catch (error) { message(error.message, true); }
+}
+el("logs-button").addEventListener("click", openLogs);
+el("logs-back").addEventListener("click", () => {
+  inLogs = false;
+  el("logs-view").hidden = true;
+  renderConnections();
+});
+el("logs-download").addEventListener("click", () => {
+  logUI("logs-download");
+  location.href = "/api/logs/download";
+  message("Action log downloaded; you can attach it when reporting a problem.");
+});
 el("columns-button").addEventListener("click", () => el("columns-dialog").showModal());
 el("columns-close").addEventListener("click", () => el("columns-dialog").close());
 el("exports-button").addEventListener("click", () => el("exports-dialog").showModal());
@@ -444,8 +542,8 @@ el("save").addEventListener("click", async () => {
       : await api("/api/translate", {locale: el("locale").value,
           category: el("category").value, key: chosen.key,
           source_fingerprint: chosen.source_fingerprint,
-          translation: el("translation").value, translation_gender: el("gender").value,
-          translation_plurality: el("plurality").value, translator_note: el("note").value});
+          translation: el("translation").value, translation_gender: grammarValue("gender"),
+          translation_plurality: grammarValue("plurality"), translator_note: el("note").value});
     updateHistory(result); await load();
     if (developer()) {
       try {
@@ -496,11 +594,42 @@ el("run-checks").addEventListener("click", async () => {
   } catch (error) { message(error.message, true); }
 });
 el("share").addEventListener("click", () => {
+  logUI("translation-export");
   location.href = "/api/export?locale=" + encodeURIComponent(el("locale").value);
   message("Translation ZIP download started. Send it to a developer for review.");
 });
 el("gamexml").addEventListener("click", () => {
+  logUI("xml-export");
   location.href = "/api/game-xml";
   message("Generated XML download started. This is one file, not a complete mod.");
 });
-refresh().catch(error => message(error.message, true));
+async function checkLatest() {
+  logUI("update-check");
+  el("update-status").textContent = "Checking published releases…";
+  try {
+    const info = await api("/api/editor-latest");
+    el("update-link").href = info.release_url;
+    el("update-link").hidden = false;
+    el("update-status").textContent = info.available
+      ? "Editor v" + info.latest + " is available (current v" + info.current + ")."
+      : "Editor v" + info.current + " is up to date.";
+    el("update-install").disabled = !info.available || !info.can_auto_update;
+    el("update-badge").hidden = !info.available;
+    if (info.available && !info.can_auto_update)
+      el("update-status").textContent += " Source checkouts update with Git.";
+  } catch (error) { el("update-status").textContent = "Update check unavailable: " + error.message; }
+}
+el("update-check").addEventListener("click", checkLatest);
+el("update-install").addEventListener("click", async () => {
+  el("update-install").disabled = true;
+  dialogMessage("Downloading and checking the editor update…");
+  try {
+    const result = await api("/api/editor-update", {});
+    el("settings-dialog").close();
+    message("Editor v" + result.version + " staged. This window will close; the new editor will open.");
+  } catch (error) {
+    el("update-install").disabled = false;
+    dialogMessage(error.message, true);
+  }
+});
+refresh().then(checkLatest).catch(error => message(error.message, true));

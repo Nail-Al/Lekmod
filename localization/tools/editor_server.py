@@ -19,6 +19,7 @@ import threading
 import os
 import tempfile
 import xml.etree.ElementTree as ET
+import urllib.error
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 from xml.sax.saxutils import escape
@@ -36,19 +37,24 @@ from lekmod_localization.common import (
 from lekmod_localization.connections import (
     APP_HOME, apply_game, detect_game, installed_mods, release_version,
     save_settings, settings, validate_game, validate_project,
-    release_catalog, download_compatible_source,
+    release_catalog, download_compatible_source, editor_manifest,
 )
+from lekmod_localization.editor_update import (
+    latest_release, stage_release, write_windows_updater,
+)
+from lekmod_localization.english_dates import read_dates
 from lekmod_localization.shipped import read_approvals
 from lekmod_localization.vanilla_snapshot import read_snapshot
 from lekmod_localization.vanilla_reference import verify_snapshot_reference
 from lekmod_localization.vanilla_reference import read_reference
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
+from snapshot_cloud import decrypt_snapshot, download_encrypted
 
 
 PAGE = APP_HOME / "localization" / "editor" / "index.html"
 SCRIPT = APP_HOME / "localization" / "editor" / "app.js"
 TRANSLATIONS = REPO_ROOT / "localization" / "translations"
-APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note")
+APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at")
 OPERATIONS = re.compile(
     r"(?ms)^(?P<indent>[ \t]+)<(?P<kind>Row|Replace)\b(?P<attrs>[^>]*)>"
     r"(?P<body>.*?)^[ \t]*</(?P=kind)>"
@@ -122,7 +128,7 @@ class Editor:
         self.ready = False
         self.connection_error = ""
         try:
-            self.project_info = validate_project(REPO_ROOT, full=False)
+            self.project_info = validate_project(REPO_ROOT, full=True)
             self.ready = True
         except ValueError as error:
             self.project_info = None
@@ -135,9 +141,43 @@ class Editor:
         )
         if self.ready:
             manage.prepare(manage.read_config(), self.snapshot)
+            source = sync_primary_english.DEFAULT_ENGLISH
+            self.english_dates = read_dates(source, primary_operations(
+                source.read_text(encoding="utf-8")), REPO_ROOT)
+        else:
+            self.english_dates = {}
+        self.local_date_path = REPO_ROOT / "localization/workspace/english-edit-dates.json"
+        self.local_dates = {}
+        if self.ready and self.local_date_path.is_file():
+            try:
+                local = json.loads(self.local_date_path.read_text(encoding="utf-8"))
+                if local.get("source_sha256") == hashlib.sha256(
+                    sync_primary_english.DEFAULT_ENGLISH.read_bytes()).hexdigest():
+                    self.local_dates = local.get("dates", {})
+                    self.english_dates.update(self.local_dates)
+            except (OSError, ValueError):
+                pass
         self.actions: list[dict] = []
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
+        self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
+        self.events: list[dict] = []
+        if self.log_path.is_file():
+            for line in self.log_path.read_text(encoding="utf-8").splitlines()[-500:]:
+                try:
+                    self.events.append(json.loads(line))
+                except ValueError:
+                    continue
+
+    def record_event(self, name: str, result: str) -> None:
+        """Keep a bounded, text-free local action journal for troubleshooting."""
+        if not re.fullmatch(r"[a-z0-9/_-]{1,60}", name):
+            return
+        self.events.append({"at": datetime.now(timezone.utc).isoformat(),
+                            "action": name, "result": result})
+        self.events = self.events[-500:]
+        atomic_bytes(self.log_path, ("\n".join(json.dumps(item) for item in self.events)
+                                     + "\n").encode("utf-8"))
 
     def start_download(self, version: str) -> dict:
         """Fetch a reviewed source release in the background without replacing files."""
@@ -170,6 +210,16 @@ class Editor:
             del self.actions[0]
         self.cursor = len(self.actions)
 
+    def mark_english_edit(self, key: str) -> None:
+        """Retain portable-source edit dates across editor restarts."""
+        date = datetime.now(timezone.utc).isoformat()
+        self.english_dates[key] = date
+        self.local_dates[key] = date
+        payload = {"source_sha256": hashlib.sha256(
+            sync_primary_english.DEFAULT_ENGLISH.read_bytes()).hexdigest(),
+                   "dates": self.local_dates}
+        atomic_bytes(self.local_date_path, json.dumps(payload).encode("utf-8"))
+
     def manifest(self) -> dict:
         """Expose only known language and category filenames."""
         return json.loads((DEFAULT_EDITOR_OUTPUT / "manifest.json").read_text(encoding="utf-8"))
@@ -198,11 +248,12 @@ class Editor:
         return {
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
-            "config": manage.read_config(),
+            "config": manage.read_config() if self.ready else {},
             "vanilla_counts": self.vanilla_counts,
             "ready": self.ready,
             "connection_error": self.connection_error,
             "project": self.project_info,
+            "editor_version": editor_manifest()["version"],
             "included_source": REPO_ROOT == APP_HOME,
             "release": release_version(REPO_ROOT) if self.ready else "",
             "game": {"path": game_path, "mods": mods, "selected_mod": selected_mod,
@@ -216,8 +267,8 @@ class Editor:
         project = str(data.get("project_path", "")).strip()
         game = str(data.get("game_path", "")).strip()
         mod = str(data.get("game_mod", "")).strip()
-        if project:
-            validate_project(Path(project), full=True)
+        source_root = Path(project) if project else APP_HOME
+        validate_project(source_root, full=True)
         if game:
             mods = installed_mods(validate_game(Path(game)))
             if mod and mod not in {entry["name"] for entry in mods}:
@@ -226,9 +277,8 @@ class Editor:
                 mod = mods[0]["name"]
             if mod:
                 selected = next(entry for entry in mods if entry["name"] == mod)
-                source_root = Path(project) if project else APP_HOME
                 if (selected["version"].casefold() != validate_project(
-                    source_root, full=False)["version"].casefold() or
+                    source_root, full=True)["version"].casefold() or
                     selected["release"].casefold() != release_version(source_root).casefold()):
                     raise CatalogError("The selected game's Lekmod version differs from "
                                        "the connected source. Choose a matching DLC release.")
@@ -241,6 +291,8 @@ class Editor:
 
     def import_snapshot(self, data: bytes) -> dict:
         """Accept a verified local upload; no vanilla text leaves this computer."""
+        if not self.ready:
+            raise CatalogError("connect a complete compatible project before importing a snapshot")
         destination = APP_HOME / "localization/workspace/vanilla-snapshot.json.gz"
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".snapshot.",
@@ -258,6 +310,16 @@ class Editor:
         if self.ready:
             manage.prepare(manage.read_config(), self.snapshot)
         return {"vanilla_counts": self.vanilla_counts}
+
+    def import_cloud_snapshot(self, url: str, password: str) -> dict:
+        """Download encrypted text; keep only its verified local copy and URL."""
+        if not self.ready or not isinstance(url, str) or not isinstance(password, str):
+            raise CatalogError("connect a complete project and enter a snapshot link and password")
+        reference = REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz"
+        data = decrypt_snapshot(download_encrypted(url), password, reference)
+        result = self.import_snapshot(data)
+        save_settings({"snapshot_url": url})
+        return result
 
     def apply_to_game(self) -> dict:
         """Copy the generated XML only after checking the connected DLC copy."""
@@ -323,6 +385,8 @@ class Editor:
 
     def export_locale(self, locale: str) -> bytes:
         """Package one approved CSV for a developer without private vanilla text."""
+        if not self.ready:
+            raise CatalogError("connect a complete compatible Lekmod project first")
         if locale not in self.manifest().get("locales", {}):
             raise CatalogError("unknown language")
         path = TRANSLATIONS / f"{locale}.csv"
@@ -357,6 +421,12 @@ class Editor:
         """Search a category and return one page with approval state."""
         rows = csv_rows(self.path(locale, category))
         approved = read_approvals(TRANSLATIONS).get(locale, {})
+        timestamps = {}
+        approval_path = TRANSLATIONS / f"{locale}.csv"
+        if approval_path.is_file():
+            with approval_path.open(encoding="utf-8-sig", newline="") as handle:
+                timestamps = {record["key"]: record.get("updated_at", "")
+                              for record in csv.DictReader(handle)}
         query = query.casefold()
         selected = [
             row for row in rows
@@ -367,10 +437,13 @@ class Editor:
         page = []
         for row in selected[max(0, offset):max(0, offset) + 60]:
             item = dict(row)
+            item["english_edited_at"] = self.english_dates.get(row["key"], "")
+            item["translation_updated_at"] = timestamps.get(row["key"], "")
             saved = approved.get(row["key"])
             if saved:
                 item["translation_status"] = (
-                    "approved" if saved["source_fingerprint"] == row["source_fingerprint"]
+                    ("applied" if manage.read_config()["build"]["shipped"] else "saved")
+                    if saved["source_fingerprint"] == row["source_fingerprint"]
                     else "stale"
                 )
                 item["translation"] = saved["text"]
@@ -385,7 +458,8 @@ class Editor:
         selected = [
             {"index": row["index"], "key": row["key"], "kind": row["kind"],
              "text": primary_text(row["text"]),
-             "characters": character_count(primary_text(row["text"]))}
+             "characters": character_count(primary_text(row["text"])),
+             "english_edited_at": self.english_dates.get(row["key"], "")}
             for row in primary_operations(document)
             if not query or query in row["key"].casefold()
             or query in primary_text(row["text"]).casefold()
@@ -428,6 +502,8 @@ class Editor:
 
     def save_translation(self, data: dict) -> dict:
         """Approve one CSV row, update the tracked language CSV and game XML."""
+        if not self.ready:
+            raise CatalogError("connect a complete compatible Lekmod project first")
         if settings()["mode"] != "translator":
             raise CatalogError("switch to Translator mode to edit a translation")
         locale = str(data.get("locale", ""))
@@ -453,10 +529,12 @@ class Editor:
         old_editor = path.read_bytes()
         old_game_hash = hashlib.sha256(game.read_bytes()).hexdigest()
         existing = read_approvals(TRANSLATIONS).get(locale, {})
-        notes = {}
+        notes, timestamps = {}, {}
         if approved_path.is_file():
             with approved_path.open(encoding="utf-8-sig", newline="") as handle:
-                notes = {entry["key"]: entry["translator_note"] for entry in csv.DictReader(handle)}
+                for entry in csv.DictReader(handle):
+                    notes[entry["key"]] = entry["translator_note"]
+                    timestamps[entry["key"]] = entry.get("updated_at", "")
         if translation:
             existing[key] = {
                 "source_fingerprint": row["source_fingerprint"], "text": translation,
@@ -464,14 +542,17 @@ class Editor:
                    if data["translation_" + field]},
             }
             notes[key] = data["translator_note"]
+            timestamps[key] = datetime.now(timezone.utc).isoformat()
         else:
             existing.pop(key, None)
             notes.pop(key, None)
+            timestamps.pop(key, None)
         approved_rows = [
             {"key": selected, "source_fingerprint": value["source_fingerprint"],
              "text": value["text"], "gender": value.get("gender", ""),
              "plurality": value.get("plurality", ""),
-             "translator_note": notes.get(selected, "")}
+             "translator_note": notes.get(selected, ""),
+             "updated_at": timestamps.get(selected, "")}
             for selected, value in sorted(existing.items())
         ]
         atomic_bytes(approved_path, encoded_csv(approved_rows, APPROVAL_FIELDS))
@@ -488,7 +569,8 @@ class Editor:
                 "translator_note": data["translator_note"],
                 "translation_source_fingerprint": row["source_fingerprint"],
                 "translation_characters": str(character_count(translation)) if translation else "",
-                "translation_status": "approved" if translation else "missing",
+                "translation_status": ("applied" if apply_to_game else "saved")
+                if translation else "missing",
             })
             atomic_bytes(path, encoded_csv(rows, list(EDITOR_FIELDNAMES)))
             if apply_to_game:
@@ -548,13 +630,15 @@ class Editor:
             raise
         config = manage.read_config()["build"]
         new_game_hash = hashlib.sha256(game.read_bytes()).hexdigest()
-        if record and (before != replacement or old_game_hash != new_game_hash):
-            self.remember({
+        if before != replacement or old_game_hash != new_game_hash:
+            if record:
+                self.remember({
                 "kind": "primary", "index": index, "key": row["key"],
                 "before_text": primary_text(row["text"]), "after_text": new_text,
                 "before_game_hash": old_game_hash, "after_game_hash": new_game_hash,
                 "build": config,
-            })
+                })
+            self.mark_english_edit(row["key"])
         return {"key": row["key"], "updated": True,
                 "applied_to_game": config["english"] and config["shipped"],
                 **self.history_state()}
@@ -643,6 +727,7 @@ class Editor:
                        "before_game_hash": hashlib.sha256(old_game).hexdigest(),
                        "after_game_hash": hashlib.sha256(game.read_bytes()).hexdigest(),
                        "build": manage.read_config()["build"]})
+        self.mark_english_edit(key)
         return {"key": key, "updated": True, **self.history_state()}
 
     def replay(self, *, undo: bool) -> dict:
@@ -765,8 +850,16 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.wfile.write(data)
                 elif url.path == "/api/meta":
                     self.respond(200, editor.metadata())
+                elif url.path == "/api/logs":
+                    self.respond(200, {"events": editor.events})
+                elif url.path == "/api/logs/download":
+                    self.download("lekmod-editor-actions.jsonl",
+                                  editor.log_path.read_bytes() if editor.log_path.exists() else b"",
+                                  "application/x-ndjson")
                 elif url.path == "/api/versions":
                     self.respond(200, {"versions": release_catalog()})
+                elif url.path == "/api/editor-latest":
+                    self.respond(200, latest_release())
                 elif url.path == "/api/download-status":
                     self.respond(200, editor.download_state)
                 elif url.path == "/api/rows":
@@ -791,7 +884,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.download(game.name, game.read_bytes(), "application/xml")
                 else:
                     self.respond(404, {"error": "not found"})
-            except (CatalogError, OSError, ValueError, subprocess.CalledProcessError) as error:
+            except (CatalogError, OSError, ValueError, urllib.error.URLError,
+                    subprocess.CalledProcessError) as error:
                 self.respond(400, {"error": str(error)})
 
         def do_POST(self) -> None:
@@ -806,6 +900,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     if not 0 < length <= 16 * 1024 * 1024:
                         raise CatalogError("invalid snapshot upload size")
                     self.respond(200, editor.import_snapshot(self.rfile.read(length)))
+                    editor.record_event("snapshot-import", "success")
                     return
                 if not 0 < length <= 512 * 1024:
                     raise CatalogError("invalid request size")
@@ -823,12 +918,24 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif self.path == "/api/connect":
                     result = editor.connect(data)
                     self.respond(200, result)
+                    editor.record_event("connect", "success")
                     if result["restart"]:
                         self.server.restart_requested = True
                         threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
                 elif self.path == "/api/download-project":
                     result = editor.start_download(str(data.get("version", "")))
+                elif self.path == "/api/snapshot-cloud":
+                    result = editor.import_cloud_snapshot(data.get("url"), data.get("password"))
+                elif self.path == "/api/editor-update":
+                    latest = latest_release()
+                    stage = stage_release(latest)
+                    self.server.update_script = write_windows_updater(stage)
+                    self.server.update_stage = stage
+                    self.respond(200, {"updating": True, "version": latest["latest"]})
+                    editor.record_event("editor-update", "success")
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
                 elif self.path == "/api/preferences":
                     allowed = {"mode", "prefill", "wrap", "locale", "category",
                                "visible_columns", "column_widths", "onboarded"}
@@ -837,6 +944,15 @@ def make_handler(editor: Editor, token: str, port: int):
                     if data.get("mode") == "developer":
                         validate_project(REPO_ROOT, full=True)
                     result = {"preferences": save_settings(data)}
+                elif self.path == "/api/event":
+                    name = data.get("name")
+                    if name not in {"row-selected", "mode-switch", "settings-open",
+                                    "columns-changed", "page-changed", "prefill-changed",
+                                    "logs-open", "logs-download", "copy", "wrap-changed",
+                                    "translation-export", "xml-export", "update-check"}:
+                        raise CatalogError("unknown interface action")
+                    editor.record_event(name, "ui")
+                    result = {"logged": True}
                 elif self.path == "/api/browse":
                     if data.get("kind") not in ("project", "game"):
                         raise CatalogError("unknown folder kind")
@@ -863,15 +979,20 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.replay(undo=False)
                 elif self.path == "/api/stop":
                     self.respond(200, {"stopping": True})
+                    editor.record_event("stop", "success")
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
                 else:
                     self.respond(404, {"error": "not found"})
                     return
                 self.respond(200, result)
-            except (CatalogError, OSError, ValueError, ET.ParseError,
+                if self.path != "/api/event":
+                    editor.record_event(self.path.removeprefix("/api/"), "success")
+            except (CatalogError, OSError, ValueError, ET.ParseError, urllib.error.URLError,
                     subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 self.respond(400, {"error": str(error)})
+                editor.record_event(self.path.removeprefix("/api/"),
+                                    "error:" + type(error).__name__)
 
         def log_message(self, format: str, *args: object) -> None:
             """Log one local request without exposing the private token."""
@@ -908,7 +1029,13 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-    if getattr(server, "restart_requested", False):
+    if getattr(server, "update_script", None):
+        subprocess.Popen([
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(server.update_script), "-OldPid", str(os.getpid()),
+            "-Stage", str(server.update_stage), "-Home", str(APP_HOME),
+        ], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    elif getattr(server, "restart_requested", False):
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--port", str(server.server_port)]
             environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}

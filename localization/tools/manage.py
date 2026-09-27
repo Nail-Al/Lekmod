@@ -58,7 +58,7 @@ def run(*args: str) -> None:
     # the embedded interpreter so it cannot recursively start another editor.
     script = Path(args[0]).stem
     if script not in {"sync_primary_english", "build_localization_catalog",
-                      "build_shipped_localization"}:
+                      "build_shipped_localization", "build_editor_dates"}:
         raise CatalogError(f"unsupported packaged tool: {script}")
     previous = sys.argv
     sys.argv = [script, *args[1:]]
@@ -109,6 +109,8 @@ def prepare(config: dict[str, dict[str, bool]], snapshot: Path | None) -> None:
         verify_snapshot_reference(snapshot)
     if config["build"]["english"]:
         run(str(TOOLS / "sync_primary_english.py"), "--write")
+        if (REPO_ROOT / ".git").exists() and shutil.which("git"):
+            run(str(TOOLS / "build_editor_dates.py"))
     if config["build"]["catalog"]:
         run(str(TOOLS / "build_localization_catalog.py"),
             "--vanilla-snapshot" if snapshot is not None else "--vanilla-reference",

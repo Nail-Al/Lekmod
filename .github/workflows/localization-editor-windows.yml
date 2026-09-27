@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   editor:
@@ -25,7 +25,7 @@ jobs:
       - name: Build Windows executable
         shell: pwsh
         run: |
-          python -m pip install "pyinstaller==6.22.3"
+          python -m pip install "pyinstaller==6.22.3" "cryptography>=45,<47"
           python -m PyInstaller --noconfirm --clean --onefile --console --name LekmodLocalizationEditor --paths localization/tools localization/tools/editor_server.py
       - name: Package contributor files
         shell: pwsh
@@ -35,6 +35,20 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_portable_editor.py --archive dist/LekmodLocalizationEditor-Windows.zip
+      - name: Publish versioned Windows download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
+          $tag = $editor.release_tag
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dist/LekmodLocalizationEditor-Windows.zip `
+              --target $env:GITHUB_SHA --title "Lekmod Localization Editor $($editor.version)" `
+              --notes "Portable Windows localization editor. Extract the ZIP before launching."
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: LekmodLocalizationEditor-Windows

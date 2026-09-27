@@ -22,7 +22,7 @@ SETTINGS_FILE = APP_HOME / "localization" / "workspace" / "editor-settings.json"
 DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
     "mode": "translator", "prefill": True, "wrap": True, "locale": "RU_RU",
-    "category": "", "visible_columns": [], "column_widths": {},
+    "category": "", "visible_columns": [], "column_widths": {}, "snapshot_url": "",
 }
 KEY = re.compile(r"^v?\d+(?:\.\d+)+$", re.IGNORECASE)
 GAME_EXES = ("CivilizationV.exe", "CivilizationV_DX11.exe")
@@ -40,7 +40,7 @@ def settings(home: Path = APP_HOME) -> dict:
     if not isinstance(raw, dict):
         return DEFAULTS.copy()
     result = DEFAULTS.copy()
-    for name in ("project_path", "game_path", "game_mod", "locale", "category"):
+    for name in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url"):
         if isinstance(raw.get(name), str) and len(raw[name]) < 4096:
             result[name] = raw[name]
     for name in ("onboarded", "prefill", "wrap"):
@@ -70,7 +70,7 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
     ):
         raise ValueError("invalid editor mode or preference")
     if any(not isinstance(candidate[k], str) or len(candidate[k]) > 4096
-           for k in ("project_path", "game_path", "game_mod", "locale", "category")):
+           for k in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url")):
         raise ValueError("invalid editor path or selection")
     if (not isinstance(candidate["visible_columns"], list) or
         any(not isinstance(x, str) or len(x) > 64 for x in candidate["visible_columns"]) or
@@ -235,10 +235,21 @@ def release_catalog(home: Path = APP_HOME) -> list[dict]:
     """Show official installer releases, marking only this branch's match usable."""
     path = home / "LekmodInstaller/github_setup/versions.json"
     versions = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    supported = release_version(home)
-    return [{"version": version, "supported": version == supported,
+    supported = set(editor_manifest(home)["compatible_releases"])
+    return [{"version": version, "supported": version in supported,
              "date": info.get("release_date", "")}
             for version, info in versions.items()]
+
+
+def editor_manifest(home: Path = APP_HOME) -> dict:
+    """Read the independently versioned editor and its reviewed game releases."""
+    path = home / "localization/editor/version.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(data, dict) or not re.fullmatch(r"\d+\.\d+", str(data.get("version", "")))
+        or not isinstance(data.get("compatible_releases"), list)
+        or not all(KEY.fullmatch(release) for release in data["compatible_releases"])):
+        raise ValueError("invalid editor version manifest")
+    return data
 
 
 def extract_source_archive(archive: Path, destination: Path) -> None:
@@ -270,7 +281,7 @@ def extract_source_archive(archive: Path, destination: Path) -> None:
 
 def download_compatible_source(version: str, home: Path = APP_HOME) -> Path:
     """Download the localization branch for the one reviewed release only."""
-    if version != release_version(home):
+    if version not in editor_manifest(home)["compatible_releases"]:
         raise ValueError("This version has no compatible localization baseline. "
                          "A maintainer must migrate it before it can be edited.")
     destination = home / "localization/workspace/projects" / version

@@ -32,7 +32,7 @@ def read_approvals(path: Path) -> dict:
             with file.open(encoding="utf-8-sig", newline="") as handle:
                 reader = csv.DictReader(handle)
                 expected = ["key", "source_fingerprint", "text", "gender", "plurality", "translator_note"]
-                if reader.fieldnames != expected:
+                if reader.fieldnames not in (expected, [*expected, "updated_at"]):
                     raise CatalogError(f"invalid translation columns: {file}")
                 rows = {}
                 for row in reader:
