@@ -133,6 +133,7 @@ $log = Join-Path $updates 'update.log'
 $events = Join-Path $EditorRoot 'localization/workspace/editor-actions.jsonl'
 $backup = $null
 $copyStarted = $false
+$rollbackOk = $true
 $existed = @{}
 $started = $null
 $ticket = [Guid]::NewGuid().ToString('N')
@@ -179,10 +180,13 @@ try {
   Record-Update 'starting' "Starting updated editor from $Stage"
   $started = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -ArgumentList $launchArgs -PassThru
   $confirmed = $false
+  $signal = $null
   for ($attempt = 0; $attempt -lt 300; $attempt++) {
     if (Test-Path -LiteralPath $ready -PathType Leaf) {
       $signal = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
-      if ($signal.ticket -eq $ticket -and $signal.pid -eq $started.Id) {
+      # A PyInstaller onefile EXE has a bootloader PID and a different app PID.
+      if ($signal.ticket -eq $ticket -and
+          (Get-Process -Id $signal.pid -ErrorAction SilentlyContinue)) {
         $confirmed = $true
         break
       }
@@ -191,27 +195,43 @@ try {
     Start-Sleep -Milliseconds 200
   }
   if (-not $confirmed) { throw 'The updated editor did not start within 60 seconds; restoring the previous version.' }
-  Record-Update 'success' "Editor installed from $Stage; backup: $backup; pid: $($started.Id); port: $($signal.port)"
+  Record-Update 'success' "Editor installed from $Stage; backup: $backup; pid: $($signal.pid); launcher_pid: $($started.Id); port: $($signal.port)"
 } catch {
   $failure = $_.ToString()
-  if ($started -and -not $started.HasExited) {
-    try { Stop-Process -Id $started.Id -Force -ErrorAction Stop; $started.WaitForExit(10000) }
-    catch { $failure += "; could not stop new editor: $_" }
+  if ($signal -and $signal.pid -and (Get-Process -Id $signal.pid -ErrorAction SilentlyContinue)) {
+    try { Stop-Process -Id $signal.pid -Force -ErrorAction Stop }
+    catch { $failure += "; could not stop new app process: $_" }
+  }
+  if ($started) {
+    try {
+      & taskkill.exe /PID $started.Id /T /F 2>$null | Out-Null
+      $started.WaitForExit(10000) | Out-Null
+    } catch { $failure += "; could not stop new editor process tree: $_" }
   }
   if ($copyStarted) {
     foreach ($file in $files) {
       try {
         $target = Join-Path $EditorRoot $file
-        if ($existed[$file]) {
-          Copy-Item -LiteralPath (Join-Path $backup $file) -Destination $target -Force
-        } else {
-          Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        for ($retry = 0; $retry -lt 20; $retry++) {
+          try {
+            if ($existed[$file]) {
+              Copy-Item -LiteralPath (Join-Path $backup $file) -Destination $target -Force
+            } else {
+              if (Test-Path -LiteralPath $target) {
+                Remove-Item -LiteralPath $target -Force -ErrorAction Stop
+              }
+            }
+            break
+          } catch {
+            if ($retry -eq 19) { throw }
+            Start-Sleep -Milliseconds 500
+          }
         }
-      } catch { $failure += "; rollback failed for ${file}: $_" }
+      } catch { $rollbackOk = $false; $failure += "; rollback failed for ${file}: $_" }
     }
   }
   Record-Update 'failure' $failure
-  if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) -and
+  if ($rollbackOk -and -not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) -and
       (Test-Path -LiteralPath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -PathType Leaf)) {
     try {
       if ($NoBrowser) {

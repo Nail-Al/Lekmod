@@ -110,20 +110,24 @@ def main() -> int:
     encrypt.add_argument("--input", type=Path, default=DEFAULT_SNAPSHOT)
     encrypt.add_argument("--output", type=Path,
                          default=REPO_ROOT / "localization/workspace/vanilla-snapshot.enc")
+    encrypt.add_argument("--reference", type=Path,
+                         default=REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz",
+                         help="Reviewed text-free reference, including a proposed new baseline")
     fetch = commands.add_parser("fetch")
     fetch.add_argument("--url", required=True)
     fetch.add_argument("--output", type=Path, default=DEFAULT_SNAPSHOT)
+    fetch.add_argument("--reference", type=Path,
+                       default=REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz")
     args = parser.parse_args()
-    reference = REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz"
     try:
         password = getpass.getpass("Snapshot password (at least 16 characters): ")
         if args.action == "encrypt":
             repeated = getpass.getpass("Repeat password: ")
             if password != repeated:
                 raise ValueError("passwords do not match")
-            print(f"Encrypted: {encrypt_snapshot(args.input, password, reference, args.output)}")
+            print(f"Encrypted: {encrypt_snapshot(args.input, password, args.reference, args.output)}")
         else:
-            data = decrypt_snapshot(download_encrypted(args.url), password, reference)
+            data = decrypt_snapshot(download_encrypted(args.url), password, args.reference)
             install_snapshot(data, args.output)
             print(f"Verified snapshot: {args.output}")
     except (CatalogError, OSError, ValueError) as error:

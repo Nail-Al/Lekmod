@@ -52,7 +52,16 @@ The full snapshot copies official game text. Keep it out of this public Git hist
 
 The current reference has EN and RU text; DE, ES, FR, IT, JA, KO, PL and ZH_HANT_HK are empty. First run `python -B localization/tools/collect_vanilla.py inspect --vanilla-db "<path to Localization-Merged.db>"` against an **unmodded** Civilization V cache. If a language already has at least 1,000 rows, capture it immediately; there is no need to switch Steam language for that one. For an empty language, switch it in **Steam → Civilization V → Properties → Language**, let Steam finish updating, launch the unmodded game once, then close it. Run `inspect` again to confirm that language is populated. Capture it with `python -B localization/tools/collect_vanilla.py capture --vanilla-db "<same database path>" --locale DE_DE`, replacing `DE_DE` as needed. Repeat for the eight languages. The collector saves separate files under ignored `localization/workspace/vanilla-captures/` and rejects a different English baseline, a missing language, too few rows, or Lekmod text.
 
-After all eight captures, run `python -B localization/tools/collect_vanilla.py merge`. It creates **proposals** in `localization/workspace/`: a full `vanilla-snapshot-proposed.json.gz` and a text-free `vanilla-fingerprints-proposed.json.gz`. It refuses missing languages and never overwrites the current baseline. Review row counts and source consistency with the team before replacing the pinned reference. Then encrypt the proposed full snapshot, upload the new `.enc`, update the editor's team link if it changed, and release the new reference and editor together. Keep the old encrypted archive until collaborators have migrated. Ordinary translators only enter the team's link and password; they never need to switch game languages.
+After all eight captures, run `python -B localization/tools/collect_vanilla.py merge`. It creates **proposals** in `localization/workspace/`: a full `vanilla-snapshot-proposed.json.gz` and a text-free `vanilla-fingerprints-proposed.json.gz`. It refuses missing languages and never overwrites the current baseline. Review row counts and source consistency with the team. Then create the next encrypted archive without changing the current reference yet:
+
+```powershell
+py -3.13 -B .\localization\tools\snapshot_cloud.py encrypt `
+  --input .\localization\workspace\vanilla-snapshot-proposed.json.gz `
+  --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz `
+  --output .\localization\workspace\vanilla-snapshot-complete.enc
+```
+
+Upload the new `.enc` and verify its link with `snapshot_cloud.py fetch --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz --url "<direct link>" --output .\localization\workspace\verified-proposal.json.gz`. Then replace the tracked fingerprint index with the reviewed proposal, install the proposed full snapshot locally, update the editor's team link if it changed, and release those changes together. Keep the old encrypted archive until collaborators have migrated. Ordinary translators only enter the team's link and password; they never need to switch game languages.
 
 ## Updates and game test
 

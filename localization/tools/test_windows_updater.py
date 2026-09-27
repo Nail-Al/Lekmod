@@ -92,7 +92,9 @@ def main() -> int:
         assert metadata["editor_version"] == "0.6"
         assert metadata["preferences"]["column_widths"] == {"key": 420}
         assert metadata["preferences"]["project_path"] == "C:/Lekmod"
-        subprocess.run(["taskkill", "/PID", match.group(1), "/T", "/F"],
+        launcher = re.search(r"launcher_pid: (\d+)", installer_log)
+        assert launcher
+        subprocess.run(["taskkill", "/PID", launcher.group(1), "/T", "/F"],
                        capture_output=True, text=True, timeout=30)
 
         stage.mkdir(parents=True)
