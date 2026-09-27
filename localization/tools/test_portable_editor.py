@@ -142,10 +142,14 @@ def main() -> int:
         try:
             assert b"function renderTable" in get(base + "/app.js")
             meta = json.loads(get(base + "/api/meta"))
-            assert meta["ready"] and meta["editor_version"] == "0.2"
+            expected_version = json.loads((root / "localization/editor/version.json").read_text(
+                encoding="utf-8"))["version"]
+            assert meta["ready"] and meta["editor_version"] == expected_version
             assert not meta["vanilla_counts"]
             post(base, token, "/api/preferences", {"mode": "developer"})
             primary = json.loads(get(base + "/api/primary?offset=0"))["rows"]
+            assert primary[0]["source_file"] == "localization/en_US/primary.xml"
+            assert primary[0]["source_line"] > 0
             dates = json.loads(gzip.decompress((project /
                 "localization/reference/english-edit-dates.json.gz").read_bytes()))
             from lekmod_localization.english_dates import source_hash
