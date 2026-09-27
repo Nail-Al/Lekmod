@@ -173,7 +173,15 @@ try {
     $source = Join-Path $Stage $file
     $target = Join-Path $EditorRoot $file
     New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
-    Copy-Item -LiteralPath $source -Destination $target -Force
+    # The old onefile bootloader may still be releasing the EXE after its
+    # Python child exits; give Windows time to release the file lock.
+    for ($retry = 0; $retry -lt 20; $retry++) {
+      try { Copy-Item -LiteralPath $source -Destination $target -Force; break }
+      catch {
+        if ($retry -eq 19) { throw }
+        Start-Sleep -Milliseconds 500
+      }
+    }
   }
   $launchArgs = @('--update-ticket', $ticket)
   if ($NoBrowser) { $launchArgs += '--no-browser' }
