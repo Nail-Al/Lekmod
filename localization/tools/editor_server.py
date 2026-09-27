@@ -12,28 +12,41 @@ import json
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
+import os
+import tempfile
+import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 from xml.sax.saxutils import escape
 import zipfile
 
 import build_localization_catalog  # Included explicitly in the frozen editor.
+import audit_primary_localization
 import build_shipped_localization
 import manage
 import sync_primary_english
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
-    PLACEHOLDER_RE, character_count, token_counts,
+    PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
+)
+from lekmod_localization.connections import (
+    APP_HOME, apply_game, detect_game, installed_mods, release_version,
+    save_settings, settings, validate_game, validate_project,
+    release_catalog, download_compatible_source,
 )
 from lekmod_localization.shipped import read_approvals
 from lekmod_localization.vanilla_snapshot import read_snapshot
+from lekmod_localization.vanilla_reference import verify_snapshot_reference
+from lekmod_localization.vanilla_reference import read_reference
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
 
 
-PAGE = REPO_ROOT / "localization" / "editor" / "index.html"
+PAGE = APP_HOME / "localization" / "editor" / "index.html"
+SCRIPT = APP_HOME / "localization" / "editor" / "app.js"
 TRANSLATIONS = REPO_ROOT / "localization" / "translations"
 APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note")
 OPERATIONS = re.compile(
@@ -106,14 +119,43 @@ class Editor:
 
     def __init__(self, snapshot: Path = manage.SNAPSHOT):
         manage.migrate_workspace()
-        self.snapshot = snapshot if snapshot.is_file() else None
+        self.ready = False
+        self.connection_error = ""
+        try:
+            self.project_info = validate_project(REPO_ROOT, full=False)
+            self.ready = True
+        except ValueError as error:
+            self.project_info = None
+            self.connection_error = str(error)
+        home_snapshot = APP_HOME / "localization/workspace/vanilla-snapshot.json.gz"
+        self.snapshot = next((path for path in (snapshot, home_snapshot) if path.is_file()), None)
         self.vanilla_counts = (
             {locale: len(rows) for locale, rows in read_snapshot(self.snapshot)[0].items()}
             if self.snapshot is not None else {}
         )
-        manage.prepare(manage.read_config(), self.snapshot)
+        if self.ready:
+            manage.prepare(manage.read_config(), self.snapshot)
         self.actions: list[dict] = []
         self.cursor = 0
+        self.download_state: dict = {"state": "idle"}
+
+    def start_download(self, version: str) -> dict:
+        """Fetch a reviewed source release in the background without replacing files."""
+        if self.download_state["state"] == "running":
+            raise CatalogError("a source download is already running")
+        if version not in {row["version"] for row in release_catalog() if row["supported"]}:
+            raise CatalogError("this release needs a reviewed localization migration")
+        self.download_state = {"state": "running", "version": version}
+
+        def run() -> None:
+            try:
+                path = download_compatible_source(version)
+                self.download_state = {"state": "complete", "path": str(path)}
+            except Exception as error:
+                self.download_state = {"state": "error", "error": str(error)}
+
+        threading.Thread(target=run, daemon=True).start()
+        return self.download_state
 
     def history_state(self) -> dict[str, bool]:
         """Report whether saved edits can be undone or redone in this session."""
@@ -142,14 +184,142 @@ class Editor:
 
     def metadata(self) -> dict:
         """Return selector choices and current feature switches."""
-        manifest = self.manifest()
+        manifest = self.manifest() if self.ready else {"locales": {}}
+        prefs = settings()
+        game_path = prefs["game_path"] or detect_game()
+        mods = []
+        game_error = ""
+        if game_path:
+            try:
+                mods = installed_mods(Path(game_path))
+            except ValueError as error:
+                game_error = str(error)
+        selected_mod = prefs["game_mod"] or (mods[0]["name"] if len(mods) == 1 else "")
         return {
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
             "config": manage.read_config(),
             "vanilla_counts": self.vanilla_counts,
+            "ready": self.ready,
+            "connection_error": self.connection_error,
+            "project": self.project_info,
+            "included_source": REPO_ROOT == APP_HOME,
+            "release": release_version(REPO_ROOT) if self.ready else "",
+            "game": {"path": game_path, "mods": mods, "selected_mod": selected_mod,
+                     "error": game_error},
+            "preferences": prefs,
             **self.history_state(),
         }
+
+    def connect(self, data: dict) -> dict:
+        """Validate selected folders before persisting; a project switch restarts."""
+        project = str(data.get("project_path", "")).strip()
+        game = str(data.get("game_path", "")).strip()
+        mod = str(data.get("game_mod", "")).strip()
+        if project:
+            validate_project(Path(project), full=True)
+        if game:
+            mods = installed_mods(validate_game(Path(game)))
+            if mod and mod not in {entry["name"] for entry in mods}:
+                raise CatalogError("selected Lekmod DLC folder is not installed in this game")
+            if not mod and len(mods) == 1:
+                mod = mods[0]["name"]
+            if mod:
+                selected = next(entry for entry in mods if entry["name"] == mod)
+                source_root = Path(project) if project else APP_HOME
+                if (selected["version"].casefold() != validate_project(
+                    source_root, full=False)["version"].casefold() or
+                    selected["release"].casefold() != release_version(source_root).casefold()):
+                    raise CatalogError("The selected game's Lekmod version differs from "
+                                       "the connected source. Choose a matching DLC release.")
+        elif mod:
+            raise CatalogError("select a game folder before selecting a DLC mod")
+        changed = (Path(project).resolve() if project else APP_HOME) != REPO_ROOT
+        saved = save_settings({"project_path": project, "game_path": game,
+                               "game_mod": mod, "onboarded": True})
+        return {"restart": changed, "preferences": saved}
+
+    def import_snapshot(self, data: bytes) -> dict:
+        """Accept a verified local upload; no vanilla text leaves this computer."""
+        destination = APP_HOME / "localization/workspace/vanilla-snapshot.json.gz"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".snapshot.",
+                                         delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+        try:
+            verify_snapshot_reference(temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.snapshot = destination
+        self.vanilla_counts = {locale: len(rows) for locale, rows in
+                               read_snapshot(destination)[0].items()}
+        if self.ready:
+            manage.prepare(manage.read_config(), self.snapshot)
+        return {"vanilla_counts": self.vanilla_counts}
+
+    def apply_to_game(self) -> dict:
+        """Copy the generated XML only after checking the connected DLC copy."""
+        if not self.ready:
+            raise CatalogError("connect a compatible Lekmod project first")
+        prefs = settings()
+        game = prefs["game_path"] or detect_game()
+        if not game:
+            raise CatalogError("connect a Civilization V installation in Settings")
+        mods = installed_mods(Path(game))
+        name = prefs["game_mod"] or (mods[0]["name"] if len(mods) == 1 else "")
+        if not name:
+            raise CatalogError("select the installed Lekmod version in Settings")
+        candidate, _ = build_shipped_localization.build_candidate(self.snapshot)
+        current = build_shipped_localization.DEFAULT_SOURCE.read_text(encoding="utf-8")
+        if candidate != current:
+            raise CatalogError("generated localization is out of date; save or prepare the project first")
+        try:
+            return apply_game(REPO_ROOT, Path(game), name)
+        except (ValueError, OSError) as error:
+            raise CatalogError(str(error)) from error
+
+    def check_project(self) -> dict:
+        """Run the full configured suite when available, or name skipped gates."""
+        self.require_developer()
+        python = shutil.which("python") or shutil.which("py")
+        git = shutil.which("git")
+        if python and git:
+            command = [python, "-B", str(REPO_ROOT / "localization/tools/manage.py"), "check"]
+            result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True,
+                                    text=True, timeout=180)
+            if result.returncode:
+                raise CatalogError((result.stderr or result.stdout)[-1500:])
+            return {"summary": "All enabled project checks passed, including tests and inventory."}
+        enabled = manage.read_config()["checks"]
+        passed, skipped = [], []
+        if enabled["primary"]:
+            report = audit_primary_localization.parse_source(
+                sync_primary_english.DEFAULT_ENGLISH, "en_US")
+            if report["summary"]["errors"]:
+                raise CatalogError("canonical English audit failed")
+            passed.append("English source audit")
+        if enabled["english_sync"]:
+            sync_primary_english.synchronize(sync_primary_english.DEFAULT_ENGLISH,
+                                            build_shipped_localization.DEFAULT_SOURCE,
+                                            write=False)
+            passed.append("English sync")
+        if enabled["shipped"]:
+            candidate, _ = build_shipped_localization.build_candidate(self.snapshot)
+            if candidate != build_shipped_localization.DEFAULT_SOURCE.read_text(encoding="utf-8"):
+                raise CatalogError("generated XML differs from approved translations")
+            passed.append("generated XML")
+        if enabled["art"]:
+            for path in (REPO_ROOT / "LEKMOD/Art").rglob("*.xml"):
+                ET.parse(path)
+            passed.append("Art XML parsing")
+        for name in ("inventory", "unit_tests"):
+            if enabled[name]:
+                skipped.append(name)
+        return {"summary": "Passed: " + ", ".join(passed or ["none enabled"]) +
+                (". Skipped without developer Python and Git: " + ", ".join(skipped) +
+                 ". CI runs the complete suite on push." if skipped else ".")}
 
     def export_locale(self, locale: str) -> bytes:
         """Package one approved CSV for a developer without private vanilla text."""
@@ -258,6 +428,8 @@ class Editor:
 
     def save_translation(self, data: dict) -> dict:
         """Approve one CSV row, update the tracked language CSV and game XML."""
+        if settings()["mode"] != "translator":
+            raise CatalogError("switch to Translator mode to edit a translation")
         locale = str(data.get("locale", ""))
         category = str(data.get("category", ""))
         path = self.path(locale, category)
@@ -267,7 +439,7 @@ class Editor:
         if row is None or row["source_fingerprint"] != data.get("source_fingerprint"):
             raise CatalogError("the English source changed; reload this row")
         for name in ("translation", "translation_gender", "translation_plurality", "translator_note"):
-            if not isinstance(data.get(name), str) or len(data[name]) > 10000:
+            if not isinstance(data.get(name), str) or len(data[name]) > 200000:
                 raise CatalogError(f"invalid {name}")
         translation = data["translation"]
         if translation and (
@@ -345,6 +517,7 @@ class Editor:
 
     def save_primary(self, data: dict, *, record: bool = True) -> dict:
         """Change one English text, then refresh generated XML and draft statuses."""
+        self.require_developer()
         source = sync_primary_english.DEFAULT_ENGLISH
         game = build_shipped_localization.DEFAULT_SOURCE
         before = source.read_text(encoding="utf-8")
@@ -357,7 +530,7 @@ class Editor:
             raise CatalogError("unknown primary row")
         row = rows[index]
         new_text = data.get("text")
-        if not isinstance(new_text, str) or len(new_text) > 10000 or (
+        if not isinstance(new_text, str) or len(new_text) > 200000 or (
             row["key"] != data.get("key")
             or primary_text(row["text"]) != data.get("old_text")
         ):
@@ -386,6 +559,92 @@ class Editor:
                 "applied_to_game": config["english"] and config["shipped"],
                 **self.history_state()}
 
+    def require_developer(self) -> None:
+        """Keep canonical English changes in a full checkout for review."""
+        if settings()["mode"] != "developer":
+            raise CatalogError("switch to Developer mode to edit English source")
+        try:
+            validate_project(REPO_ROOT, full=True)
+        except ValueError as error:
+            raise CatalogError(str(error)) from error
+
+    def create_primary(self, data: dict) -> dict:
+        """Add a text key; gameplay entity references remain a developer task."""
+        self.require_developer()
+        key, value = data.get("key"), data.get("text")
+        if not isinstance(key, str) or not KEY_RE.fullmatch(key) or not isinstance(value, str):
+            raise CatalogError("enter a TXT_KEY_* identifier and English text")
+        if len(value) > 200000:
+            raise CatalogError("English text is too large for this editor")
+        source = sync_primary_english.DEFAULT_ENGLISH
+        before = source.read_text(encoding="utf-8")
+        if key in read_reference()["english"] or any(row["key"] == key for row in primary_operations(before)):
+            raise CatalogError("key already exists in the English or vanilla source")
+        for path in (REPO_ROOT / "LEKMOD/Art").rglob("*"):
+            if path.is_file() and path.suffix.lower() in (".xml", ".sql") and (
+                key in path.read_text(encoding="utf-8", errors="ignore")
+            ):
+                raise CatalogError(f"key already exists in {path.relative_to(REPO_ROOT)}")
+        closing = "\t</Language_en_US>"
+        if before.count(closing) != 1:
+            raise CatalogError("cannot locate the end of the primary English table")
+        operation = (f'\t\t<Row Tag="{key}">\n\t\t\t<Text>{escape(value)}</Text>\n'
+                     "\t\t</Row>\n")
+        return self._save_structure(before, before.replace(closing, operation + closing, 1), key)
+
+    def rename_primary(self, data: dict) -> dict:
+        """Rename only an unreferenced key; changing a live ID needs a migration."""
+        self.require_developer()
+        index, old, new = data.get("index"), data.get("key"), data.get("new_key")
+        if not isinstance(index, int) or not isinstance(new, str) or not KEY_RE.fullmatch(new):
+            raise CatalogError("enter a valid replacement TXT_KEY_* identifier")
+        source = sync_primary_english.DEFAULT_ENGLISH
+        before = source.read_text(encoding="utf-8")
+        rows = primary_operations(before)
+        if index < 0 or index >= len(rows) or rows[index]["key"] != old:
+            raise CatalogError("selected English row changed; reload")
+        if any(row["key"] == new for row in rows) or new in read_reference()["english"]:
+            raise CatalogError("replacement key already exists")
+        if sum(row["key"] == old for row in rows) != 1:
+            raise CatalogError("key has multiple English operations; review them in the XML")
+        if any(old in read_approvals(TRANSLATIONS).get(locale, {})
+               for locale in self.manifest()["locales"]):
+            raise CatalogError("key has approved translations; migrate them with a developer")
+        for path in (REPO_ROOT / "LEKMOD").rglob("*"):
+            if (path.is_file() and path != build_shipped_localization.DEFAULT_SOURCE and
+                path.suffix.lower() in (".xml", ".sql", ".lua", ".modinfo") and
+                path.stat().st_size < 8 * 1024 * 1024 and
+                old in path.read_text(encoding="utf-8", errors="ignore")):
+                raise CatalogError(f"key is referenced in {path.relative_to(REPO_ROOT)}; "
+                                   "update gameplay references in a reviewed migration")
+        row = rows[index]
+        prefix = before[:row["start"]]
+        body = before[row["start"]:row["text_end"]]
+        if body.count(f'Tag="{old}"') != 1:
+            raise CatalogError("cannot identify a unique Tag attribute")
+        after = prefix + body.replace(f'Tag="{old}"', f'Tag="{new}"', 1) + before[row["text_end"]:]
+        return self._save_structure(before, after, new)
+
+    def _save_structure(self, before: str, after: str, key: str) -> dict:
+        """Rebuild after an English key edit and restore files on failure."""
+        source = sync_primary_english.DEFAULT_ENGLISH
+        game = build_shipped_localization.DEFAULT_SOURCE
+        sync_primary_english.validate_source(after)
+        old_source, old_game = source.read_bytes(), game.read_bytes()
+        sync_primary_english.atomic_text(source, after)
+        try:
+            manage.prepare(manage.read_config(), self.snapshot)
+        except Exception:
+            atomic_bytes(source, old_source)
+            atomic_bytes(game, old_game)
+            raise
+        self.remember({"kind": "structure", "before_source": old_source,
+                       "after_source": source.read_bytes(),
+                       "before_game_hash": hashlib.sha256(old_game).hexdigest(),
+                       "after_game_hash": hashlib.sha256(game.read_bytes()).hexdigest(),
+                       "build": manage.read_config()["build"]})
+        return {"key": key, "updated": True, **self.history_state()}
+
     def replay(self, *, undo: bool) -> dict:
         """Reverse or reapply one saved edit, refusing unrelated file changes."""
         position = self.cursor - 1 if undo else self.cursor
@@ -399,7 +658,23 @@ class Editor:
         target = "before" if undo else "after"
         if hashlib.sha256(game.read_bytes()).hexdigest() != action[f"{side}_game_hash"]:
             raise CatalogError("game XML changed outside this editor; saved edit was not replayed")
-        if action["kind"] == "primary":
+        if action["kind"] == "structure":
+            self.require_developer()
+            source = sync_primary_english.DEFAULT_ENGLISH
+            if source.read_bytes() != action[f"{side}_source"]:
+                raise CatalogError("English source changed outside this editor; cannot replay")
+            previous = source.read_bytes()
+            atomic_bytes(source, action[f"{target}_source"])
+            try:
+                manage.prepare(manage.read_config(), self.snapshot)
+                if hashlib.sha256(game.read_bytes()).hexdigest() != action[f"{target}_game_hash"]:
+                    raise CatalogError("game build changed since this key edit")
+            except Exception:
+                atomic_bytes(source, previous)
+                manage.prepare(manage.read_config(), self.snapshot)
+                raise
+            result = {"applied_to_game": action["build"]["shipped"]}
+        elif action["kind"] == "primary":
             result = self.save_primary({
                 "index": action["index"], "key": action["key"],
                 "old_text": action[f"{side}_text"], "text": action[f"{target}_text"],
@@ -476,15 +751,31 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("X-Content-Type-Options", "nosniff")
-                    self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+                    self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'")
                     self.send_header("Content-Length", str(len(html)))
                     self.end_headers()
                     self.wfile.write(html)
+                elif url.path == "/app.js":
+                    data = SCRIPT.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 elif url.path == "/api/meta":
                     self.respond(200, editor.metadata())
+                elif url.path == "/api/versions":
+                    self.respond(200, {"versions": release_catalog()})
+                elif url.path == "/api/download-status":
+                    self.respond(200, editor.download_state)
                 elif url.path == "/api/rows":
+                    if not editor.ready:
+                        raise CatalogError("connect a compatible Lekmod project in Settings")
                     self.respond(200, editor.rows(one("locale"), one("category"), one("q"), int(one("offset", "0"))))
                 elif url.path == "/api/primary":
+                    if not editor.ready:
+                        raise CatalogError("connect a compatible Lekmod project in Settings")
                     self.respond(200, editor.primary(one("q"), int(one("offset", "0"))))
                 elif url.path == "/api/history":
                     self.respond(200, editor.history(
@@ -511,7 +802,12 @@ def make_handler(editor: Editor, token: str, port: int):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 50000:
+                if self.path == "/api/snapshot":
+                    if not 0 < length <= 16 * 1024 * 1024:
+                        raise CatalogError("invalid snapshot upload size")
+                    self.respond(200, editor.import_snapshot(self.rfile.read(length)))
+                    return
+                if not 0 < length <= 512 * 1024:
                     raise CatalogError("invalid request size")
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
@@ -520,6 +816,47 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.save_translation(data)
                 elif self.path == "/api/primary":
                     result = editor.save_primary(data)
+                elif self.path == "/api/create-primary":
+                    result = editor.create_primary(data)
+                elif self.path == "/api/rename-primary":
+                    result = editor.rename_primary(data)
+                elif self.path == "/api/connect":
+                    result = editor.connect(data)
+                    self.respond(200, result)
+                    if result["restart"]:
+                        self.server.restart_requested = True
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
+                elif self.path == "/api/download-project":
+                    result = editor.start_download(str(data.get("version", "")))
+                elif self.path == "/api/preferences":
+                    allowed = {"mode", "prefill", "wrap", "locale", "category",
+                               "visible_columns", "column_widths", "onboarded"}
+                    if set(data) - allowed:
+                        raise CatalogError("unknown editor preference")
+                    if data.get("mode") == "developer":
+                        validate_project(REPO_ROOT, full=True)
+                    result = {"preferences": save_settings(data)}
+                elif self.path == "/api/browse":
+                    if data.get("kind") not in ("project", "game"):
+                        raise CatalogError("unknown folder kind")
+                    from tkinter import Tk, filedialog
+                    dialog = Tk()
+                    dialog.withdraw()
+                    try:
+                        result = {"path": filedialog.askdirectory(
+                            title="Select Lekmod project" if data["kind"] == "project"
+                            else "Select Civilization V installation")}
+                    finally:
+                        dialog.destroy()
+                elif self.path == "/api/apply-game":
+                    result = editor.apply_to_game()
+                elif self.path == "/api/check":
+                    result = editor.check_project()
+                elif self.path == "/api/detect-game":
+                    result = {"path": detect_game()}
+                elif self.path == "/api/inspect-game":
+                    result = {"mods": installed_mods(Path(str(data.get("path", ""))))}
                 elif self.path == "/api/undo":
                     result = editor.replay(undo=True)
                 elif self.path == "/api/redo":
@@ -532,7 +869,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(404, {"error": "not found"})
                     return
                 self.respond(200, result)
-            except (CatalogError, OSError, ValueError, subprocess.CalledProcessError) as error:
+            except (CatalogError, OSError, ValueError, ET.ParseError,
+                    subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 self.respond(400, {"error": str(error)})
 
         def log_message(self, format: str, *args: object) -> None:
@@ -570,6 +908,17 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+    if getattr(server, "restart_requested", False):
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--port", str(server.server_port)]
+            environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+            flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+        else:
+            command = [sys.executable, "-B", str(APP_HOME / "localization/tools/editor_server.py"),
+                       "--port", str(server.server_port)]
+            environment = os.environ.copy()
+            flags = 0
+        subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags)
     return 0
 
 

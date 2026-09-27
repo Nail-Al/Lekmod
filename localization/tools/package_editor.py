@@ -16,15 +16,19 @@ START = """Lekmod Localization Editor for Windows
 2. Double-click LekmodLocalizationEditor.exe. Leave its window open while
    the browser editor is running. No Python, Git, VS Code, or game install
    is needed to start translating new and changed Lekmod text.
-3. Select a language, translate a row, and click Save and apply. Use
-   Download translation ZIP to send your completed language to a developer.
-4. To compare original vanilla sentences, ask the team for the matching
-   vanilla-snapshot.json.gz and copy it to localization/workspace/ before
-   starting the editor. The app checks it against the shared fingerprint.
+3. On the first run, Settings opens. Use the included source or select a full
+   compatible Lekmod project folder. Select your language, translate a row,
+   and click Save and apply. Exports can prepare a ZIP for a developer.
+4. For in-game testing, connect to the Civilization V installation in
+   Settings, select its installed Lekmod DLC, and click Apply to installed
+   game after saving. This checks versions and backs up the existing XML.
+   Install the matching complete Lekmod release separately first.
+5. To compare original vanilla sentences, ask the team for the matching
+   vanilla-snapshot.json.gz and import it in Settings. The app checks it
+   against the pinned shared fingerprints.
 
 The standalone package is a translation workspace, not an installable
-Civilization V mod. Download test game XML exports only the changed Override
-file; use a separate full Lekmod test installation for in-game testing.
+Civilization V mod. Close both the browser tab and console when finished.
 """
 
 
@@ -33,12 +37,15 @@ def package(executable: Path, output: Path, root: Path = REPO_ROOT) -> int:
     if not executable.is_file():
         raise CatalogError(f"Windows editor executable is missing: {executable}")
     required = [
+        Path("LEKMOD/VERSION"),
         Path("LEKMOD/Override/CIV5Units_Mongol.xml"),
         Path("localization/en_US/primary.xml"),
         Path("localization/config.json"),
         Path("localization/README.md"),
         Path("localization/reference/vanilla-fingerprints.json.gz"),
         Path("localization/editor/index.html"),
+        Path("localization/editor/app.js"),
+        Path("LekmodInstaller/github_setup/versions.json"),
     ]
     required.extend(sorted(Path("LEKMOD/Art") / path.relative_to(root / "LEKMOD/Art")
                            for path in (root / "LEKMOD/Art").rglob("*")

@@ -3,293 +3,183 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="editor-token" content="{{TOKEN}}">
   <title>Lekmod Localization Editor</title>
   <style>
-    :root { font-family: system-ui, sans-serif; color: #222a35; background: #f5f7fb; }
-    body { margin: 0; }
-    header { padding: 18px 24px; background: #172b44; color: white; }
-    h1 { font-size: 1.3rem; margin: 0 0 5px; }
-    header p { margin: 0; color: #c7d6e8; font-size: .9rem; }
-    main { padding: 16px 24px; display: grid; gap: 14px; }
-    .bar, .panel, .grid { background: white; border: 1px solid #dce3eb; border-radius: 9px; }
-    .bar { padding: 12px; display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
-    label { font-size: .85rem; display: grid; gap: 4px; }
-    select, input, textarea, button { font: inherit; }
-    select, input, textarea { border: 1px solid #aebbc9; border-radius: 5px; padding: 7px 9px; background: white; }
-    #search { min-width: 260px; }
-    button { border: 0; border-radius: 5px; padding: 9px 14px; background: #20578e; color: white; cursor: pointer; }
-    button:disabled { opacity: .55; cursor: default; }
-    details { position: relative; }
-    details summary { cursor: pointer; }
-    .columns { position: absolute; z-index: 2; right: 0; width: 225px; max-height: 320px; overflow: auto;
-      padding: 12px; box-shadow: 0 8px 18px #162c4350; background: white; border: 1px solid #dce3eb; }
-    .columns label { display: flex; align-items: center; gap: 7px; padding: 3px 0; }
-    .grid { overflow: auto; max-height: 59vh; }
-    table { border-collapse: collapse; width: 100%; min-width: 1080px; table-layout: auto; }
-    th, td { border-bottom: 1px solid #e6ebf0; padding: 9px; text-align: left; vertical-align: top;
-      min-width: 115px; max-width: 430px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    th { position: sticky; top: 0; background: #edf3f8; resize: horizontal; overflow: auto; z-index: 1; }
-    tr:hover, tr.selected { background: #e8f1fa; cursor: pointer; }
-    table.nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pager { display: flex; gap: 12px; align-items: center; padding: 8px 12px; }
-    .panel { padding: 16px; }
-    .panel h2 { font-size: 1.1rem; margin: 0 0 8px; }
-    .panel p { margin: 5px 0 12px; }
-    .panel textarea { width: min(100%, 960px); min-height: 115px; box-sizing: border-box; resize: both; }
-    .fields { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
-    .fields input { width: 200px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
-    .hint { color: #5d6d80; font-size: .85rem; }
-    .stale { color: #a1411d; font-weight: 700; }
+    :root { font: 15px/1.45 system-ui, sans-serif; color: #18283d; background: #f2f5fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 280px; }
+    button, input, textarea, select { font: inherit; }
+    button { border: 1px solid #b9c7d7; border-radius: 7px; background: #fff; padding: 8px 12px; color: #183a61; cursor: pointer; }
+    button:hover:not(:disabled) { background: #eaf2fb; }
+    button:disabled { opacity: .48; cursor: default; }
+    button.primary { color: #fff; background: #23619a; border-color: #23619a; }
+    button.primary:hover:not(:disabled) { background: #164c7c; }
+    button.icon { min-width: 36px; padding: 6px; font-size: 1.25rem; line-height: 1; }
+    input, textarea, select { padding: 8px; border: 1px solid #b6c4d4; border-radius: 6px; background: white; min-width: 0; }
+    input[type=checkbox] { width: 17px; height: 17px; padding: 0; }
+    label { display: grid; gap: 4px; font-size: .88rem; }
+    label.inline { display: flex; align-items: center; gap: 7px; }
+    header { padding: 14px clamp(12px, 3vw, 30px); background: #172e4b; color: white; }
+    .headline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+    h1 { font-size: 1.24rem; margin: 0 auto 0 0; }
+    header button { background: #263f5e; border-color: #607899; color: white; }
+    header button:hover:not(:disabled) { background: #36577c; }
+    .connections { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .badge { border: 1px solid #6985a4; border-radius: 40px; padding: 3px 10px; color: #e6f2ff; font-size: .83rem; }
+    .badge.missing { border-color: #b69a5b; color: #ffdf95; }
+    main { padding: 14px clamp(10px, 2vw, 26px); display: grid; gap: 12px; }
+    .card { background: #fff; border: 1px solid #d5dfeb; border-radius: 10px; box-shadow: 0 2px 7px #183a6110; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 12px; }
+    .toolbar label { flex: 0 1 210px; }
+    #search { flex: 1 1 240px; min-width: 130px; }
+    .toolbar .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .pager { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
+    #count { min-width: 100px; text-align: center; }
+    .table-scroll { width: 100%; height: min(55vh, 580px); min-height: 250px; overflow: auto; scrollbar-gutter: stable; }
+    table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; }
+    th, td { border-bottom: 1px solid #e5ebf1; border-right: 1px solid #eef1f5; padding: 8px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+    th { position: sticky; top: 0; background: #eaf1f8; z-index: 2; text-align: left; padding-right: 17px; }
+    td { max-height: 250px; }
+    tr.selected { background: #e0efff; }
+    tbody tr:hover { background: #edf5ff; cursor: pointer; }
+    .resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
+    .resizer:hover { background: #79a3cf66; }
+    .nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cell { display: flex; align-items: flex-start; gap: 4px; }
+    .cell-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .nowrap .cell-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .copy { border: none; background: transparent; padding: 1px 3px; font-size: .87rem; opacity: .65; }
+    .copy:hover { opacity: 1; }
+    .panel { padding: 14px; display: grid; gap: 10px; }
+    h2 { font-size: 1.05rem; margin: 0; }
+    p { margin: 0; }
+    .hint { font-size: .85rem; color: #5c6e82; }
+    .warning { color: #8c431e; background: #fff4e6; padding: 9px; border-radius: 7px; }
+    #translation { width: 100%; min-height: 130px; resize: vertical; }
+    .fields { display: flex; flex-wrap: wrap; gap: 10px; }
+    .fields label { flex: 1 1 160px; }
+    .quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     #message { min-height: 21px; font-weight: 600; }
-    @media (max-width: 720px) { main { padding: 10px; } .bar { align-items: stretch; } #search { min-width: 0; } }
+    .tokens { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tokens code { border-radius: 4px; background: #e6eef8; padding: 3px 6px; }
+    dialog { border: 1px solid #bdcbd9; border-radius: 12px; padding: 0; width: min(95vw, 680px); max-height: 90vh; overflow: auto; box-shadow: 0 20px 60px #10263c60; }
+    dialog::backdrop { background: #10263caa; }
+    dialog section { padding: 18px; display: grid; gap: 12px; }
+    dialog h2 { font-size: 1.2rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+    .row > label { flex: 1 1 260px; }
+    .row > button { flex: 0 0 auto; }
+    dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+    a { color: #205d98; }
+    dialog a { overflow-wrap: anywhere; }
+    #no-source { padding: 20px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 680px) {
+      header { padding: 12px; }
+      h1 { flex-basis: 100%; }
+      .toolbar label, .toolbar #search { flex: 1 1 100%; }
+      .table-scroll { height: 47vh; }
+      .pager { justify-content: space-between; }
+      .fields label { flex: 1 1 100%; }
+      button { min-height: 39px; }
+    }
   </style>
 </head>
 <body>
-<header><h1>Lekmod Localization Editor</h1><p>Save approved translations to CSV and the game XML. Undo and redo saved edits during this session.</p></header>
+<header>
+  <div class="headline">
+    <h1>Lekmod Localization Editor</h1>
+    <button id="mode" title="Switch between translation and English source">Translator</button>
+    <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
+  </div>
+  <div class="connections">
+    <span id="source-badge" class="badge missing">Source: disconnected</span>
+    <span id="game-badge" class="badge missing">Game: disconnected</span>
+  </div>
+</header>
 <main>
-  <section class="bar">
-    <label>Language<select id="locale"></select></label>
-    <label>Category<select id="category"></select></label>
-    <label>Search<input id="search" placeholder="Key or part of the text"></label>
-    <label><span>Display</span><span><input type="checkbox" id="wrap" checked> Wrap lines</span></label>
-    <details><summary>Columns</summary><div class="columns" id="columns"></div></details>
+  <section id="no-source" class="card" hidden>
+    <h2>Connect a Lekmod source to begin</h2>
+    <p id="connection-error" class="warning"></p>
+    <p>Choose a compatible project in Settings. <a href="https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure" target="_blank" rel="noopener">Localization branch</a> · <a href="https://github.com/EnormousApplePie/Lekmod" target="_blank" rel="noopener">Main Lekmod project</a></p>
   </section>
-  <p id="baseline-notice" class="hint" hidden></p>
-  <section class="grid">
-    <table id="table"><thead></thead><tbody></tbody></table>
-    <div class="pager"><button id="prev">Previous page</button><span id="count"></span><button id="next">Next page</button></div>
-  </section>
-  <section class="panel" id="panel">
-    <h2 id="selected">Select a row in the table</h2>
-    <p id="context" class="hint"></p>
-    <label>Text<textarea id="translation" disabled></textarea></label>
-    <div class="fields" id="grammar">
-      <label>Gender<input id="gender" disabled></label>
-      <label>Plurality<input id="plurality" disabled></label>
-      <label>Translator note<input id="note" disabled></label>
-    </div>
-    <p id="characters" class="hint"></p>
-    <div class="actions">
-      <button id="save" disabled>Save and apply</button>
-      <button id="undo" disabled>Undo saved edit</button>
-      <button id="redo" disabled>Redo saved edit</button>
-      <button id="share" disabled>Download translation ZIP</button>
-      <button id="gamexml">Download test game XML</button>
-      <button id="stop">Close editor</button>
-    </div>
-    <p class="hint">The ZIP is for a reviewer. The game XML is for a separate local test copy of Lekmod; it is not a complete mod.</p>
-    <p id="message" role="status"></p>
-  </section>
+  <div id="workspace" hidden>
+    <section class="toolbar card">
+      <label id="locale-label">Language<select id="locale"></select></label>
+      <label id="category-label">Category<select id="category"></select></label>
+      <label id="search">Search<input id="search-input" type="search" placeholder="Key or text"></label>
+      <div class="actions">
+        <label class="inline"><input type="checkbox" id="wrap" checked> Wrap lines</label>
+        <button id="columns-button" title="Select visible columns">Columns</button>
+      </div>
+    </section>
+    <p id="baseline-notice" class="hint" hidden></p>
+    <section class="card">
+      <nav class="pager" aria-label="Table pages">
+        <button id="prev" aria-label="Previous page">‹ Previous</button>
+        <span id="count"></span>
+        <button id="next" aria-label="Next page">Next ›</button>
+      </nav>
+      <div class="table-scroll" id="table-scroll">
+        <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
+      </div>
+    </section>
+    <section class="panel card">
+      <h2 id="selected">Select a row</h2>
+      <p id="context" class="hint"></p>
+      <div id="token-help" hidden>
+        <p class="hint">Keep these formatting tokens exactly as shown. Icons and colors work in game; you may translate the words around them.</p>
+        <div class="tokens" id="tokens"></div>
+      </div>
+      <label id="text-label">My translation<textarea id="translation" disabled></textarea></label>
+      <p id="characters" class="hint">Characters: 0 · spaces: 0</p>
+      <label class="inline"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
+      <div id="grammar" class="fields">
+        <label>Gender<input id="gender" list="gender-values" disabled></label>
+        <label>Plurality<input id="plurality" list="plurality-values" disabled></label>
+        <label>Translator note<input id="note" disabled></label>
+      </div>
+      <datalist id="gender-values"><option value="feminine"><option value="masculine"><option value="neuter:the"><option value="neuter:an"></datalist>
+      <datalist id="plurality-values"><option value="1"><option value="2"></datalist>
+      <p class="hint" id="note-help">The note is stored in the approved language CSV for reviewers; it is not shown in the game.</p>
+      <div id="key-tools" class="fields" hidden>
+        <label>New TXT_KEY identifier<input id="new-key" placeholder="TXT_KEY_MY_NEW_DESCRIPTION"></label>
+        <button id="create-key">Create text key</button>
+        <button id="rename-key" disabled>Rename selected key</button>
+      </div>
+      <div class="quick">
+        <button id="save" class="primary" disabled>Save and apply</button>
+        <button id="undo" class="icon" aria-label="Undo saved edit" title="Undo saved edit" disabled>↶</button>
+        <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
+        <button id="game-apply" disabled>Apply to installed game</button>
+        <button id="run-checks" hidden>Run checks</button>
+        <button id="exports-button">Exports…</button>
+      </div>
+      <p id="message" role="status"></p>
+    </section>
+  </div>
 </main>
-<script>
-  const token = "{{TOKEN}}";
-  const byId = id => document.getElementById(id);
-  const columns = [
-    ["key", "Key"], ["classification", "Type"], ["vanilla_en_US", "Vanilla EN"],
-    ["vanilla_target", "Vanilla translation"], ["lekmod_en_US", "Lekmod EN"],
-    ["lekmod_target", "Existing Lekmod translation"], ["translation", "My translation"],
-    ["translation_status", "Status"], ["translation_characters", "Characters"]
-  ];
-  const primaryColumns = [["key", "Key"], ["kind", "Operation"],
-    ["text", "English text"], ["characters", "Characters"]];
-  let locales = {}, vanillaCounts = {}, offset = 0, total = 0, chosen = null, primary = false;
-  const selectedColumns = new Set([...columns, ...primaryColumns].map(([name]) => name));
-  let pendingSearch;
-
-  async function request(path, body) {
-    const options = body === undefined ? {} : {
-      method: "POST",
-      headers: {"Content-Type": "application/json", "X-Editor-Token": token},
-      body: JSON.stringify(body)
-    };
-    const response = await fetch(path, options);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Request failed");
-    return data;
-  }
-  function status(text, error = false) {
-    byId("message").textContent = text;
-    byId("message").style.color = error ? "#a62d24" : "#1f6b3a";
-  }
-  function updateHistoryButtons(state) {
-    byId("undo").disabled = !state.undo_available;
-    byId("redo").disabled = !state.redo_available;
-  }
-  function updateCategories() {
-    const locale = byId("locale").value, select = byId("category");
-    select.replaceChildren();
-    for (const [value, label] of [["primary", "Primary · English"],
-          ...(locales[locale] || []).map(name => [name, name])]) {
-      const option = document.createElement("option");
-      option.value = value; option.textContent = label; select.append(option);
-    }
-    select.value = (locales[locale] || [])[0] || "primary";
-    const notice = byId("baseline-notice");
-    notice.hidden = false;
-    if (!Object.keys(vanillaCounts).length) {
-      notice.textContent = "Using the shared fingerprint baseline. Original vanilla sentences are unavailable on this computer; add a matching local snapshot to compare them.";
-    } else if (!vanillaCounts[locale]) {
-      notice.textContent = "The pinned vanilla snapshot has no " + locale + " entries. Vanilla translations for this language cannot be compared; English classification remains available.";
-    } else {
-      notice.hidden = true;
-    }
-    load();
-  }
-  function updateColumns() {
-    const items = primary ? primaryColumns : columns;
-    byId("columns").replaceChildren();
-    for (const [name, title] of items) {
-      const label = document.createElement("label");
-      const check = document.createElement("input");
-      check.type = "checkbox"; check.checked = selectedColumns.has(name);
-      check.addEventListener("change", () => {
-        check.checked ? selectedColumns.add(name) : selectedColumns.delete(name);
-        load();
-      });
-      label.append(check, document.createTextNode(title));
-      byId("columns").append(label);
-    }
-  }
-  function charCount(value) {
-    return Array.from(value.trim().replace(/\s+/g, " ")).length;
-  }
-  function showRow(row, tr) {
-    chosen = row;
-    document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
-    tr.classList.add("selected");
-    byId("selected").textContent = row.key + (primary ? " · English" : " · " + byId("locale").value);
-    byId("translation").disabled = false; byId("save").disabled = false;
-    byId("translation").value = primary ? row.text : row.translation;
-    byId("grammar").hidden = primary;
-    for (const [field, id] of [["translation_gender", "gender"], ["translation_plurality", "plurality"],
-                               ["translator_note", "note"]]) {
-      byId(id).disabled = primary; byId(id).value = row[field] || "";
-    }
-    byId("context").textContent = primary
-      ? "Source: localization/en_US/primary.xml · loading last commit date…"
-      : "Type: " + row.classification + " · status: " + row.translation_status +
-        (row.translation_status === "stale" ? " · old translation is not used in game" : "") +
-        " · required tokens: " + row.required_format_tokens +
-        " · loading English row date…";
-    byId("context").className = row.translation_status === "stale" ? "stale" : "hint";
-    byId("characters").textContent = "Characters: " + charCount(byId("translation").value) +
-      (primary ? "" : " · English: " + row.lekmod_en_US_characters);
-    const historyPath = primary ? "/api/history?index=" + row.index
-      : "/api/history?key=" + encodeURIComponent(row.key);
-    request(historyPath).then(history => {
-      if (chosen !== row) return;
-      byId("context").textContent = (primary ? "" : byId("context").textContent.replace(
-        " · loading English row date…", "") + " · ") +
-        "Last committed English edit: " +
-        (history.history_available === false ? "unavailable in portable package" :
-          history.committed_at || "not committed yet") +
-        (history.commit ? " · " + history.commit.slice(0, 8) : "");
-    }).catch(() => {
-      if (chosen === row) byId("context").textContent += " · Git date unavailable";
-    });
-    status("");
-  }
-  async function load() {
-    primary = byId("category").value === "primary";
-    byId("share").disabled = primary || !byId("locale").value;
-    chosen = null;
-    byId("save").disabled = true; byId("translation").disabled = true;
-    byId("selected").textContent = "Select a row in the table";
-    updateColumns();
-    try {
-      const args = new URLSearchParams({q: byId("search").value, offset});
-      if (!primary) { args.set("locale", byId("locale").value); args.set("category", byId("category").value); }
-      const result = await request((primary ? "/api/primary?" : "/api/rows?") + args);
-      total = result.total;
-      const names = (primary ? primaryColumns : columns).filter(([name]) => selectedColumns.has(name));
-      const head = document.createElement("tr");
-      for (const [, label] of names) { const th = document.createElement("th"); th.textContent = label; head.append(th); }
-      document.querySelector("thead").replaceChildren(head);
-      const body = document.querySelector("tbody"); body.replaceChildren();
-      for (const row of result.rows) {
-        const tr = document.createElement("tr");
-        for (const [field] of names) { const td = document.createElement("td"); td.textContent = row[field] || ""; tr.append(td); }
-        tr.addEventListener("click", () => showRow(row, tr)); body.append(tr);
-      }
-      byId("count").textContent = total ? `${offset + 1}–${Math.min(offset + 60, total)} of ${total}` : "No rows";
-      byId("prev").disabled = offset === 0; byId("next").disabled = offset + 60 >= total;
-      status("");
-    } catch (error) { status(error.message, true); }
-  }
-  byId("translation").addEventListener("input", () => {
-    byId("characters").textContent = "Characters: " + charCount(byId("translation").value) +
-      (primary ? "" : " · English: " + (chosen?.lekmod_en_US_characters || ""));
-  });
-  byId("save").addEventListener("click", async () => {
-    if (!chosen) return;
-    byId("save").disabled = true; status("Saving and validating…");
-    try {
-      let saved;
-      if (primary) {
-        saved = await request("/api/primary", {index: chosen.index, key: chosen.key,
-          old_text: chosen.text, text: byId("translation").value});
-      } else {
-        saved = await request("/api/translate", {locale: byId("locale").value, category: byId("category").value,
-          key: chosen.key, source_fingerprint: chosen.source_fingerprint,
-          translation: byId("translation").value, translation_gender: byId("gender").value,
-          translation_plurality: byId("plurality").value, translator_note: byId("note").value});
-      }
-      updateHistoryButtons(saved);
-      await load(); status(saved.applied_to_game === false
-        ? "Saved. Game XML generation is Off in config.json."
-        : "Saved. The changed CSV and game XML are ready for review.");
-    } catch (error) { status(error.message, true); byId("save").disabled = false; }
-  });
-  for (const operation of ["undo", "redo"]) {
-    byId(operation).addEventListener("click", async () => {
-      byId("undo").disabled = true; byId("redo").disabled = true;
-      try {
-        const result = await request("/api/" + operation, {});
-        updateHistoryButtons(result);
-        await load();
-        status(operation === "undo" ? "Last saved edit undone." : "Saved edit restored.");
-      } catch (error) {
-        status(error.message, true);
-        updateHistoryButtons(await request("/api/meta"));
-      }
-    });
-  }
-  byId("share").addEventListener("click", () => {
-    window.location.href = "/api/export?locale=" + encodeURIComponent(byId("locale").value);
-    status("Translation package download started. Attach the ZIP to your review or message.");
-  });
-  byId("gamexml").addEventListener("click", () => {
-    window.location.href = "/api/game-xml";
-    status("Test XML download started. Use it only with a local test copy of Lekmod.");
-  });
-  byId("stop").addEventListener("click", async () => {
-    try {
-      await request("/api/stop", {});
-      status("Editor closed. You can close this browser tab.");
-    } catch (error) { status(error.message, true); }
-  });
-  byId("locale").addEventListener("change", () => { offset = 0; updateCategories(); });
-  byId("category").addEventListener("change", () => { offset = 0; load(); });
-  byId("search").addEventListener("input", () => {
-    clearTimeout(pendingSearch); pendingSearch = setTimeout(() => { offset = 0; load(); }, 250);
-  });
-  byId("wrap").addEventListener("change", () => {
-    byId("table").classList.toggle("nowrap", !byId("wrap").checked);
-  });
-  byId("prev").addEventListener("click", () => { offset -= 60; load(); });
-  byId("next").addEventListener("click", () => { offset += 60; load(); });
-  request("/api/meta").then(meta => {
-    locales = meta.locales;
-    vanillaCounts = meta.vanilla_counts;
-    updateHistoryButtons(meta);
-    for (const locale of Object.keys(locales)) {
-      const option = document.createElement("option"); option.value = locale; option.textContent = locale;
-      byId("locale").append(option);
-    }
-    byId("locale").value = locales.RU_RU ? "RU_RU" : Object.keys(locales)[0];
-    updateCategories();
-  }).catch(error => status(error.message, true));
-</script>
+<dialog id="settings-dialog">
+  <section>
+    <h2>Connections and settings</h2>
+    <p class="hint">The included source lets you translate immediately. Connect a full project to edit English and run developer checks.</p>
+    <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Leave empty for included source"></label><button id="project-browse">Browse…</button></div>
+    <div class="row"><label>Get a compatible project<select id="project-version"><option>Loading available versions…</option></select></label><button id="project-download">Download selected source</button></div>
+    <p class="hint">This downloads a separate source folder; it never overwrites your existing work. Earlier official releases are shown for reference but need a reviewed localization migration.</p>
+    <p class="hint"><a href="https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure" target="_blank" rel="noopener">Compatible localization project</a> · <a href="https://github.com/EnormousApplePie/Lekmod" target="_blank" rel="noopener">Official Lekmod source</a>. The official main branch does not yet contain this localization system; matching releases require a reviewed migration.</p>
+    <div class="row"><label>Civilization V folder<input id="game-path" placeholder="Path to the game installation"></label><button id="game-browse">Browse…</button></div>
+    <label>Installed Lekmod DLC version<select id="game-mod"></select></label>
+    <div class="row"><button id="detect-game">Detect game</button><button id="inspect-game">Check game folder</button></div>
+    <p class="hint" id="settings-status"></p>
+    <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
+    <button id="snapshot-import">Import and verify snapshot</button>
+    <p class="hint">Vanilla text stays on this computer. Without it, English classifications and translation still work.</p>
+    <div class="foot"><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
+  </section>
+</dialog>
+<dialog id="columns-dialog"><section><h2>Visible columns</h2><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
+<dialog id="exports-dialog"><section><h2>Downloads</h2><p>Send an approved translation ZIP to a developer for review. Test game XML is one file and is not a complete mod.</p><button id="share">Download translation ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
+<script src="/app.js" defer></script>
 </body>
 </html>

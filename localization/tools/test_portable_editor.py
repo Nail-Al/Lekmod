@@ -57,9 +57,10 @@ def main() -> int:
                     time.sleep(1)
             else:
                 raise RuntimeError("editor did not start in two minutes")
-            token = re.search(r'const token = "([^"]+)";', html)
+            token = re.search(r'<meta name="editor-token" content="([^"]+)">', html)
             if not token:
                 raise RuntimeError("editor page has no request token")
+            assert b"function renderTable" in get(base + "/app.js")
             meta = json.loads(get(base + "/api/meta"))
             assert not meta["vanilla_counts"], "test package unexpectedly contains vanilla text"
             locale = "RU_RU"

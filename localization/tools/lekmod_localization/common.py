@@ -6,16 +6,13 @@ from collections import Counter
 import json
 from pathlib import Path
 import re
-import sys
+
+from .connections import project_root
 
 
 # A packaged editor keeps writable project data beside the executable, not in
 # PyInstaller's temporary extraction directory.
-REPO_ROOT = (
-    Path(sys.executable).resolve().parent
-    if getattr(sys, "frozen", False)
-    else Path(__file__).resolve().parents[3]
-)
+REPO_ROOT = project_root()
 DEFAULT_SOURCE = (
     REPO_ROOT / "LEKMOD" / "Override" / "CIV5Units_Mongol.xml"
 )

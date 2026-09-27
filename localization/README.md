@@ -9,38 +9,48 @@ in `LEKMOD/Override/CIV5Units_Mongol.xml`.
 1. Open [Localization Editor for Windows](https://github.com/Nail-Al/Lekmod/actions/workflows/localization-editor-windows.yml?query=branch%3Alocalization-infrastructure),
    choose the latest successful run on `localization-infrastructure`, and
    download the `LekmodLocalizationEditor-Windows` artifact at the bottom.
-   Unzip the downloaded artifact, then unzip the
-   `LekmodLocalizationEditor-Windows.zip` inside it into a new folder. A
-   maintainer may also send you that inner ZIP directly. No Git, Python,
-   VS Code, or installed game is required to start the editor.
+   Extract the inner `LekmodLocalizationEditor-Windows.zip` to a writable
+   folder. A maintainer may also send you that ZIP directly. No Git, Python,
+   VS Code, or installed game is required for the included translation source.
 2. Double-click `LekmodLocalizationEditor.exe` in the extracted folder.
    Leave its command window open. The browser opens automatically; if it
    does not, use the `http://127.0.0.1:<port>/` address shown in the window.
    The app chooses an available port. Do not move the EXE away from its
    neighboring `localization` and `LEKMOD` folders.
-3. Pick a language (for example `RU_RU`) and a category. Search for a key
-   or words. Compare **Vanilla EN**, **Vanilla translation**, **Lekmod EN**,
-   and **My translation** when original vanilla text is available. Select a
-   row, type your translation, preserve tokens
-   such as `[ICON_...]` and `{1_...}`, then click **Save and apply**. The
-   editor writes the approved CSV and regenerates the game XML. Saving an
-   empty translation removes its approval. **Primary · English** edits the
-   canonical English source and is usually a maintainer task.
-4. **Undo saved edit** and **Redo saved edit** reverse saved changes from this
-   editor session (up to 20; they reset when the command window closes).
-   Browser/textarea Ctrl+Z handles typing before a save. **Download translation
-   ZIP** produces one language CSV plus a manifest for a developer to review;
-   attach the ZIP to a message or review yourself. It does not send anything.
-   **Download test game XML** downloads the generated Override file, not a
-   complete mod. Use a separate local Lekmod test installation and follow its
-   normal installation instructions before checking text in game.
-5. Click **Close editor** when finished, or close its command window. Your saved
-   CSV remains in `localization/translations/` inside that extracted folder.
+3. On first launch, **Settings** opens. Leave **Lekmod project folder** blank
+   to use the included source, select your own *compatible* full checkout,
+   or choose the supported release and **Download selected source** into a
+   separate folder. Click **Save connections**. The official upstream main
+   branch does not yet contain this editor's localization files. Earlier
+   releases need a reviewed migration before they can be edited here.
+4. Choose **Translator**, a language, and a category. Select a row; its
+   existing translation or English text appears in the edit box. Change it
+   and click **Save and apply**. This writes the approved language CSV and
+   generated game XML in the connected project. A blank translation removes
+   approval. Keep every displayed formatting token (for example `[ICON_CULTURE]`,
+   `[COLOR_YELLOW]`, and `{1_Num}`) with the same spelling and count. These
+   are working game markup, and the editor validates them. **Missing** means
+   no approved translation; **stale** means English changed and the game
+   currently falls back to English until the translation is reviewed.
+5. Optionally find Civilization V with **Detect game**, or browse for its
+   installation folder, then **Check game folder** and select the installed
+   Lekmod DLC. After saving, use **Apply to installed game**. The app checks
+   the release and internal version, compares non-language game data, backs
+   up the old XML under the editor folder's
+   `localization/workspace/game-backups/`, and replaces
+   only the matching Override XML. Restart the game to test. Install the
+   matching full mod with the official Lekmod installer first; this editor
+   does not install the complete mod.
+6. Use the arrow icons for undo/redo of up to 20 saved edits in this session;
+   Ctrl+Z inside the text box undoes typing. **Exports** can download a
+   translation ZIP for a developer to review and a generated XML for manual
+   testing. Exports do not send files anywhere. Close the browser tab and
+   command window when finished. The CSV remains in your selected project.
 
 The download contains a shared **hash baseline**, so you can translate Lekmod
-rows immediately. For the original vanilla sentences, copy the team's matching
-`vanilla-snapshot.json.gz` to `localization/workspace/` inside the extracted
-folder before starting the editor again. A different snapshot is refused.
+rows immediately. For the original vanilla sentences, obtain the team's matching
+`vanilla-snapshot.json.gz` and import it in **Settings**. A different snapshot
+is refused. No network password is built into this editor.
 The currently pinned snapshot has English and Russian entries, but its other
 eight locale tables are empty. In those languages, the vanilla translation
 column remains unavailable even when the snapshot is present. This limitation
@@ -48,8 +58,17 @@ will require a separately reviewed baseline update from complete official
 language databases; do not treat a blank cell as proof that the game lacks a
 translation.
 
-Columns can be hidden and resized, long lines can wrap, and the table shows
-60 results per page. Selecting a row displays its English source's last
+Use **Columns** to hide fields and drag a table header's right edge to change
+its width. These choices persist across launches. The table scrolls in both
+directions inside its panel, including on narrow screens. The page buttons
+stay above it. **Wrap lines** toggles multiline cells. **Fill the editor from
+the selected row** can be turned off, and that choice persists. Gender and
+plurality allow suggested values or free text, since game data may contain
+other values. **Translator note** appears in its table column and in the
+selected row form; it is stored in the CSV for reviewers, never shown in game.
+The number below the edit box counts characters and whitespace without an
+English-length limit. The table shows 60 results per page. Selecting a row
+displays its English source's last
 **committed** Git date when using a developer clone. The portable download
 has no Git history and marks this date unavailable. A changed
 English row keeps the old translation for review but labels it `stale`; the
@@ -107,8 +126,16 @@ Translations and English source classification still work without that file.
 
 ## Developer workflow
 
-Edit English through **Primary · English** or directly in
-`en_US/primary.xml`. Do not hand-edit its generated block in
+Switch the header from **Translator** to **Developer** in a connected full
+project. Search and edit English, create a new `TXT_KEY_*` text entry, or
+rename an unreferenced key. Adding a key to the dictionary does not make a
+gameplay entity use it: add the reference in the relevant mod XML, SQL, or
+Lua and review it. The editor blocks renaming a referenced key because its
+gameplay references must be migrated together. Saving English runs
+preparation and configured checks. Changing English makes older approved
+translations stale; the generated game text falls back to English until
+translation review. You can also edit `en_US/primary.xml` directly. Do not
+hand-edit its generated block in
 `LEKMOD/Override/CIV5Units_Mongol.xml`. After a direct edit run:
 
 ```text
@@ -228,7 +255,20 @@ files. You can edit and export translations without Git, Python, an IDE, a
 game installation, or a local vanilla snapshot. Git commit dates and original
 vanilla sentences need the corresponding Git clone and local snapshot,
 respectively. The ZIP is a contributor tool; it does not install the complete
-mod in Civilization V.
+mod in Civilization V. The included source works without the game; optional
+in-game testing requires an installed, matching Lekmod DLC release. The editor
+can download its compatible source into a fresh folder and connect to your
+own checkout; it will not overwrite either.
+
+### Why is there no password `111` or automatic cloud snapshot download?
+
+An embedded password shared with everyone using a public EXE cannot restrict
+access to an external file. A link plus a known password would expose the
+complete vanilla game text just as publishing the file would. The editor
+accepts an explicitly provided local snapshot, checks it against pinned team
+fingerprints, and keeps it outside Git. If the team sets up a private
+authenticated store and grants access to contributors, its login and download
+can be integrated without shipping shared credentials in the EXE.
 
 ## Contributor files and player releases
 
