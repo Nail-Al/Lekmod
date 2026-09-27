@@ -13,6 +13,11 @@ import shutil
 import subprocess
 
 
+def source_hash(source: Path) -> str:
+    """Treat Git's Windows CRLF checkout as the same canonical English text."""
+    return hashlib.sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def dates_from_git(source: Path, operations: list[dict], root: Path) -> dict[str, str]:
     """Use each text operation's newest blamed line, including local edits."""
     output = subprocess.run(
@@ -48,7 +53,7 @@ def read_dates(source: Path, operations: list[dict], root: Path) -> dict[str, st
     if path.is_file():
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             saved = json.load(handle)
-        if saved.get("source_sha256") == hashlib.sha256(source.read_bytes()).hexdigest():
+        if saved.get("source_sha256") == source_hash(source):
             return saved.get("dates", {})
     return {}
 
@@ -57,7 +62,7 @@ def write_dates(source: Path, operations: list[dict], root: Path) -> Path:
     """Ship dates without shipping Git history in the downloadable project."""
     dates = dates_from_git(source, operations, root)
     content = {"schema_version": 1,
-               "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+               "source_sha256": source_hash(source),
                "dates": dates}
     path = root / "localization/reference/english-edit-dates.json.gz"
     path.parent.mkdir(parents=True, exist_ok=True)

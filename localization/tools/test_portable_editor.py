@@ -148,12 +148,9 @@ def main() -> int:
             primary = json.loads(get(base + "/api/primary?offset=0"))["rows"]
             dates = json.loads(gzip.decompress((project /
                 "localization/reference/english-edit-dates.json.gz").read_bytes()))
-            print("Portable date index:", len(dates["dates"]),
-                  "source matches:", dates["source_sha256"] == hashlib.sha256(
-                      (project / "localization/en_US/primary.xml").read_bytes()).hexdigest(),
-                  "first API row:", primary[0]["key"] if primary else "none",
-                  "indexed:", dates["dates"].get(primary[0]["key"]) if primary else "none",
-                  "API date:", primary[0]["english_edited_at"] if primary else "none")
+            from lekmod_localization.english_dates import source_hash
+            assert dates["source_sha256"] == source_hash(
+                project / "localization/en_US/primary.xml")
             assert primary and primary[0]["english_edited_at"]
             post(base, token, "/api/preferences", {"mode": "translator"})
             for category in meta["locales"]["RU_RU"]:
