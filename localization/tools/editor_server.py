@@ -10,6 +10,8 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import re
 import secrets
@@ -42,7 +44,7 @@ from lekmod_localization.connections import (
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
 from lekmod_localization.editor_update import (
-    latest_release, stage_release, write_windows_updater,
+    latest_release, stage_release, launch_update,
 )
 from lekmod_localization.english_dates import read_dates
 from lekmod_localization.shipped import read_approvals
@@ -55,6 +57,7 @@ from snapshot_cloud import decrypt_snapshot, download_encrypted, encrypt_snapsho
 
 PAGE = APP_HOME / "localization" / "editor" / "index.html"
 SCRIPT = APP_HOME / "localization" / "editor" / "app.js"
+LOG = logging.getLogger("lekmod.editor")
 TRANSLATIONS = REPO_ROOT / "localization" / "translations"
 APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at")
 OPERATIONS = re.compile(
@@ -240,6 +243,7 @@ class Editor:
         self.actions: list[dict] = []
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
+        self.update_state: dict = {"state": "idle"}
         self.download_cancel = threading.Event()
         self.last_encrypted_archive: Path | None = None
         self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
@@ -1037,6 +1041,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(200, {"versions": release_catalog()})
                 elif url.path == "/api/editor-latest":
                     self.respond(200, latest_release())
+                elif url.path == "/api/editor-update-status":
+                    self.respond(200, editor.update_state.copy())
                 elif url.path == "/api/encrypted-snapshot":
                     archive = editor.last_encrypted_archive
                     if archive is None or not archive.is_file():
@@ -1123,13 +1129,36 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif self.path == "/api/snapshot-encrypt":
                     result = editor.encrypt_local_snapshot(data.get("password"))
                 elif self.path == "/api/editor-update":
-                    latest = latest_release()
-                    stage = stage_release(latest)
-                    self.server.update_script = write_windows_updater(stage)
-                    self.server.update_stage = stage
-                    self.respond(200, {"updating": True, "version": latest["latest"]})
-                    editor.record_event("editor-update", "staged")
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    if editor.update_state["state"] not in ("idle", "error"):
+                        raise CatalogError("an editor update is already running")
+                    editor.update_state = {"state": "checking"}
+                    self.respond(202, editor.update_state)
+                    server = self.server
+
+                    def update_in_background() -> None:
+                        """Keep the localhost API responsive during a slow download."""
+                        try:
+                            release = latest_release()
+                            if not release["available"]:
+                                raise ValueError("this editor is already up to date")
+                            editor.update_state = {"state": "downloading", "version": release["latest"],
+                                                   "bytes": 0, "total": None}
+
+                            def progress(done: int, total: int | None) -> None:
+                                editor.update_state = {"state": "downloading", "version": release["latest"],
+                                                       "bytes": done, "total": total}
+
+                            stage = stage_release(release, progress=progress)
+                            editor.update_state = {"state": "installing", "version": release["latest"]}
+                            launch_update(stage, port=server.server_port)
+                            editor.record_event("editor-update", "installer-started")
+                            threading.Thread(target=server.shutdown, daemon=True).start()
+                        except Exception as error:
+                            editor.update_state = {"state": "error", "error": str(error)}
+                            editor.record_event("editor-update", "error:" + type(error).__name__)
+                            LOG.exception("Editor update could not start")
+
+                    threading.Thread(target=update_in_background, daemon=True).start()
                     return
                 elif self.path == "/api/preferences":
                     allowed = {"mode", "prefill", "wrap", "locale", "category",
@@ -1209,13 +1238,19 @@ def make_handler(editor: Editor, token: str, port: int):
 
         def log_message(self, format: str, *args: object) -> None:
             """Log one local request without exposing the private token."""
-            print(format % args, file=sys.stderr)
+            LOG.info(format, *args)
 
     return Handler
 
 
 def main() -> int:
     """Start the local-only editor and print its browser address."""
+    if not LOG.handlers:
+        path = APP_HOME / "localization/workspace/editor-startup.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        LOG.addHandler(RotatingFileHandler(path, maxBytes=1024 * 1024,
+                                           backupCount=2, encoding="utf-8"))
+        LOG.setLevel(logging.INFO)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0,
                         help="Local port; 0 chooses an available port")
@@ -1234,9 +1269,12 @@ def main() -> int:
         # The handler compares the browser Origin with the actual assigned port.
         server.RequestHandlerClass = make_handler(editor, token, server.server_port)
     except (CatalogError, OSError) as error:
+        LOG.error("Editor could not start: %s", error)
         parser.exit(1, f"Editor failed: {error}\n")
     url = f"http://127.0.0.1:{server.server_port}/"
-    print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
+    if sys.stdout is not None:
+        print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
+    LOG.info("Editor started at %s; version %s", url, editor_manifest()["version"])
     if args.update_ticket:
         ready = APP_HOME / "localization/workspace/editor-updates" / (
             "ready-" + args.update_ticket + ".json")
@@ -1250,34 +1288,19 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-    if getattr(server, "update_script", None):
-        try:
-            subprocess.Popen([
-                "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", str(server.update_script), "-OldPid", str(os.getpid()),
-                "-Stage", str(server.update_stage), "-EditorRoot", str(APP_HOME),
-            ], cwd=APP_HOME, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-               creationflags=subprocess.CREATE_NO_WINDOW)
-        except OSError as error:
-            editor.record_event("editor-update-install", "failure")
-            with (APP_HOME / "localization/workspace/editor-updates/update.log").open(
-                "a", encoding="utf-8") as log:
-                log.write(f"Could not launch installer: {error}\n")
-            command = [sys.executable, "--port", str(server.server_port)]
-            subprocess.Popen(command, cwd=APP_HOME,
-                             env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                             creationflags=subprocess.CREATE_NEW_CONSOLE)
-    elif getattr(server, "restart_requested", False):
+    if getattr(server, "restart_requested", False):
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--port", str(server.server_port)]
             environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
-            flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         else:
             command = [sys.executable, "-B", str(APP_HOME / "localization/tools/editor_server.py"),
                        "--port", str(server.server_port)]
             environment = os.environ.copy()
             flags = 0
-        subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags)
+        subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
     return 0
 
 

@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from lekmod_localization.connections import editor_manifest
-from lekmod_localization.editor_update import latest_release, stage_release, write_windows_updater
+from lekmod_localization.editor_update import latest_release, stage_release, installer_command
 
 
 def main() -> int:
@@ -37,16 +37,15 @@ def main() -> int:
         print(f"Downloading and verifying editor v{release['latest']} for {root}...", flush=True)
         release["can_auto_update"] = True
         stage = stage_release(release, root)
-        script = write_windows_updater(stage, root)
-        result = subprocess.run([
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-File", str(script), "-OldPid", "99999999", "-Stage", str(stage),
-            "-EditorRoot", str(root),
-        ], cwd=root, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-            capture_output=True, text=True, timeout=180)
+        result = subprocess.run(installer_command(stage, root, 0), cwd=stage,
+            env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=180,
+            creationflags=subprocess.CREATE_NO_WINDOW)
         if result.returncode:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or
-                               "installation failed; see localization/workspace/editor-updates/update.log")
+            log = root / "localization/workspace/editor-updates/update.log"
+            detail = log.read_text(encoding="utf-8")[-2000:] if log.is_file() else "no update log"
+            raise RuntimeError("installation failed; " + detail)
         print(f"Editor v{release['latest']} installed and started. Settings and projects remain in {root}.")
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         parser.exit(1, "Editor repair failed: " + str(error) + "\nClose the old editor and "

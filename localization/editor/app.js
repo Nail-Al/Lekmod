@@ -23,6 +23,7 @@ let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
 let inLogs = false;
 let downloadTimer;
+let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "";
 let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
 let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
 function logUI(name) { api("/api/event", {name}).catch(() => {}); }
@@ -535,6 +536,16 @@ el("settings-button").addEventListener("click", () => {
   });
 });
 el("settings-close").addEventListener("click", () => el("settings-dialog").close());
+el("editor-quit").addEventListener("click", () => guardNavigation(async () => {
+  try {
+    await api("/api/stop", {});
+    el("settings-dialog").close();
+    el("workspace").hidden = true;
+    el("no-source").hidden = true;
+    el("app-loading").hidden = false;
+    el("app-loading").textContent = "Editor stopped. You can close this tab.";
+  } catch (error) { sectionMessage("source", error.message, "error"); }
+}));
 el("settings-dialog").addEventListener("close", () => {
   clearInterval(downloadTimer); downloadTimer = undefined;
 });
@@ -960,21 +971,64 @@ async function checkLatest() {
   finally { el("update-status").classList.remove("busy-inline"); }
 }
 el("update-check").addEventListener("click", checkLatest);
-el("update-install").addEventListener("click", async () => {
+async function followEditorUpdate() {
+  if (!editorUpdateStarted) return;
+  try {
+    const live = await api("/api/meta");
+    if (live.editor_version === editorUpdateVersion ||
+        (live.update_notice?.result === "failure" &&
+         Date.parse(live.update_notice.at) > editorUpdateStarted)) {
+      location.reload();
+      return;
+    }
+    const progress = await api("/api/editor-update-status");
+    if (progress.state === "error") {
+      el("update-status").textContent = "Editor update failed: " + progress.error;
+      el("update-status").classList.remove("busy-inline");
+      el("update-install").disabled = false;
+      editorUpdateStarted = 0;
+      return;
+    }
+    if (progress.state === "downloading") {
+      const size = progress.total ? " of " + (progress.total / 1048576).toFixed(1) : "";
+      el("update-status").textContent = "Downloading editor v" + progress.version + ": " +
+        ((progress.bytes || 0) / 1048576).toFixed(1) + size + " MB…";
+    } else if (progress.state === "installing") {
+      el("update-status").textContent = "Installing editor v" + progress.version +
+        " and restarting this page…";
+    } else {
+      el("update-status").textContent = "Checking editor release…";
+    }
+  } catch (_) {
+    el("update-status").textContent = "The editor is restarting. This page will reconnect automatically…";
+  }
+  if (Date.now() - editorUpdateStarted > 180000) {
+    el("update-status").classList.remove("busy-inline");
+    el("update-status").textContent = "The editor did not reopen. Double-click the editor EXE to retry; " +
+      "details are in localization/workspace/editor-updates/update.log.";
+    editorUpdateStarted = 0;
+    return;
+  }
+  editorUpdateTimer = setTimeout(followEditorUpdate, 700);
+}
+async function startEditorUpdate() {
   el("update-install").disabled = true;
   el("update-status").classList.add("busy-inline");
-  el("update-status").textContent = "Downloading and checking the editor update…";
+  el("update-status").textContent = "Checking editor release…";
   try {
-    const result = await api("/api/editor-update", {});
-    el("settings-dialog").close();
-    message("Editor v" + result.version + " verified. The editor will restart automatically; " +
-      "your project and settings stay here.");
+    editorUpdateVersion = (await api("/api/editor-latest")).latest;
+    await api("/api/editor-update", {});
+    editorUpdateStarted = Date.now();
+    clearTimeout(editorUpdateTimer);
+    followEditorUpdate();
   } catch (error) {
     el("update-install").disabled = false;
-    el("update-status").textContent = "Editor update failed: " + error.message;
-  } finally {
     el("update-status").classList.remove("busy-inline");
+    el("update-status").textContent = "Editor update failed: " + error.message;
   }
+}
+el("update-install").addEventListener("click", () => {
+  guardNavigation(startEditorUpdate);
 });
 refresh().then(checkLatest).catch(error => {
   el("app-loading").textContent = "The editor could not load: " + error.message +

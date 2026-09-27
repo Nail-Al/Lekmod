@@ -13,9 +13,9 @@ START = """Lekmod Localization Editor for Windows
 
 1. Extract the complete ZIP into a new writable folder. Keep the
    localization folder next to LekmodLocalizationEditor.exe.
-2. Double-click LekmodLocalizationEditor.exe. Leave its window open while
-   the browser editor is running. No Python, Git, VS Code, or game install
-   is needed to open it.
+2. Double-click LekmodLocalizationEditor.exe. The browser editor opens
+   without a command window. No Python, Git, VS Code, or game install is
+   needed to open it.
 3. In Settings, select a complete compatible Lekmod project folder or click
    Download. Progress and destination are shown. A plain Civilization V installation is not a
    project. Save connections, then select a language and translate.
@@ -29,15 +29,16 @@ START = """Lekmod Localization Editor for Windows
    share a verified snapshot, use Vanilla reference > Encrypt and download
    .enc; the EXE needs no Python installation for this operation.
 6. For future editor versions, use Settings > Editor updates > Check latest
-   version > Download and update. The app verifies the download, waits for
-   the new EXE to start, and keeps the same settings, projects and snapshot.
+   version > Download and update. The app shows download progress and reloads
+   this tab after confirming the new EXE is serving its actual version.
+   Settings, projects and the snapshot stay in place.
    A legacy EXE with a broken updater can be repaired once from a current
    project checkout with localization/tools/repair_editor.py --editor-root
    "<folder containing your old LekmodLocalizationEditor.exe>". Close the
    old editor first. The repair command downloads the release itself.
 
 The standalone package is a translation workspace, not an installable
-Civilization V mod. Close both the browser tab and console when finished.
+Civilization V mod. To stop the background editor, use Settings > Quit editor.
 """
 
 

@@ -110,6 +110,7 @@
     .row > label { flex: 1 1 260px; }
     .row > button { flex: 0 0 auto; }
     dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+    dialog .foot .exit { margin-right: auto; }
     a { color: #205d98; }
     dialog a { overflow-wrap: anywhere; }
     #no-source { padding: 20px; }
@@ -251,7 +252,7 @@
       <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
       <div class="row"><button id="update-check" class="icon-control" title="Check latest editor version" aria-label="Check latest editor version">⟳</button><button id="update-install" disabled>Download and update editor</button></div>
     </div>
-    <div class="foot"><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
+    <div class="foot"><button id="editor-quit" class="exit" title="Stop the editor running in the background">Quit editor</button><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
   </section>
 </dialog>
 <dialog id="columns-dialog"><section><h2>Visible columns</h2><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>

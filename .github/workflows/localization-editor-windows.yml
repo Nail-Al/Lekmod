@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install "pyinstaller==6.22.3" "cryptography>=45,<47"
-          python -m PyInstaller --noconfirm --clean --onefile --console --name LekmodLocalizationEditor --paths localization/tools localization/tools/editor_server.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools localization/tools/editor_main.py
       - name: Package contributor files
         shell: pwsh
         run: |
@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_portable_editor.py --archive dist/LekmodLocalizationEditor-Windows.zip
-      - name: Smoke test PowerShell updater
+      - name: Smoke test windowless updater through browser API
         shell: pwsh
         run: |
           python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip

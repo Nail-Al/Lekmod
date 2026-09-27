@@ -1,17 +1,25 @@
-"""Stage a verified Windows editor release without touching a connected project."""
+"""Download a verified release and let its GUI executable replace the old one."""
 
 from __future__ import annotations
 
+import argparse
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
+from collections.abc import Callable
 
 from .connections import APP_HOME, editor_manifest
 
@@ -25,22 +33,31 @@ UPDATE_FILES = (
     "localization/editor/version.json", "LekmodInstaller/github_setup/versions.json",
 )
 VERSION = re.compile(r"editor-v(\d+)\.(\d+)$")
+Progress = Callable[[int, int | None], None]
 
 
-def _download(url: str, limit: int) -> bytes:
-    """Bound network input and refuse a transport downgrade on redirects."""
+def _download(url: str, limit: int, progress: Progress | None = None) -> bytes:
+    """Read a bounded HTTPS release, reporting actual transferred bytes."""
     request = urllib.request.Request(url, headers={"User-Agent": "Lekmod-Localization-Editor"})
     with urllib.request.urlopen(request, timeout=45) as response:
         if not response.url.startswith("https://"):
             raise ValueError("editor release was redirected away from HTTPS")
-        content = response.read(limit + 1)
-    if len(content) > limit:
-        raise ValueError("editor release exceeds its size limit")
-    return content
+        length = response.headers.get("Content-Length")
+        total = int(length) if length and length.isdigit() else None
+        if total is not None and total > limit:
+            raise ValueError("editor release exceeds its size limit")
+        data = io.BytesIO()
+        while block := response.read(256 * 1024):
+            data.write(block)
+            if data.tell() > limit:
+                raise ValueError("editor release exceeds its size limit")
+            if progress:
+                progress(data.tell(), total)
+    return data.getvalue()
 
 
 def latest_release(home: Path = APP_HOME) -> dict:
-    """Discover the newest tagged editor release, ignoring unrelated mod tags."""
+    """Discover the newest published editor release, excluding mod tags."""
     releases = json.loads(_download(RELEASES, 2 * 1024 * 1024))
     current = editor_manifest(home)["version"]
     candidates = []
@@ -49,9 +66,8 @@ def latest_release(home: Path = APP_HOME) -> dict:
         if not match or release.get("draft") or release.get("prerelease"):
             continue
         asset = next((a for a in release.get("assets", []) if a.get("name") == ARCHIVE), None)
-        if not asset:
-            continue
-        candidates.append((tuple(map(int, match.groups())), release, asset))
+        if asset:
+            candidates.append((tuple(map(int, match.groups())), release, asset))
     if not candidates:
         raise ValueError("no published Windows editor release was found")
     version, release, asset = max(candidates, key=lambda item: item[0])
@@ -64,8 +80,9 @@ def latest_release(home: Path = APP_HOME) -> dict:
     }
 
 
-def stage_release(release: dict, home: Path = APP_HOME) -> Path:
-    """Check a GitHub release archive and leave project and private files intact."""
+def stage_release(release: dict, home: Path = APP_HOME,
+                  progress: Progress | None = None) -> Path:
+    """Verify GitHub's digest and allowlisted ZIP contents before staging."""
     if not release["available"] or not release["can_auto_update"]:
         raise ValueError("automatic update is available only for an older Windows EXE")
     tag = "editor-v" + release["latest"]
@@ -75,7 +92,7 @@ def stage_release(release: dict, home: Path = APP_HOME) -> Path:
     digest = release["digest"]
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("editor release has no SHA-256 digest; ask a maintainer to republish it")
-    data = _download(expected_url, 100 * 1024 * 1024)
+    data = _download(expected_url, 100 * 1024 * 1024, progress)
     if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1]:
         raise ValueError("editor download failed its SHA-256 check")
     folder = home / "localization/workspace/editor-updates"
@@ -88,19 +105,17 @@ def stage_release(release: dict, home: Path = APP_HOME) -> Path:
         if names != set(UPDATE_FILES):
             raise ValueError("release archive has missing or unexpected editor files")
         for name in UPDATE_FILES:
-            if archive.getinfo(name).file_size > 90 * 1024 * 1024:
-                raise ValueError("oversized editor file in release")
+            info = archive.getinfo(name)
+            if info.file_size > 90 * 1024 * 1024 or not name.isascii():
+                raise ValueError("unsafe editor file in release")
         if stage.is_symlink():
             raise ValueError("pending editor update path is a link; choose a fresh folder")
         if stage.exists():
-            # Never trust a previous attempt. Preserve a damaged staging folder for
-            # diagnosis, but let the next click create a fresh verified copy.
             existing = list(stage.rglob("*")) if stage.is_dir() else []
             valid = stage.is_dir() and not any(p.is_symlink() for p in existing) and {
                 p.relative_to(stage).as_posix() for p in existing if p.is_file()} == names
             if valid:
-                valid = all(not (stage / name).is_symlink() and
-                            (stage / name).read_bytes() == archive.read(name)
+                valid = all((stage / name).read_bytes() == archive.read(name)
                             for name in UPDATE_FILES)
             if valid:
                 if editor_manifest(stage)["version"] != release["latest"]:
@@ -119,145 +134,231 @@ def stage_release(release: dict, home: Path = APP_HOME) -> Path:
     return stage
 
 
-def write_windows_updater(stage: Path, home: Path = APP_HOME) -> Path:
-    """Create a separate PowerShell process that can replace a closed EXE."""
-    script = home / "localization/workspace/editor-updates/install-update.ps1"
-    files = ",\n  ".join("'" + name + "'" for name in UPDATE_FILES)
-    content = r"""param([int]$OldPid, [string]$Stage, [string]$EditorRoot, [switch]$NoBrowser)
-$ErrorActionPreference = 'Stop'
-$files = @(
-  FILES
-)
-$updates = Join-Path $EditorRoot 'localization/workspace/editor-updates'
-$log = Join-Path $updates 'update.log'
-$events = Join-Path $EditorRoot 'localization/workspace/editor-actions.jsonl'
-$backup = $null
-$copyStarted = $false
-$rollbackOk = $true
-$existed = @{}
-$started = $null
-$ticket = [Guid]::NewGuid().ToString('N')
-$ready = Join-Path $updates ("ready-$ticket.json")
-function Record-Update([string]$state, [string]$detail) {
-  $when = [DateTime]::UtcNow.ToString('o')
-  Add-Content -LiteralPath $log -Value "$when  $state  $detail" -Encoding UTF8
-  $record = @{at=$when; action='editor-update-install'; result=$state} | ConvertTo-Json -Compress
-  [System.IO.File]::AppendAllText($events, $record + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-}
-try {
-  if (-not (Test-Path -LiteralPath $EditorRoot -PathType Container)) {
-    throw 'Editor folder does not exist.'
-  }
-  try { Wait-Process -Id $OldPid -Timeout 90 -ErrorAction SilentlyContinue } catch {}
-  if (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) {
-    throw 'The old editor is still running; close it before retrying.'
-  }
-  foreach ($file in $files) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Stage $file) -PathType Leaf)) {
-      throw "Staged editor file is missing: $file"
-    }
-  }
-  $backup = Join-Path $updates ('previous-editor-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
-  New-Item -ItemType Directory -Force -Path $backup | Out-Null
-  foreach ($file in $files) {
-    $old = Join-Path $EditorRoot $file
-    $existed[$file] = Test-Path -LiteralPath $old -PathType Leaf
-    if ($existed[$file]) {
-      $saved = Join-Path $backup $file
-      New-Item -ItemType Directory -Force -Path (Split-Path $saved) | Out-Null
-      Copy-Item -LiteralPath $old -Destination $saved -Force
-    }
-  }
-  $copyStarted = $true
-  foreach ($file in $files) {
-    $source = Join-Path $Stage $file
-    $target = Join-Path $EditorRoot $file
-    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
-    # The old onefile bootloader may still be releasing the EXE after its
-    # Python child exits; give Windows time to release the file lock.
-    for ($retry = 0; $retry -lt 20; $retry++) {
-      try { Copy-Item -LiteralPath $source -Destination $target -Force; break }
-      catch {
-        if ($retry -eq 19) { throw }
-        Start-Sleep -Milliseconds 500
-      }
-    }
-  }
-  $launchArgs = @('--update-ticket', $ticket)
-  if ($NoBrowser) { $launchArgs += '--no-browser' }
-  Record-Update 'starting' "Starting updated editor from $Stage"
-  $started = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -ArgumentList $launchArgs -PassThru
-  $confirmed = $false
-  $signal = $null
-  for ($attempt = 0; $attempt -lt 300; $attempt++) {
-    if (Test-Path -LiteralPath $ready -PathType Leaf) {
-      $signal = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
-      # A PyInstaller onefile EXE has a bootloader PID and a different app PID.
-      if ($signal.ticket -eq $ticket -and
-          (Get-Process -Id $signal.pid -ErrorAction SilentlyContinue)) {
-        $confirmed = $true
-        break
-      }
-    }
-    if ($started.HasExited) { break }
-    Start-Sleep -Milliseconds 200
-  }
-  if (-not $confirmed) { throw 'The updated editor did not start within 60 seconds; restoring the previous version.' }
-  Record-Update 'success' "Editor installed from $Stage; backup: $backup; pid: $($signal.pid); launcher_pid: $($started.Id); port: $($signal.port)"
-} catch {
-  $failure = $_.ToString()
-  if ($signal -and $signal.pid -and (Get-Process -Id $signal.pid -ErrorAction SilentlyContinue)) {
-    try { Stop-Process -Id $signal.pid -Force -ErrorAction Stop }
-    catch { $failure += "; could not stop new app process: $_" }
-  }
-  if ($started) {
-    try {
-      & taskkill.exe /PID $started.Id /T /F 2>$null | Out-Null
-      $started.WaitForExit(10000) | Out-Null
-    } catch { $failure += "; could not stop new editor process tree: $_" }
-  }
-  if ($copyStarted) {
-    foreach ($file in $files) {
-      try {
-        $target = Join-Path $EditorRoot $file
-        for ($retry = 0; $retry -lt 20; $retry++) {
-          try {
-            if ($existed[$file]) {
-              Copy-Item -LiteralPath (Join-Path $backup $file) -Destination $target -Force
-            } else {
-              if (Test-Path -LiteralPath $target) {
-                Remove-Item -LiteralPath $target -Force -ErrorAction Stop
-              }
-            }
+def installer_command(stage: Path, home: Path, old_pid: int, port: int = 0, *,
+                      no_browser: bool = False) -> list[str]:
+    """Start the downloaded GUI EXE as updater, independent of the old EXE."""
+    command = [str(stage / "LekmodLocalizationEditor.exe"), "--install-update",
+               "--editor-root", str(home), "--stage", str(stage),
+               "--old-pid", str(old_pid), "--port", str(port)]
+    if no_browser:
+        command.append("--no-browser")
+    return command
+
+
+def launch_update(stage: Path, home: Path = APP_HOME, old_pid: int | None = None,
+                  port: int = 0) -> None:
+    """Run the staged helper without PowerShell, a terminal, or inherited handles."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        raise ValueError("automatic installation requires the packaged Windows editor")
+    subprocess.Popen(installer_command(stage, home, old_pid or os.getpid(), port,
+                                       no_browser=bool(port)), cwd=stage,
+                     env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True,
+                     creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check the process, including a PyInstaller child with a different PID."""
+    if not pid:
+        return False
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel.WaitForSingleObject(handle, 0) == 0x102
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _wait_old_process(pid: int, seconds: int = 90) -> None:
+    """Wait on a process handle so PID reuse cannot block installation."""
+    if not pid:
+        return
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return  # The old editor has already closed.
+    try:
+        if kernel.WaitForSingleObject(handle, seconds * 1000) != 0:
+            raise TimeoutError("The old editor is still running; close it and retry.")
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _replace(source: Path, target: Path) -> None:
+    """Copy in the destination directory, then atomically swap with lock retries."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".updating-" + uuid.uuid4().hex)
+    try:
+        shutil.copy2(source, temporary)
+        for attempt in range(40):
+            try:
+                os.replace(temporary, target)
+                return
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(.5)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _record(home: Path, state: str, detail: str) -> None:
+    """Keep the helper's diagnostics on disk, since it has no console."""
+    workspace = home / "localization/workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with (workspace / "editor-updates/update.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp}  {state}  {detail}\n")
+    with (workspace / "editor-actions.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"at": timestamp, "action": "editor-update-install",
+                                 "result": state}) + "\n")
+
+
+def _wait_ready(home: Path, ticket: str, expected: str, process: subprocess.Popen) -> dict:
+    """Confirm the new editor responds over HTTP before declaring success."""
+    ready = home / "localization/workspace/editor-updates" / ("ready-" + ticket + ".json")
+    for _ in range(300):
+        if ready.is_file():
+            try:
+                signal = json.loads(ready.read_text(encoding="utf-8"))
+                if signal.get("ticket") == ticket and _pid_alive(signal.get("pid", 0)):
+                    url = f"http://127.0.0.1:{int(signal['port'])}"
+                    with urllib.request.urlopen(url + "/api/meta", timeout=1) as response:
+                        version = json.load(response).get("editor_version")
+                    with urllib.request.urlopen(url + "/", timeout=1) as response:
+                        page = response.read()
+                    with urllib.request.urlopen(url + "/app.js", timeout=1) as response:
+                        script = response.read()
+                    if (version == expected and b"Lekmod Localization Editor" in page
+                            and b"function renderTable" in script):
+                        ready.unlink(missing_ok=True)
+                        return signal
+            except (OSError, ValueError, KeyError, urllib.error.URLError):
+                pass
+        if process.poll() is not None:
             break
-          } catch {
-            if ($retry -eq 19) { throw }
-            Start-Sleep -Milliseconds 500
-          }
-        }
-      } catch { $rollbackOk = $false; $failure += "; rollback failed for ${file}: $_" }
-    }
-  }
-  Record-Update 'failure' $failure
-  if ($rollbackOk -and -not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) -and
-      (Test-Path -LiteralPath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -PathType Leaf)) {
-    try {
-      if ($NoBrowser) {
-        $restored = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -ArgumentList @('--no-browser') -PassThru
-      } else {
-        $restored = Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot -PassThru
-      }
-      Record-Update 'failure' "Previous editor reopened after failed update; pid: $($restored.Id)"
-    } catch { Record-Update 'failure' "Could not restart the previous editor: $_" }
-  }
-  [Console]::Error.WriteLine("Editor update failed. See $log. $failure")
-  exit 1
-}
-Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue
-try { Remove-Item -LiteralPath $Stage -Recurse -Force } catch {
-  Record-Update 'warning' "Installed editor, but could not remove staged files: $_"
-}
-""".replace("FILES", files)
-    script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(content, encoding="utf-8")
-    return script
+        time.sleep(.2)
+    raise RuntimeError("The updated editor did not open within 60 seconds.")
+
+
+def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
+                   no_browser: bool = False) -> None:
+    """Backup, install, validate startup, and restore the old editor on failure."""
+    home, stage = home.resolve(), stage.resolve()
+    updates = home / "localization/workspace/editor-updates"
+    if stage.parent != updates or stage == home or not home.is_dir():
+        raise ValueError("invalid editor update location")
+    expected = editor_manifest(stage)["version"]
+    if tuple(map(int, expected.split("."))) <= tuple(map(int, editor_manifest(home)["version"].split("."))):
+        raise ValueError("the staged editor is not newer than this installation")
+    for name in UPDATE_FILES:
+        if not (stage / name).is_file() or (stage / name).is_symlink():
+            raise ValueError(f"Staged editor file is missing or unsafe: {name}")
+    backup = updates / ("previous-editor-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                        + "-" + uuid.uuid4().hex[:6])
+    process: subprocess.Popen | None = None
+    existed: dict[str, bool] = {}
+    started = False
+    try:
+        _wait_old_process(old_pid)
+        backup.mkdir(parents=True)
+        for name in UPDATE_FILES:
+            target = home / name
+            existed[name] = target.is_file()
+            if existed[name]:
+                destination = backup / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, destination)
+        started = True
+        for name in UPDATE_FILES:
+            _replace(stage / name, home / name)
+        ticket = uuid.uuid4().hex
+        command = [str(home / "LekmodLocalizationEditor.exe"), "--update-ticket", ticket]
+        if port:
+            command.extend(("--port", str(port)))
+        if no_browser:
+            command.append("--no-browser")
+        _record(home, "starting", f"Starting v{expected}; backup: {backup}")
+        process = subprocess.Popen(command, cwd=home,
+                                   env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, close_fds=True,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+        signal = _wait_ready(home, ticket, expected, process)
+        _record(home, "success", f"Installed v{expected}; backup: {backup}; pid: {signal['pid']}")
+    except Exception as error:
+        failure = str(error)
+        if process is not None:
+            try:
+                subprocess.run(["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            except (OSError, subprocess.TimeoutExpired) as stop_error:
+                failure += f"; could not stop the failed editor: {stop_error}"
+        rollback_ok = True
+        if started:
+            for name in UPDATE_FILES:
+                try:
+                    target = home / name
+                    if existed.get(name):
+                        _replace(backup / name, target)
+                    else:
+                        target.unlink(missing_ok=True)
+                except OSError as rollback_error:
+                    rollback_ok = False
+                    failure += f"; restoring {name} failed: {rollback_error}"
+        _record(home, "failure", failure)
+        if rollback_ok and started and (home / "LekmodLocalizationEditor.exe").is_file():
+            try:
+                command = [str(home / "LekmodLocalizationEditor.exe")]
+                if port:
+                    command.extend(("--port", str(port)))
+                if no_browser:
+                    command.append("--no-browser")
+                subprocess.Popen(command, cwd=home,
+                                 env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                _record(home, "failure", "Previous editor reopened after failed update")
+            except OSError as restart_error:
+                _record(home, "failure", f"Could not reopen previous editor: {restart_error}")
+        raise RuntimeError(failure) from error
+
+
+def installer_main(argv: list[str]) -> int:
+    """Run only in the downloaded EXE, before importing the browser server."""
+    parser = argparse.ArgumentParser(description="Finish a staged editor update")
+    parser.add_argument("--editor-root", type=Path, required=True)
+    parser.add_argument("--stage", type=Path, required=True)
+    parser.add_argument("--old-pid", type=int, required=True)
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--no-browser", action="store_true")
+    args = parser.parse_args(argv)
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        parser.error("the update helper must be the packaged Windows EXE")
+    try:
+        install_update(args.editor_root, args.stage, args.old_pid, port=args.port,
+                       no_browser=args.no_browser)
+    except Exception as error:
+        # The GUI EXE has no stdout. The helper already wrote update.log.
+        try:
+            _record(args.editor_root, "failure", f"Update helper exited: {error}")
+        except OSError:
+            pass
+        return 1
+    return 0

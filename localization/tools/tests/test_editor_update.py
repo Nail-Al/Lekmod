@@ -3,17 +3,21 @@
 from hashlib import sha256
 import io
 import json
+from http.server import HTTPServer
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+from urllib.request import Request, urlopen
 import zipfile
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
-    UPDATE_FILES, latest_release, stage_release, write_windows_updater,
+    UPDATE_FILES, latest_release, stage_release, installer_command,
 )
 
 
@@ -58,18 +62,77 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual((stage / "localization/editor/app.js").read_bytes(),
                              b"fixture")
             self.assertEqual(len(list(stage.parent.glob("editor-v0.4.failed-*"))), 1)
-            script = write_windows_updater(stage, home)
-            self.assertIn("Wait-Process", script.read_text())
-            self.assertIn("ready-$ticket.json", script.read_text())
-            self.assertIn("restoring the previous version", script.read_text())
-            self.assertIn("[string]$EditorRoot", script.read_text())
-            self.assertNotIn("[string]$Home", script.read_text())
-            self.assertIn("editor-update-install", script.read_text())
+            command = installer_command(stage, home, 42, 8123, no_browser=True)
+            self.assertEqual(command[0], str(stage / "LekmodLocalizationEditor.exe"))
+            self.assertIn("--install-update", command)
+            self.assertIn("--editor-root", command)
+            self.assertIn("8123", command)
+            self.assertNotIn("powershell.exe", command)
             bad = dict(found, digest="sha256:" + "0" * 64)
             with tempfile.TemporaryDirectory() as other:
                 with patch("lekmod_localization.editor_update._download", return_value=content):
                     with self.assertRaisesRegex(ValueError, "SHA-256"):
                         stage_release(bad, Path(other))
+
+    def test_download_reports_bytes_and_rejects_oversized_data(self):
+        """The UI can show real progress and an oversized response cannot stage."""
+        from lekmod_localization.editor_update import _download
+        class Response(io.BytesIO):
+            url = "https://github.com/test"
+            headers = {"Content-Length": "5"}
+
+        progress = []
+        with patch("lekmod_localization.editor_update.urllib.request.urlopen",
+                   return_value=Response(b"hello")):
+            self.assertEqual(_download("https://github.com/test", 5,
+                                       lambda done, total: progress.append((done, total))), b"hello")
+        self.assertEqual(progress, [(5, 5)])
+        with patch("lekmod_localization.editor_update.urllib.request.urlopen",
+                   return_value=Response(b"hello")):
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                _download("https://github.com/test", 4)
+
+    def test_browser_action_streams_progress_then_launches_helper(self):
+        """Exercise the real HTTP endpoint, including a second status request."""
+        from editor_server import make_handler
+
+        editor = Mock()
+        editor.update_state = {"state": "idle"}
+        token = "test-token"
+        server = HTTPServer(("127.0.0.1", 0), make_handler(editor, token, 0))
+        server.RequestHandlerClass = make_handler(editor, token, server.server_port)
+        real_shutdown = server.shutdown
+        server.shutdown = Mock()  # Observe the handoff before actually stopping.
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        release = {"available": True, "latest": "0.8"}
+
+        def stage(release, progress):
+            progress(1048576, 2097152)
+            return Path("staged-editor")
+
+        try:
+            with patch("editor_server.latest_release", return_value=release), \
+                 patch("editor_server.stage_release", side_effect=stage), \
+                 patch("editor_server.launch_update") as launch:
+                request = Request(base + "/api/editor-update", data=b"{}", headers={
+                    "Origin": base, "X-Editor-Token": token, "Content-Type": "application/json"})
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 202)
+                for _ in range(100):
+                    if server.shutdown.called:
+                        break
+                    time.sleep(.01)
+                self.assertTrue(server.shutdown.called, "HTTP update never handed off")
+                launch.assert_called_once_with(Path("staged-editor"), port=server.server_port)
+                with urlopen(base + "/api/editor-update-status", timeout=5) as response:
+                    self.assertEqual(json.load(response)["state"], "installing")
+        finally:
+            server.shutdown = real_shutdown
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
 
 
 if __name__ == "__main__":
