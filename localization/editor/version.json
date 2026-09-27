@@ -1,5 +1,5 @@
 {
-  "version": "0.4",
-  "release_tag": "editor-v0.4",
+  "version": "0.5",
+  "release_tag": "editor-v0.5",
   "compatible_releases": ["v35.3"]
 }

@@ -39,6 +39,10 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_windows_updater.py
+      - name: Verify snapshot encryption on Windows
+        shell: pwsh
+        run: |
+          python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_snapshot_cloud.py -q
       - name: Publish versioned Windows download
         shell: pwsh
         env:

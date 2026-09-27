@@ -13,7 +13,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.connections import (
     DownloadCancelled, apply_game, download_compatible_source, extract_source_archive,
-    save_settings, settings,
+    save_settings, settings, TEAM_SNAPSHOT_URL,
 )
 
 
@@ -78,6 +78,13 @@ class ConnectionTests(unittest.TestCase):
         self.assertFalse(settings(self.home)["prefill"])
         self.assertEqual(settings(self.home)["column_widths"]["key"], 420)
         self.assertEqual(settings(self.home)["game_path"], str(self.game))
+        self.assertEqual(settings(self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)
+        save_settings({"snapshot_url": ""}, self.home)
+        self.assertEqual(settings(self.home)["snapshot_url"], "")
+        # A pre-team settings file with an empty link gets the new default once.
+        old = self.home / "localization/workspace/editor-settings.json"
+        old.write_text(json.dumps({"snapshot_url": ""}), encoding="utf-8")
+        self.assertEqual(settings(self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)
 
     def test_downloaded_archive_cannot_escape_destination(self):
         """Reject ZIP traversal before opening a project file for writing."""

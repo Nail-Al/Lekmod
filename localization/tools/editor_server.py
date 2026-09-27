@@ -50,7 +50,7 @@ from lekmod_localization.vanilla_snapshot import read_snapshot
 from lekmod_localization.vanilla_reference import verify_snapshot_reference
 from lekmod_localization.vanilla_reference import read_reference
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
-from snapshot_cloud import decrypt_snapshot, download_encrypted
+from snapshot_cloud import decrypt_snapshot, download_encrypted, encrypt_snapshot
 
 
 PAGE = APP_HOME / "localization" / "editor" / "index.html"
@@ -88,6 +88,16 @@ def atomic_bytes(path: Path, data: bytes) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def require_fresh_translation_files(data: dict, source: Path, approvals: Path) -> None:
+    """Stop an editor save when an IDE or another editor changed its inputs."""
+    for name, path in (("english_source_sha256", source),
+                       ("approved_sha256", approvals)):
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+        if not isinstance(data.get(name), str) or data[name] != actual:
+            raise CatalogError("project files changed since this row was loaded; "
+                               "copy your draft and reload the table before saving")
 
 
 def encoded_csv(rows: list[dict[str, str]], fields: tuple[str, ...] | list[str]) -> bytes:
@@ -222,6 +232,7 @@ class Editor:
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
         self.download_cancel = threading.Event()
+        self.last_encrypted_archive: Path | None = None
         self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
         self.events: list[dict] = []
         if self.log_path.is_file():
@@ -408,6 +419,21 @@ class Editor:
         save_settings({"snapshot_url": url})
         return result
 
+    def encrypt_local_snapshot(self, password: str) -> dict:
+        """Create a verified encrypted copy in the private editor workspace."""
+        if not self.ready or self.snapshot is None or not self.snapshot.is_file():
+            raise CatalogError("connect a project and import a matching vanilla snapshot first")
+        if not isinstance(password, str):
+            raise CatalogError("enter a snapshot password")
+        destination = APP_HOME / "localization/workspace" / (
+            "vanilla-snapshot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            + "-" + secrets.token_hex(4) + ".enc"
+        )
+        reference = REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz"
+        encrypt_snapshot(self.snapshot, password, reference, destination)
+        self.last_encrypted_archive = destination
+        return {"path": str(destination), "filename": destination.name}
+
     def apply_to_game(self) -> dict:
         """Copy the generated XML only after checking the connected DLC copy."""
         if not self.ready:
@@ -432,9 +458,10 @@ class Editor:
     def check_project(self) -> dict:
         """Run the full configured suite when available, or name skipped gates."""
         self.require_developer()
-        python = shutil.which("python") or shutil.which("py")
+        python = sys.executable if not getattr(sys, "frozen", False) else (
+            shutil.which("python") or shutil.which("py"))
         git = shutil.which("git")
-        if python and git:
+        if python and git and (REPO_ROOT / ".git").exists():
             command = [python, "-B", str(REPO_ROOT / "localization/tools/manage.py"), "check"]
             result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True,
                                     text=True, timeout=180)
@@ -467,8 +494,9 @@ class Editor:
             if enabled[name]:
                 skipped.append(name)
         return {"summary": "Passed: " + ", ".join(passed or ["none enabled"]) +
-                (". Skipped without developer Python and Git: " + ", ".join(skipped) +
-                 ". CI runs the complete suite on push." if skipped else ".")}
+                (". Skipped outside a Git checkout with Python and Git: " + ", ".join(skipped) +
+                 ". A developer runs the complete suite on a checkout or in CI."
+                 if skipped else ".")}
 
     def export_locale(self, locale: str) -> bytes:
         """Package one approved CSV for a developer without private vanilla text."""
@@ -504,13 +532,46 @@ class Editor:
             ))
         return stream.getvalue()
 
+    def export_english(self) -> bytes:
+        """Hand off a changed canonical English file without private vanilla text."""
+        self.require_developer()
+        source = sync_primary_english.DEFAULT_ENGLISH
+        reference = manage.DEFAULT_REFERENCE.read_bytes()
+        revision = None
+        if (REPO_ROOT / ".git").exists():
+            revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+                                      text=True, capture_output=True, check=True).stdout.strip()
+        manifest = {
+            "repository_commit": revision,
+            "vanilla_reference_sha256": hashlib.sha256(reference).hexdigest(),
+            "english_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        }
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(source, "localization/en_US/primary.xml")
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
+            archive.writestr("README.txt", (
+                "Lekmod English source handoff\n\n"
+                "Compare the manifest and review the diff against your checkout.\n"
+                "Merge the intended primary.xml rows; do not replace newer team edits.\n"
+                "Run localization/tools/manage.py prepare and check, review the generated\n"
+                "XML and translation fallbacks, then commit and push the reviewed files.\n"
+                "New TXT_KEY names also need a reference in gameplay XML, SQL, or Lua.\n"
+                "No private vanilla snapshot is included.\n"
+            ))
+        return stream.getvalue()
+
     def rows(self, locale: str, category: str, query: str, offset: int,
              limit: str = "100", filters: dict | None = None) -> dict:
         """Search a category and return one page with approval state."""
         rows = csv_rows(self.path(locale, category))
         approved = read_approvals(TRANSLATIONS).get(locale, {})
-        timestamps = {}
         approval_path = TRANSLATIONS / f"{locale}.csv"
+        approved_sha = (hashlib.sha256(approval_path.read_bytes()).hexdigest()
+                        if approval_path.is_file() else "")
+        english_sha = hashlib.sha256(
+            sync_primary_english.DEFAULT_ENGLISH.read_bytes()).hexdigest()
+        timestamps = {}
         if approval_path.is_file():
             with approval_path.open(encoding="utf-8-sig", newline="") as handle:
                 timestamps = {record["key"]: record.get("updated_at", "")
@@ -521,6 +582,8 @@ class Editor:
         shipped = manage.read_config()["build"]["shipped"]
         for row in rows:
             item = dict(row)
+            item["approved_sha256"] = approved_sha
+            item["english_source_sha256"] = english_sha
             item["english_edited_at"] = self.english_dates.get(row["key"], "")
             item["translation_updated_at"] = timestamps.get(row["key"], "")
             saved = approved.get(row["key"])
@@ -617,6 +680,8 @@ class Editor:
         ):
             raise CatalogError("translation must preserve all formatting tokens")
         approved_path = TRANSLATIONS / f"{locale}.csv"
+        require_fresh_translation_files(data, sync_primary_english.DEFAULT_ENGLISH,
+                                        approved_path)
         game = build_shipped_localization.DEFAULT_SOURCE
         old_approved = approved_path.read_bytes() if approved_path.exists() else None
         old_editor = path.read_bytes()
@@ -955,6 +1020,11 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(200, {"versions": release_catalog()})
                 elif url.path == "/api/editor-latest":
                     self.respond(200, latest_release())
+                elif url.path == "/api/encrypted-snapshot":
+                    archive = editor.last_encrypted_archive
+                    if archive is None or not archive.is_file():
+                        raise CatalogError("encrypt a verified local snapshot first")
+                    self.download(archive.name, archive.read_bytes(), "application/octet-stream")
                 elif url.path == "/api/download-status":
                     self.respond(200, editor.download_state)
                 elif url.path == "/api/rows":
@@ -980,6 +1050,9 @@ def make_handler(editor: Editor, token: str, port: int):
                     locale = one("locale")
                     data = editor.export_locale(locale)
                     self.download(f"lekmod-{locale}-translations.zip", data, "application/zip")
+                elif url.path == "/api/export-english":
+                    self.download("lekmod-english-source.zip", editor.export_english(),
+                                  "application/zip")
                 elif url.path == "/api/game-xml":
                     game = build_shipped_localization.DEFAULT_SOURCE
                     self.download(game.name, game.read_bytes(), "application/xml")
@@ -1030,6 +1103,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.cancel_download()
                 elif self.path == "/api/snapshot-cloud":
                     result = editor.import_cloud_snapshot(data.get("url"), data.get("password"))
+                elif self.path == "/api/snapshot-encrypt":
+                    result = editor.encrypt_local_snapshot(data.get("password"))
                 elif self.path == "/api/editor-update":
                     latest = latest_release()
                     stage = stage_release(latest)
@@ -1041,7 +1116,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     return
                 elif self.path == "/api/preferences":
                     allowed = {"mode", "prefill", "wrap", "locale", "category",
-                               "visible_columns", "column_widths", "onboarded", "page_size",
+                               "visible_columns", "translator_visible_columns",
+                               "developer_visible_columns", "column_widths", "onboarded", "page_size",
                                "snapshot_url"}
                     if set(data) - allowed:
                         raise CatalogError("unknown editor preference")
@@ -1053,7 +1129,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     if name not in {"row-selected", "mode-switch", "settings-open",
                                     "columns-changed", "page-changed", "prefill-changed",
                                     "logs-open", "logs-download", "copy", "wrap-changed",
-                                    "translation-export", "xml-export", "update-check",
+                                    "translation-export", "english-export", "xml-export", "update-check",
                                     "filter-changed", "page-size-changed", "discard"}:
                         raise CatalogError("unknown interface action")
                     editor.record_event(name, "ui")
@@ -1065,9 +1141,13 @@ def make_handler(editor: Editor, token: str, port: int):
                     dialog = Tk()
                     dialog.withdraw()
                     try:
+                        # The request comes from a browser window, which may otherwise
+                        # cover the native folder chooser on Windows.
+                        dialog.attributes("-topmost", True)
+                        dialog.update()
                         result = {"path": filedialog.askdirectory(
                             title="Select Lekmod project" if data["kind"] == "project"
-                            else "Select Civilization V installation")}
+                            else "Select Civilization V installation", parent=dialog)}
                     finally:
                         dialog.destroy()
                 elif self.path == "/api/apply-game":
@@ -1105,8 +1185,10 @@ def make_handler(editor: Editor, token: str, port: int):
             except (CatalogError, OSError, ValueError, ET.ParseError, urllib.error.URLError,
                     subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 self.respond(400, {"error": str(error)})
+                detail = (": " + str(error)[:400]) if self.path in (
+                    "/api/check", "/api/preferences") else ""
                 editor.record_event(self.path.removeprefix("/api/"),
-                                    "error:" + type(error).__name__)
+                                    "error:" + type(error).__name__ + detail)
 
         def log_message(self, format: str, *args: object) -> None:
             """Log one local request without exposing the private token."""

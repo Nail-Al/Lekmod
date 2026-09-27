@@ -2,10 +2,16 @@
 
 import sys
 from pathlib import Path
+import io
+import json
+import tempfile
 import unittest
+from unittest.mock import patch
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from editor_server import formatted_primary_text, matches_filters, page_slice, primary_text
+from editor_server import (Editor, formatted_primary_text, matches_filters,
+                           page_slice, primary_text, require_fresh_translation_files)
 from lekmod_localization.common import CatalogError
 
 
@@ -37,6 +43,59 @@ class EditorViewTests(unittest.TestCase):
         self.assertEqual(page_slice(entries, 0, "all"), entries)
         with self.assertRaises(CatalogError):
             page_slice(entries, -1, "50")
+
+    def test_parallel_editor_and_ide_changes_cannot_silently_overwrite(self):
+        """Reject a save made against an outdated source or approval CSV."""
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            source, approved = Path(directory) / "primary.xml", Path(directory) / "RU_RU.csv"
+            source.write_text("English", encoding="utf-8")
+            approved.write_text("translation", encoding="utf-8")
+            data = {"english_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "approved_sha256": hashlib.sha256(approved.read_bytes()).hexdigest()}
+            require_fresh_translation_files(data, source, approved)
+            approved.write_text("second editor", encoding="utf-8")
+            with self.assertRaisesRegex(CatalogError, "changed since"):
+                require_fresh_translation_files(data, source, approved)
+            data["approved_sha256"] = hashlib.sha256(approved.read_bytes()).hexdigest()
+            source.write_text("new balance", encoding="utf-8")
+            with self.assertRaisesRegex(CatalogError, "changed since"):
+                require_fresh_translation_files(data, source, approved)
+
+    def test_portable_run_checks_names_skipped_git_gates(self):
+        """A portable source must not attempt Git inventory even if Git is on PATH."""
+        with tempfile.TemporaryDirectory() as directory:
+            editor = object.__new__(Editor)
+            config = {"checks": {"art": False, "primary": False,
+                                 "english_sync": False, "shipped": False,
+                                 "inventory": True, "unit_tests": True}}
+            with patch.object(Editor, "require_developer"), \
+                 patch("editor_server.REPO_ROOT", Path(directory)), \
+                 patch("editor_server.shutil.which", return_value="available"), \
+                 patch("editor_server.manage.read_config", return_value=config), \
+                 patch("editor_server.subprocess.run", side_effect=AssertionError("Git called")):
+                result = editor.check_project()
+            self.assertIn("Skipped outside a Git checkout", result["summary"])
+            self.assertIn("inventory, unit_tests", result["summary"])
+
+    def test_developer_can_export_primary_without_private_snapshot(self):
+        """Portable handoff contains the canonical source and a review manifest."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, reference = root / "primary.xml", root / "fingerprints.json.gz"
+            source.write_text("<Text>edited English</Text>", encoding="utf-8")
+            reference.write_bytes(b"reference")
+            editor = object.__new__(Editor)
+            with patch.object(Editor, "require_developer"), \
+                 patch("editor_server.REPO_ROOT", root), \
+                 patch("editor_server.sync_primary_english.DEFAULT_ENGLISH", source), \
+                 patch("editor_server.manage.DEFAULT_REFERENCE", reference):
+                content = editor.export_english()
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                self.assertEqual(archive.read("localization/en_US/primary.xml"),
+                                 source.read_bytes())
+                self.assertIsNone(json.loads(archive.read("manifest.json"))["repository_commit"])
+                self.assertNotIn("vanilla-snapshot.json.gz", archive.namelist())
 
 
 if __name__ == "__main__":

@@ -41,6 +41,11 @@
     .pager .page-choice { margin-left: auto; }
     #count { min-width: 100px; text-align: center; }
     .table-scroll { flex: 1; min-width: 0; min-height: 0; width: 100%; overflow: auto; scrollbar-gutter: stable; }
+    .table-frame { flex: 1; min-height: 0; min-width: 0; position: relative; display: flex; }
+    #table-loading { position: absolute; z-index: 5; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; background: #f5f9fce8; font-weight: 650; }
+    .spinner { display: inline-block; width: 18px; height: 18px; border: 3px solid #aac3dc; border-top-color: #17598e; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+    .busy-action::before, .busy-inline::before { content: ""; display: inline-block; width: 13px; height: 13px; margin-right: 7px; border: 2px solid #aac3dc; border-top-color: #17598e; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; }
     th, td { border-bottom: 1px solid #e5ebf1; border-right: 1px solid #eef1f5; padding: 8px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
     th { position: sticky; top: 0; background: #eaf1f8; z-index: 2; text-align: left; padding-right: 17px; }
@@ -73,6 +78,8 @@
     .settings-group:first-of-type { border: 0; padding-top: 0; }
     .section-status:not(:empty) { padding: 9px 11px; border-radius: 7px; background: #e9f5eb; color: #246a39; }
     .section-status.warning:not(:empty) { background: #fff3d8; color: #78501d; }
+    .section-status.busy:not(:empty) { background: #eef4fb; color: #204b73; }
+    .section-status.busy:not(:empty)::before { content: ""; display: inline-block; width: 13px; height: 13px; margin-right: 8px; border: 2px solid #aac3dc; border-top-color: #17598e; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
     .icon-control.active { background: #dcecff; border-color: #23619a; }
     .section-status.error:not(:empty) { background: #fcecea; color: #a22d24; }
     .progress-group { display: grid; gap: 7px; }
@@ -87,6 +94,10 @@
     .icon-control { width: 38px; height: 36px; display: inline-flex; align-items: center; justify-content: center; padding: 5px; }
     .icon-control svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .filters-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .filter-dates { grid-column: 1 / -1; border-top: 1px solid #d9e2ed; padding-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .filter-dates .date-field { grid-column: 1 / -1; }
+    .input-row { display: flex; align-items: center; gap: 6px; }
+    .input-row input { flex: 1; min-width: 0; }
     #toast { position: fixed; bottom: clamp(22px, 7vh, 95px); left: 50%; transform: translateX(-50%); z-index: 200; max-width: min(90vw, 600px); padding: 12px 18px; border-radius: 10px; background: #204b73; color: white; box-shadow: 0 10px 32px #10263c70; text-align: center; }
     #toast.error { background: #963a34; }
     #logs-view { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
@@ -102,6 +113,7 @@
     a { color: #205d98; }
     dialog a { overflow-wrap: anywhere; }
     #no-source { padding: 20px; }
+    #app-loading { padding: 24px; display: flex; align-items: center; gap: 10px; }
     [hidden] { display: none !important; }
     @media (max-width: 680px) {
       header { padding: 12px; }
@@ -111,6 +123,7 @@
       .pager { justify-content: space-between; }
       .fields label { flex: 1 1 100%; }
       .filters-grid { grid-template-columns: 1fr; }
+      .filter-dates { grid-template-columns: 1fr; }
       button { min-height: 39px; }
     }
   </style>
@@ -130,6 +143,7 @@
   </div>
 </header>
 <main>
+  <section id="app-loading" class="card" role="status"><span class="spinner" aria-hidden="true"></span> Opening editor and checking the connected source…</section>
   <section id="no-source" class="card" hidden>
     <h2>Connect a Lekmod source to begin</h2>
     <p id="connection-error" class="warning"></p>
@@ -154,8 +168,11 @@
         <button id="next" aria-label="Next page">Next ›</button>
         <label class="inline page-choice">Rows<select id="page-size"><option>25</option><option>50</option><option selected>100</option><option>250</option><option>500</option><option>1000</option><option value="all">All</option></select></label>
       </nav>
-      <div class="table-scroll" id="table-scroll">
-        <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
+      <div class="table-frame">
+        <div class="table-scroll" id="table-scroll">
+          <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
+        </div>
+        <div id="table-loading" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span>Loading rows…</div>
       </div>
     </section>
     <section class="panel card">
@@ -181,12 +198,12 @@
       </div>
       <div class="quick">
         <button id="save" class="primary" disabled>Save and apply</button>
+        <button id="discard" class="icon-control" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
         <button id="undo" class="icon" aria-label="Undo saved edit" title="Undo saved edit" disabled>↶</button>
         <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
         <button id="game-apply" disabled>Apply to installed game</button>
         <button id="run-checks" hidden>Run checks</button>
         <button id="exports-button">Exports…</button>
-        <button id="discard" class="icon-control push-right" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled>↺</button>
       </div>
       <p id="message" role="status"></p>
     </section>
@@ -196,6 +213,7 @@
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>
 <dialog id="discard-dialog"><section><h2>Discard unsaved changes?</h2><p>Restore the selected row's saved text, grammar and note? Changes already saved in project files remain; use Undo to reverse a saved edit.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Discard changes</button></div></section></dialog>
+<dialog id="unsaved-dialog"><section><h2>Unsaved changes</h2><p id="unsaved-description">Save this row before leaving it?</p><div class="foot"><button id="unsaved-keep">Keep editing</button><button id="unsaved-discard">Discard and continue</button><button id="unsaved-save" class="primary">Save and continue</button></div></section></dialog>
 <dialog id="settings-dialog">
   <section>
     <div class="settings-group"><h2>Connections and settings</h2>
@@ -217,8 +235,13 @@
       <div class="accordion-body"><p id="snapshot-status" class="section-status" role="status" aria-live="polite"></p>
         <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
         <div class="row"><button id="snapshot-import">Import and verify snapshot</button><button id="snapshot-reset">Clear inputs</button></div>
+        <strong>Share an encrypted copy</strong>
+        <p class="hint">Import and verify your local snapshot above. Choose a password of at least 16 characters. Only the encrypted .enc file will be downloaded for upload to your storage provider.</p>
+        <label>New snapshot password<input id="snapshot-new-password" type="password" autocomplete="new-password"></label>
+        <label>Repeat password<input id="snapshot-confirm-password" type="password" autocomplete="new-password"></label>
+        <button id="snapshot-encrypt">Encrypt and download .enc</button>
         <p class="hint">Or download a previously encrypted snapshot. Enter a direct HTTPS link and decryption password; the password is never saved.</p>
-        <label>Encrypted snapshot link<input id="snapshot-url" type="url" placeholder="https://www.dropbox.com/...&dl=1"></label>
+        <label>Encrypted snapshot link<span class="input-row"><input id="snapshot-url" type="url" placeholder="https://www.dropbox.com/...&dl=1"><button id="snapshot-url-clear" type="button" class="icon-control" title="Clear snapshot link" aria-label="Clear snapshot link">×</button></span></label>
         <label>Snapshot password<input id="snapshot-password" type="password" autocomplete="off"></label>
         <button id="snapshot-cloud">Download, decrypt and verify</button>
         <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
@@ -232,8 +255,8 @@
   </section>
 </dialog>
 <dialog id="columns-dialog"><section><h2>Visible columns</h2><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
-<dialog id="filters-dialog"><section><h2>Filter rows</h2><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><label id="filter-date-label">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
-<dialog id="exports-dialog"><section><h2>Downloads</h2><p>Send an approved translation ZIP to a developer for review. Test game XML is one file and is not a complete mod.</p><button id="share">Download translation ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
+<dialog id="filters-dialog"><section><h2>Filter rows</h2><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
+<dialog id="exports-dialog"><section><h2>Downloads</h2><p>Share a translation or English source ZIP with a maintainer. Downloads do not send data or install the mod.</p><button id="share">Download translation ZIP</button><button id="share-english" hidden>Download English source ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
 <script src="/app.js" defer></script>
 </body>
 </html>

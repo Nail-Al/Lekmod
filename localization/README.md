@@ -1,111 +1,57 @@
 # Lekmod localization
 
-This folder contains the canonical English text, approved language CSVs, the browser editor, the shared vanilla fingerprints, and contributor tools. Civilization V reads generated localization in `LEKMOD/Override/CIV5Units_Mongol.xml`. Players need the packaged mod files, not this editor or the contributor tools.
+The editor is for contributors. Civilization V reads the generated language sections in `LEKMOD/Override/CIV5Units_Mongol.xml`; player packages need the mod, not the editor, Python tools, tests, or private workspace.
 
-## Start the Windows editor (no programming tools required)
+## Translator: start without an IDE
 
-1. Download `LekmodLocalizationEditor-Windows.zip` from the latest [editor release](https://github.com/Nail-Al/Lekmod/releases?q=editor-v) and extract it into a writable folder. Double-click `LekmodLocalizationEditor.exe`. Keep its console window open while using the browser page. The editor version appears beside its title. You do not need Git, Python, VS Code, or an installed game to open the editor.
-2. In **Settings → Lekmod project folder**, select a **complete** checkout of the [compatible localization branch](https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure), if you have one. Otherwise choose the compatible `v35.3` entry and click **Download**, watch the progress and destination, then **Save connections**. You can cancel and retry. The download creates a separate project in `localization/workspace/projects/v35.3`; an existing validated project is reused, never overwritten. The upstream main branch and older releases do not yet include the matching localization system. A plain Civilization V installation alone is insufficient.
-3. The source badge now names the connected project. Select **Translator**, a language and a category; search or pick a row. Change **My translation text** and click **Save and apply**. This saves the CSV in the connected project and rebuilds its game XML. A blank save withdraws that translation. **Developer** in the header opens the full English source, where developers may edit text or create a key. The mode button and Settings button are independent.
-4. To test in the game, install the **matching complete Lekmod release** with its official launcher. In Settings, choose the Civilization V folder and click **Find / verify game**. Red means the folder is not a game; yellow means the game is present without Lekmod; green means one Lekmod DLC is installed. Save connections, then use **Apply to installed game** after saving text. The editor compares release, internal version, and non-language game data, backs up the installed XML, and copies only the generated XML. Restart Civilization V. The editor does not install a complete mod. A game is optional when editing a standalone project.
+1. Download the ZIP from the latest [Windows editor release](https://github.com/Nail-Al/Lekmod/releases?q=editor-v), extract it into a writable folder, and run `LekmodLocalizationEditor.exe`. Keep its console window open while the editor runs in your browser. No Git, Python, or game installation is required to translate.
+2. Open **Settings**. Select an existing checkout of this [localization branch](https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure), or choose compatible `v35.3`, click **Download**, wait for the progress bar, and click **Save connections**. Downloads go into the editor's `localization/workspace/projects/v35.3` folder; a valid project there is reused, never overwritten. The upstream mod does not yet have this localization system. A game installation by itself is not a project.
+3. Choose **Translator**, language and category. Search or select a row, edit **My translation text**, and click **Save and apply**. This changes `localization/translations/<language>.csv` in the connected project and rebuilds its game XML. It does **not** copy anything into an installed game or send anything online. Blank translation text removes an existing approval.
+4. If you do not use Git, open **Exports → Download translation ZIP** and give that ZIP to a maintainer for review. If your connected project is a Git checkout, you may instead review the changes there and commit/push them on your contributor branch. Do not share the private `localization/workspace/` folder.
 
-The table stays inside its own horizontal and vertical scroll area. Drag a column's right edge to resize it; column widths and visibility, line wrapping, mode, page size, and the fill preference persist across launches. The page selector stays above the table; 100 rows show initially, with 25–1000 or All available. Use the filter icon for type/operation, status, or an inclusive edit-date range. Developer rows show their canonical source file and line. On short or narrow screens, the controls and edit panel scroll within the application instead of widening the page.
+The English column is the current Lekmod text. Optional **Vanilla EN** and **Vanilla <language>** columns show official game text only after importing the matching snapshot. The language column is off initially; enable it through **Columns** when data exists. Its name follows the selected language. **The current shared snapshot contains vanilla sentences for EN and RU only**; it has no DE or other target language sentences. An empty cell in those languages says nothing about the actual game translation. Adding more languages requires a reviewed team baseline, not an individual replacement.
 
-Selecting a row fills the edit box from **My translation**, then **Existing Lekmod translation**, when either has text. It stays empty when both are empty; English is never inserted as a translation. The Developer edit box uses the selected English text. XML indentation around a multiline English sentence is omitted from the edit box and reinstated when it is saved. When disabling **Fill the editor from the selected row** while text exists, choose **Keep text** or **Clear text**. The discard icon restores only unsaved form edits after confirmation. Copy buttons in nonempty source cells and on required formatting tokens copy their exact text. Keep token names and counts, including icons, colors, and placeholders, in a translation. These are valid game markup, and saving checks them. The character counter under the edit box has no English-length restriction. Gender and plurality have suggested values plus a **Custom** entry. Translator notes appear in the table and CSV; they are never exported into the game XML.
+**Status:** `missing` means no approved translation; `stale` means English changed since approval and the game falls back to English; `applied` means the CSV text is in the project's generated XML; `saved` means XML generation is Off. Neither `applied` nor `saved` means the installed game was updated. Formatting tokens such as icons, colors, and `{1_Name}` must keep their names and counts; the editor checks them. Character counts are information, not a length limit. Notes stay in the CSV and do not appear in game.
 
-**Status** is `missing` without an approved translation, `stale` when its English fingerprint changed, `applied` when the translation is in the project's generated XML, or `saved` if XML generation is turned Off. `Applied` does not mean copied into an installed game. A stale translation is kept for review, but the game uses English until the translation is approved again. English and translation character counts, English edit date, and translation edit date are optional columns. A date is blank when no reliable timestamp exists: the included English date index covers committed source rows, editor saves record subsequent changes, and older CSV approvals have no timestamp. It is not an estimate of a gameplay file's last change.
+Use the filter icon for type/status/edit dates, the column icon to show columns, and drag a column's right edge to change its width. The table scrolls inside its own area. Column widths, visible columns per mode, page size, wrapping, language and other settings survive a normal editor update. If you change a row and navigate away, choose **Save and continue**, **Discard and continue**, or **Keep editing**. Undo/redo reverse saved edits from the current session; the trash icon discards only the current unsaved form. **Logs** lists actions and errors without recording passwords or translation text.
 
-The header **Logs** page lists local actions and failures without recording translation text or passwords; use **Download log** for a bug report and **Back to editor**, **Logs**, or the mode switch to return. Success and failure notifications appear near the bottom center of the window. Undo and redo reverse up to 20 *saved* changes in the current session; Ctrl+Z in the text box only reverses typing. **Exports** contains a language ZIP for a maintainer and one XML for manual testing. Neither download sends data to anyone or installs the mod.
+## Developer: English source and team handoff
 
-### Editor updates
+The canonical English text and operations are in `localization/en_US/primary.xml`. Its `Language_en_US` block in `LEKMOD/Override/CIV5Units_Mongol.xml` is generated and must not be edited directly. In **Developer** mode, select an English row, edit its text, or create a `TXT_KEY_*`. A new key must also be referenced by gameplay XML, SQL, or Lua before it appears in game. Changing English makes old approvals stale until reviewed. An editor user without Git can use **Exports → Download English source ZIP**; a maintainer must compare the included file with their current branch and merge only the intended changes.
 
-**Settings → Editor updates** checks published `editor-v*` releases. If a newer Windows release exists, **Download and update editor** downloads its ZIP, verifies GitHub's SHA-256 digest and exact file list, stages it locally, closes the old process, replaces only the editor files, and opens the updated editor. Your connected project, CSVs, preferences, backups, and vanilla snapshot remain in place; the previous editor files are backed up for recovery. A failed installation is written to `localization/workspace/editor-updates/update.log` and appears in the editor's Logs after restart. A valid pending download can be retried. A Git source launcher shows the release but updates via Git instead. Network access to GitHub is needed for checks and updates.
-
-**Recovery for an automatic update started from v0.2 or v0.3:** Their Windows helper used a reserved PowerShell variable name and could stop before copying files. Restarting those versions may show `a pending editor update already exists`; retrying the same automatic update will not fix their helper. Download the latest `editor-v0.4` ZIP manually, extract it to a **new writable folder**, and start its EXE. In Settings, reconnect the existing complete Lekmod project folder. If the old editor downloaded that project, its path is `<old editor folder>/localization/workspace/projects/v35.3`; leave the old folder in place while using it. You may copy your private `localization/workspace/vanilla-snapshot.json.gz` to the new editor workspace or import it in Settings. Do not delete the old editor folder until you have checked your project, translations, and snapshot. The editor's location on a hard disk rather than in Downloads is not the cause of this failure.
-
-## Vanilla comparison: one shared baseline
-
-`reference/vanilla-fingerprints.json.gz` in Git pins the team's reference fingerprints. A full `vanilla-snapshot.json.gz` supplies the actual official English and translated sentences for the side-by-side comparison. This full-text file is **not** in this public repository or Windows download; it stays in `localization/workspace/` and is never committed. The editor and preparation verify it against the pinned fingerprints, so a different game database cannot silently replace the team's baseline. Without it you can still translate and classify English, but the original vanilla columns are hidden. The pinned snapshot presently has English and Russian text; the other eight locale tables are empty. Their original vanilla translations cannot be shown until maintainers review a complete new baseline.
-
-### Prepare the matching file in VS Code / PowerShell
-
-If you already created the snapshot in the earlier workflow, do not regenerate it. Open **Terminal → New Terminal** in VS Code and find the existing file:
+Developers who prefer VS Code can edit `primary.xml` and `localization/translations/*.csv` in a **Git checkout**. After direct edits, run this from the repository root:
 
 ```powershell
-Set-Location C:\Projects\Lekmod
-Get-Item .\build\localization\vanilla-snapshot.json.gz, .\localization\workspace\vanilla-snapshot.json.gz -ErrorAction SilentlyContinue
-```
-
-If the file is only in `build\localization`, copy it into the private editor workspace:
-
-```powershell
-New-Item -ItemType Directory -Force .\localization\workspace | Out-Null
-Copy-Item .\build\localization\vanilla-snapshot.json.gz .\localization\workspace\vanilla-snapshot.json.gz
-Get-Item .\localization\workspace\vanilla-snapshot.json.gz
-```
-
-If the file is already in `localization\workspace`, skip the copy. The **encrypt** command below verifies its content against the shared reference before creating a transferable file. You do not need `$mergedDatabase` for an existing snapshot. If neither path exists, locate the clean database you used earlier, assign that path to `$mergedDatabase`, and then create the snapshot:
-
-```powershell
-$mergedDatabase = "C:\path\to\your\clean\Localization-Merged.db"
-python -B .\localization\tools\freeze_vanilla.py --vanilla-db "$mergedDatabase"
-```
-
-Replace the example path with the real file path; a vanilla game installation alone is not a guarantee that its database matches the shared reference. A different or partially populated database is rejected. Do not run `--refresh-reference` to bypass a mismatch. Updating the team baseline requires a separate maintainer review of all languages and changed classifications.
-
-### Optional encrypted cloud handoff
-
-A free [Dropbox Basic](https://www.dropbox.com/basic) account is enough for this small file. This is an **encrypted file** handoff, not a Dropbox account password or a password built into the EXE. The snapshot password must have at least 16 characters; `111` is not safe. The editor does not save it. Install the one extra Python library on the computer doing the encryption or terminal download (the Windows EXE already contains it):
-
-```powershell
-python -m pip install "cryptography>=45,<47"
-python -B .\localization\tools\snapshot_cloud.py encrypt
-```
-
-The tool checks `localization/workspace/vanilla-snapshot.json.gz` against the pinned reference, prompts twice for the password without echoing it, and creates `localization/workspace/vanilla-snapshot.enc`. Open [Dropbox Basic](https://www.dropbox.com/basic), sign in, click **Upload → Files**, and upload **only the `.enc` file**. In Dropbox select that file, click **Share → Copy link**, then change `dl=0` to `dl=1` (or add `&dl=1` if the URL already has `?` and no `dl`; otherwise append `?dl=1`). Give the link and password to authorized collaborators separately. In the editor, open **Settings → Vanilla reference** (expand the section), paste the link and enter the password, then click **Download, decrypt and verify**. The editor saves only the link; the downloaded plaintext snapshot stays in its ignored workspace. A bad password, corrupted file, or different baseline is rejected before installation.
-
-A developer using an IDE can fetch the same encrypted file in PowerShell:
-
-```powershell
-Set-Location C:\Projects\Lekmod
-python -B .\localization\tools\snapshot_cloud.py fetch --url "https://www.dropbox.com/...&dl=1"
-```
-
-The command prompts for the password, verifies the shared baseline, and atomically installs `localization/workspace/vanilla-snapshot.json.gz`. Replace the example URL with the actual direct link. The editor can also import a matching local `.json.gz` in Settings without a cloud account. The person setting up Dropbox must create their own account and upload the encrypted file; the editor cannot create that account or recover a lost password. Whoever has both link and password can decrypt the file, so share those only with intended team members and follow the rights applicable to the official game text.
-
-## Developer workflow and checked-in files
-
-In a Git checkout, `localization/en_US/primary.xml` is the canonical editable English source. The `Language_en_US` block in `LEKMOD/Override/CIV5Units_Mongol.xml` is generated from it; changes made directly to that block will be overwritten. A new `TXT_KEY_*` entry also needs a reference in gameplay XML, SQL, or Lua before the game will use it. Developers can use **Developer** mode to edit/create a key or edit `primary.xml` directly. Saving English rebuilds outputs and makes earlier translations with changed fingerprints stale. After direct file edits:
-
-```powershell
-python -m pip install "cryptography>=45,<47"
 python -B .\localization\tools\manage.py prepare
 python -B .\localization\tools\manage.py check
 git diff --check
 ```
 
-The `_help` entries in `localization/config.json` describe each `On`/`Off` build or check switch; JSON has no comments. Leave switches On for normal development. `Off` skips a step and does not erase existing generated text. A gameplay balance change does not automatically identify which prose should change; review the corresponding English description. CI checks the committed output and cannot push automatic changes back into your branch.
+`prepare` refreshes generated XML and review data; `check` runs enabled tests and audits. `localization/config.json` describes each `On`/`Off` switch under `_help`. CI checks committed outputs; it cannot fix a contributor's files automatically. **Run checks** in an editor connected to a Git checkout with Python and Git runs this full suite. In a portable downloaded project without `.git`, it runs the checks that do not require Git and explicitly names the skipped inventory and unit-test gates. A maintainer must still run the complete suite in a checkout before merging.
 
-| Path | Purpose | Commit? |
+Each contributor should work in a separate checkout or branch. The editor writes to whichever project is connected; do not let an IDE and an editor make unreviewed simultaneous writes to the same working directory. The editor rejects a translation save if its English source or approved CSV changed since the row was loaded. It cannot merge two contributors' conflicting Git pushes: review the differing keys, resolve any Git conflict, regenerate, check, and then commit. For handoff ZIPs, check the manifest's source commit and vanilla reference hash, review changed CSV rows or English operations, and merge changes rather than replacing newer team files. No export includes the private vanilla text.
+
+| File | Role | Commit to contributor branch? |
 | --- | --- | --- |
-| `localization/en_US/primary.xml` | Canonical English operations | Yes |
-| `localization/translations/*.csv` | Approved text, source fingerprints, notes, edit timestamps | Yes |
-| `localization/reference/vanilla-fingerprints.json.gz` | Pinned shared vanilla hashes | Yes |
-| `localization/reference/english-edit-dates.json.gz` | Text-free portable date index | Yes |
-| `localization/editor/`, `localization/tools/`, `localization/config.json` | Contributor UI, generators, tests and switches | In contributor source, not player package |
-| `LEKMOD/Override/CIV5Units_Mongol.xml` | Generated language sections at the mod's existing path | Yes |
-| `localization/workspace/` | Snapshot, preferences, drafts, downloads, logs, backups | Never |
+| `localization/en_US/primary.xml` | Canonical English | Yes |
+| `localization/translations/*.csv` | Reviewed translations, fingerprints and notes | Yes |
+| `localization/reference/*.json.gz` | Shared text-free fingerprints and English date index | Yes |
+| `LEKMOD/Override/CIV5Units_Mongol.xml` | Generated game language sections | Yes |
+| `localization/editor/`, `localization/tools/`, `localization/config.json` | Contributor UI, generators, tests, configuration | Contributor source only; omit from player downloads |
+| `localization/workspace/` | Private snapshot, settings, projects, backups and logs | Never |
 
-The translator's **Exports → Download translation ZIP** packages a language CSV and a manifest. The maintainer compares its baseline hash and source commit, reviews translations and required tokens, places `translations/<locale>.csv` in this folder, runs `manage.py prepare` and `manage.py check`, reviews the game XML diff, then commits. The editor and Python tests are contributor materials; a player download should contain the actual mod payload from `LEKMOD` instead. `.gitignore` cannot hide already tracked contributor files from a public Git repository.
+## Shared vanilla reference
 
-### FAQ
+The tracked `reference/vanilla-fingerprints.json.gz` pins one team baseline without publishing official game sentences. The full `vanilla-snapshot.json.gz` stays in each contributor's ignored workspace. In **Settings → Vanilla reference**, the editor prefills the team's [encrypted Dropbox download link](https://www.dropbox.com/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc?rlkey=fwcgddzwanyaljhe9tja6ytk1&dl=1). Ask a maintainer for the separate password (at least 16 characters), enter it, then click **Download, decrypt and verify**. The editor checks the snapshot against the pinned reference before using it. Clear the link with the × button if your team uses a different location. The link is saved; **the password is never saved**. After a normal update, the verified local snapshot remains, so you need not download it again.
 
-**Why not commit the full vanilla snapshot?** It copies official game text, unlike original fan-written Lekmod descriptions. A public PR and its Git history can be copied even if a later commit removes a file. Keep the full file outside this public branch unless the team has redistribution permission. The tracked fingerprints and authenticated encrypted handoff provide a single checked baseline without publishing the full text.
+Maintainers may import an already verified local `.json.gz` in Settings and use **Encrypt and download .enc** to prepare a new encrypted copy. Upload only `.enc`, and share its password separately. A contributor using a terminal can fetch the same direct `https://...&dl=1` link with `python -B .\localization\tools\snapshot_cloud.py fetch --url "<direct link>"`; install a current prebuilt `cryptography` package for that interpreter. Windows ARM64 with Python 3.14 may need a separate x64 Python for the current package, or use the Windows editor without installing Python packages. If you already have the verified snapshot, do not rebuild it from a possibly different game database. A new shared baseline needs a separate review of every locale.
 
-**What if the snapshot does not match?** Check that you used the matching clean database and the correct file. Ask a maintainer for the team's verified file. Do not change the pinned reference to silence the error. English and approved translations remain usable without original vanilla wording.
+The full snapshot copies official game text. Keep it out of this public Git history unless the team has permission to redistribute it. Deleting it in a later commit would not remove earlier public copies. Anyone holding both the download link and password can decrypt it; give the password only to intended collaborators.
 
-**Can a plain game installation unlock the editor?** No. The editor needs a complete compatible localization project as its source. A game with one matching installed Lekmod DLC is optional for in-game testing. The game checker reports a vanilla-only installation in yellow; no version selection is needed when there is one installed DLC.
+## Updates and game test
 
-**Why is a date blank?** Existing approvals have no historic per-row timestamp, and a new key may have no committed source history. Saving a translation or English row in this editor records its edit time. The pinned English date index supplies commit dates to a downloaded source without Git history; a Git checkout reads its own blame history.
+Use **Settings → Editor updates → Download and update editor** for an installed Windows release. The updater verifies the release archive, replaces only the EXE and listed editor files **in the same folder**, backs them up, and keeps `localization/workspace/` and connected project files. A Windows updater smoke test checks this preservation. If updating manually, close the old EXE, back up the folder, and extract the new ZIP **over the same editor folder**, replacing editor files while keeping `localization/workspace/`. Extracting into a different folder starts a new workspace: copy the old workspace and reconnect project paths, especially if a project was downloaded inside the old folder. Versions v0.2/v0.3 have a broken automatic updater; upgrade those manually. A failed updater writes `localization/workspace/editor-updates/update.log` and records a failure in Logs on restart.
 
-**What do I need to update my existing VS Code folder?** Commit or back up your own uncommitted edits first. In the VS Code terminal, run `git switch localization-infrastructure` and `git pull --ff-only origin localization-infrastructure`. This gets the **source** changes into your `C:\Projects\Lekmod` checkout; it does not install or upgrade an already extracted Windows EXE. For the EXE, use **Settings → Editor updates → Download and update editor** after the versioned release appears, or download that new release once. Point it at your updated checkout in Settings, or let it download a separate compatible project. If VS Code still shows unresolved imports under the removed `tools/localization` directory, close those old tabs and run **Developer: Reload Window** from the Command Palette. The active scripts now reside in `localization/tools`.
+For an in-game test, install one complete matching Lekmod DLC with its official launcher first. In Settings choose the Civilization V folder and **Find / verify game**. Green means one Lekmod DLC was found; yellow means the game has no Lekmod; red means the game folder is invalid. **Save connections** checks that its version matches the project. After saving a translation, click **Apply to installed game**: the editor compares versions and gameplay data, backs up the installed XML, copies the generated XML, and asks you to restart Civilization V. It does not install a full mod. The game is optional for editing or exporting.
+
+**Need help?** A missing source means select a complete compatible project, not the plain game folder. An empty vanilla cell can mean the snapshot lacks that language. A blank edit date means there is no reliable history for that row; English commit dates are indexed in the project, and new editor saves record their time. A rejected save after another contributor's edit protects their work: copy your draft, reload, and reconcile the changed row. A public Git ZIP download has no Git history, so developers who need full checks should clone the branch.

@@ -10,8 +10,17 @@ from pathlib import Path
 import tempfile
 import urllib.request
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ModuleNotFoundError as error:
+    if error.name != "cryptography":
+        raise
+    raise SystemExit(
+        "cryptography is unavailable for this Python. On Windows ARM64, use "
+        "Lekmod Localization Editor v0.5 or newer to encrypt the snapshot in "
+        "Settings → Vanilla reference; no pip installation is needed."
+    ) from error
 
 from lekmod_localization.common import CatalogError, REPO_ROOT
 from lekmod_localization.vanilla_reference import verify_snapshot_reference

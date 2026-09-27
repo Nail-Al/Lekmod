@@ -23,6 +23,7 @@ let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
 let inLogs = false;
 let downloadTimer;
+let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
 let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
 function logUI(name) { api("/api/event", {name}).catch(() => {}); }
 
@@ -60,6 +61,50 @@ async function preference(values) {
 }
 function developer() { return prefs.mode === "developer"; }
 function activeColumns() { return developer() ? developerColumns : translatorColumns; }
+function columnsPreference() { return developer() ? "developer_visible_columns" : "translator_visible_columns"; }
+function savedColumns() {
+  if (prefs[columnsPreference()].length) return prefs[columnsPreference()];
+  const specific = developer() ? ["kind", "text", "source_file"]
+    : ["classification", "lekmod_target", "translation"];
+  return prefs.visible_columns.some(field => specific.includes(field)) ? prefs.visible_columns : [];
+}
+function columnTitle(field, title) {
+  return field === "vanilla_target" ? "Vanilla " + (el("locale").value.split("_")[0] || "language") : title;
+}
+function captureDraft() {
+  return JSON.stringify({text: el("translation").value,
+    gender: grammarValue("gender"), plurality: grammarValue("plurality"),
+    note: el("note").value, newKey: el("new-key").value});
+}
+function hasUnsaved() { return !!chosen && savedDraft !== null && captureDraft() !== savedDraft; }
+function markDraft() { el("discard").disabled = !hasUnsaved(); }
+async function guardNavigation(action) {
+  if (!hasUnsaved()) return action();
+  if (el("unsaved-dialog").open) return;
+  pendingNavigation = action;
+  el("unsaved-dialog").showModal();
+}
+async function continueNavigation(save) {
+  if (guardSaving) return;
+  if (save) {
+    guardSaving = true;
+    for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = true;
+    el("unsaved-save").classList.add("busy-action");
+    let saved;
+    try { saved = await saveCurrent(); }
+    finally {
+      guardSaving = false;
+      for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = false;
+      el("unsaved-save").classList.remove("busy-action");
+    }
+    if (!saved) return;
+  }
+  if (!save) { savedDraft = captureDraft(); markDraft(); }
+  const next = pendingNavigation;
+  pendingNavigation = null;
+  el("unsaved-dialog").close();
+  if (next) await next();
+}
 function countText() {
   const value = el("translation").value;
   el("characters").textContent = "Characters: " + Array.from(value).length +
@@ -132,14 +177,18 @@ function changeMode() {
     ? "Saved in primary.xml; changes make previous translations stale."
     : "Saved in the language CSV; the project's game XML is rebuilt.";
   el("save").textContent = developer() ? "Save English and rebuild" : "Save and apply";
+  el("share").hidden = developer();
+  el("share-english").hidden = !developer();
   el("rename-key").disabled = !chosen || !developer();
   updateBaselineNotice();
   offset = 0;
-  visible = new Set(prefs.visible_columns.length ? prefs.visible_columns
+  const saved = savedColumns();
+  visible = new Set(saved.length ? saved
     : [...translatorColumns, ...developerColumns].map(item => item[0]));
+  if (!saved.length) visible.delete("vanilla_target");
   if (!activeColumns().some(([field]) => visible.has(field)))
     visible = new Set(activeColumns().map(([field]) => field));
-  if (!developer() && !prefs.visible_columns.length) {
+  if (!developer() && !saved.length) {
     if (!Object.keys(meta.vanilla_counts).length) {
       visible.delete("vanilla_en_US"); visible.delete("vanilla_en_US_characters");
       visible.delete("vanilla_target");
@@ -188,13 +237,23 @@ function renderColumnChoices() {
     label.className = "inline";
     const check = document.createElement("input");
     check.type = "checkbox"; check.checked = visible.has(field);
+    if (field === "vanilla_target" && !meta.vanilla_counts[el("locale").value]) {
+      check.disabled = true;
+      label.title = "No original vanilla text for this language in the shared snapshot.";
+    }
     check.addEventListener("change", async () => {
+      const before = new Set(visible);
       check.checked ? visible.add(field) : visible.delete(field);
-      await preference({visible_columns: Array.from(visible)});
-      logUI("columns-changed");
-      renderTable(window.currentRows || []);
+      try {
+        await preference({[columnsPreference()]: Array.from(visible)});
+        logUI("columns-changed");
+        renderTable(window.currentRows || []);
+      } catch (error) {
+        visible = before; check.checked = visible.has(field);
+        message(error.message, true);
+      }
     });
-    label.append(check, document.createTextNode(title));
+    label.append(check, document.createTextNode(columnTitle(field, title)));
     container.append(label);
   }
 }
@@ -212,7 +271,7 @@ function renderTable(rows) {
     col.style.width = colWidth(field) + "px";
     group.append(col);
     const th = document.createElement("th");
-    th.textContent = title;
+    th.textContent = columnTitle(field, title);
     const handle = document.createElement("span");
     handle.className = "resizer";
     handle.setAttribute("role", "separator");
@@ -222,7 +281,8 @@ function renderTable(rows) {
       handle.setPointerCapture(event.pointerId);
       const start = event.clientX, original = colWidth(field);
       function move(pointer) {
-        widths[field] = Math.max(100, Math.min(1500, original + pointer.clientX - start));
+        widths[field] = Math.round(Math.max(100, Math.min(1500,
+          original + pointer.clientX - start)));
         col.style.width = widths[field] + "px";
         tableWidth(cols);
       }
@@ -264,7 +324,16 @@ function renderTable(rows) {
       }
       tr.append(td);
     }
-    tr.addEventListener("click", () => selectRow(row, tr));
+    tr.addEventListener("click", () => {
+      if (!hasUnsaved()) { selectRow(row, tr); return; }
+      guardNavigation(async () => {
+        await load();
+        const index = (window.currentRows || []).findIndex(item => item.key === row.key);
+        if (index >= 0) selectRow(window.currentRows[index],
+          el("table").querySelectorAll("tbody tr")[index]);
+        else message("That row is no longer visible. Select it again from the table.");
+      });
+    });
     body.append(tr);
   }
   tableWidth(cols);
@@ -281,7 +350,7 @@ function selectRow(row, tr) {
   el("selected").textContent = row.key + (developer() ? " · English source" : " · " + locale);
   el("translation").disabled = false;
   el("save").disabled = false;
-  el("discard").disabled = false;
+  el("discard").disabled = true;
   el("rename-key").disabled = !developer();
   for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer();
   if (el("prefill").checked) {
@@ -293,7 +362,10 @@ function selectRow(row, tr) {
   setGrammar("gender", row.translation_gender || "");
   setGrammar("plurality", row.translation_plurality || "");
   el("note").value = row.translator_note || "";
+  el("new-key").value = "";
   countText();
+  savedDraft = captureDraft();
+  markDraft();
   if (developer()) {
     el("context").textContent = "English edited: " + (row.english_edited_at || "unknown") +
       ". Existing translations become stale when this text changes. New keys need a gameplay reference.";
@@ -324,6 +396,9 @@ async function load() {
   if (!meta.ready) return;
   const sequence = ++requestId;
   chosen = null;
+  savedDraft = null;
+  el("table-loading").hidden = false;
+  el("table-scroll").setAttribute("aria-busy", "true");
   el("save").disabled = true;
   el("discard").disabled = true;
   el("rename-key").disabled = true;
@@ -344,17 +419,26 @@ async function load() {
     if (sequence !== requestId) return;
     total = result.total;
     renderTable(result.rows);
+    committedSearch = el("search-input").value;
     el("count").textContent = total ? (offset + 1) + "–" + Math.min(offset + result.rows.length, total) +
       " of " + total : "No rows";
     el("prev").disabled = offset === 0 || pageSize() === "all";
     el("next").disabled = offset + pageStep() >= total || pageSize() === "all";
-  } catch (error) { message(error.message, true); }
+  } catch (error) { if (sequence === requestId) message(error.message, true); }
+  finally {
+    if (sequence === requestId) {
+      el("table-loading").hidden = true;
+      el("table-scroll").removeAttribute("aria-busy");
+    }
+  }
 }
 function fillSettings() {
   el("project-path").value = prefs.project_path;
   el("game-path").value = prefs.game_path || meta.game.path;
   el("snapshot-url").value = prefs.snapshot_url || "";
   el("snapshot-password").value = "";
+  el("snapshot-new-password").value = "";
+  el("snapshot-confirm-password").value = "";
   sectionMessage("source", meta.ready ? "Compatible source connected: " + meta.release :
     "Choose a complete Lekmod source, or download a compatible version.",
     meta.ready ? "success" : "warning");
@@ -415,6 +499,7 @@ async function updateDownload() {
 }
 async function refresh() {
   meta = await api("/api/meta");
+  el("app-loading").hidden = true;
   prefs = meta.preferences;
   locales = meta.locales;
   widths = {...prefs.column_widths};
@@ -436,19 +521,26 @@ async function refresh() {
   }
 }
 el("settings-button").addEventListener("click", () => {
-  logUI("settings-open");
-  el("settings-dialog").showModal(); fillSettings();
+  guardNavigation(() => {
+    logUI("settings-open");
+    el("settings-dialog").showModal(); fillSettings();
+  });
 });
 el("settings-close").addEventListener("click", () => el("settings-dialog").close());
 el("settings-dialog").addEventListener("close", () => {
   clearInterval(downloadTimer); downloadTimer = undefined;
 });
 el("project-browse").addEventListener("click", async () => {
-  try { const result = await api("/api/browse", {kind: "project"}); if (result.path) el("project-path").value = result.path; }
+  sectionMessage("source", "Opening folder chooser…", "busy");
+  try { const result = await api("/api/browse", {kind: "project"});
+    if (result.path) { el("project-path").value = result.path;
+      sectionMessage("source", "Selected " + result.path + ". Save connections to use it."); }
+    else sectionMessage("source", "No folder selected.", "warning"); }
   catch (error) { sectionMessage("source", error.message, "error"); }
 });
 el("project-download").addEventListener("click", async () => {
   try {
+    sectionMessage("source", "Starting source download…", "busy");
     await api("/api/download-project", {version: el("project-version").value});
     await updateDownload();
     if (!downloadTimer) downloadTimer = setInterval(updateDownload, 1000);
@@ -459,11 +551,16 @@ el("project-cancel").addEventListener("click", async () => {
   catch (error) { sectionMessage("source", error.message, "error"); }
 });
 el("game-browse").addEventListener("click", async () => {
-  try { const result = await api("/api/browse", {kind: "game"}); if (result.path) el("game-path").value = result.path; }
+  sectionMessage("game", "Opening folder chooser…", "busy");
+  try { const result = await api("/api/browse", {kind: "game"});
+    if (result.path) { el("game-path").value = result.path;
+      sectionMessage("game", "Selected " + result.path + ". Verify this game folder."); }
+    else sectionMessage("game", "No folder selected.", "warning"); }
   catch (error) { sectionMessage("game", error.message, "error"); }
 });
 el("detect-game").addEventListener("click", async () => {
   try {
+    sectionMessage("game", "Checking game folder…", "busy");
     const found = await api("/api/detect-game", {path: el("game-path").value});
     if (found.path) el("game-path").value = found.path;
     if (found.state === "installed") sectionMessage("game", "Civilization V and Lekmod " +
@@ -475,6 +572,7 @@ el("detect-game").addEventListener("click", async () => {
 });
 el("settings-save").addEventListener("click", async () => {
   try {
+    sectionMessage("source", "Validating and connecting the project…", "busy");
     const result = await api("/api/connect", {project_path: el("project-path").value,
       game_path: el("game-path").value});
     el("settings-dialog").close();
@@ -494,6 +592,7 @@ el("snapshot-import").addEventListener("click", async () => {
   const file = el("snapshot-file").files[0];
   if (!file) { sectionMessage("snapshot", "Choose a .json.gz file first.", "error"); return; }
   try {
+    sectionMessage("snapshot", "Verifying the local snapshot…", "busy");
     const response = await fetch("/api/snapshot", {method: "POST",
       headers: {"X-Editor-Token": token, "Content-Type": "application/octet-stream"}, body: file});
     const result = await response.json();
@@ -508,15 +607,51 @@ el("snapshot-reset").addEventListener("click", async () => {
   el("snapshot-file").value = "";
   el("snapshot-url").value = "";
   el("snapshot-password").value = "";
+  el("snapshot-new-password").value = "";
+  el("snapshot-confirm-password").value = "";
   try {
     await preference({snapshot_url: ""});
     sectionMessage("snapshot", "Inputs cleared. The installed reference, if any, is unchanged.");
   } catch (error) { sectionMessage("snapshot", error.message, "error"); }
 });
+el("snapshot-url-clear").addEventListener("click", async () => {
+  el("snapshot-url").value = "";
+  el("snapshot-password").value = "";
+  try {
+    await preference({snapshot_url: ""});
+    sectionMessage("snapshot", "Saved link cleared. The local reference is unchanged.");
+  } catch (error) { sectionMessage("snapshot", error.message, "error"); }
+});
+el("snapshot-encrypt").addEventListener("click", async () => {
+  const password = el("snapshot-new-password").value;
+  const confirmation = el("snapshot-confirm-password").value;
+  if (password !== confirmation) {
+    sectionMessage("snapshot", "The two passwords do not match.", "error");
+    return;
+  }
+  const button = el("snapshot-encrypt");
+  button.disabled = true;
+  try {
+    sectionMessage("snapshot", "Verifying and encrypting the local reference…", "busy");
+    const result = await api("/api/snapshot-encrypt", {password});
+    location.href = "/api/encrypted-snapshot";
+    sectionMessage("snapshot", "Encrypted copy created: " + result.path +
+      ". Your browser is downloading " + result.filename + ". Upload only this .enc file.");
+    message("Encrypted snapshot ready to upload.");
+  } catch (error) {
+    sectionMessage("snapshot", error.message, "error");
+  } finally {
+    el("snapshot-new-password").value = "";
+    el("snapshot-confirm-password").value = "";
+    button.disabled = false;
+  }
+});
 el("snapshot-cloud").addEventListener("click", async () => {
   const password = el("snapshot-password").value;
+  const button = el("snapshot-cloud");
+  button.disabled = true;
   try {
-    sectionMessage("snapshot", "Downloading and verifying the encrypted snapshot…", "warning");
+    sectionMessage("snapshot", "Downloading and verifying the encrypted snapshot…", "busy");
     const result = await api("/api/snapshot-cloud", {
       url: el("snapshot-url").value.trim(), password});
     el("snapshot-password").value = "";
@@ -526,35 +661,62 @@ el("snapshot-cloud").addEventListener("click", async () => {
   } catch (error) {
     el("snapshot-password").value = "";
     sectionMessage("snapshot", error.message, "error");
+  } finally {
+    button.disabled = false;
   }
 });
 el("mode").addEventListener("click", async () => {
-  try {
-    await preference({mode: developer() ? "translator" : "developer"});
-    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
-    if (inLogs) closeLogs();
-    changeMode();
-    logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
-  } catch (error) {
-    message(error.message + " Connect a full compatible project in Settings.", true);
-  }
+  guardNavigation(async () => {
+    try {
+      await preference({mode: developer() ? "translator" : "developer"});
+      filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+      if (inLogs) closeLogs();
+      changeMode();
+      logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
+    } catch (error) {
+      message(error.message + " Connect a full compatible project in Settings.", true);
+    }
+  });
 });
 el("locale").addEventListener("change", async () => {
-  categories(); offset = 0;
-  await preference({locale: el("locale").value, category: el("category").value});
-  if (!meta.vanilla_counts[el("locale").value]) visible.delete("vanilla_target");
-  renderColumnChoices(); load();
+  const next = el("locale").value, previous = prefs.locale;
+  el("locale").value = previous;
+  guardNavigation(async () => {
+    el("locale").value = next;
+    categories(); offset = 0;
+    try {
+      await preference({locale: next, category: el("category").value});
+      if (!meta.vanilla_counts[next]) visible.delete("vanilla_target");
+      renderColumnChoices(); await load();
+    } catch (error) { message(error.message, true); }
+  });
 });
 el("category").addEventListener("change", async () => {
-  offset = 0; await preference({category: el("category").value}); load();
+  const next = el("category").value;
+  el("category").value = prefs.category;
+  guardNavigation(async () => {
+    el("category").value = next; offset = 0;
+    try { await preference({category: next}); await load(); }
+    catch (error) { message(error.message, true); }
+  });
 });
 el("search-input").addEventListener("input", () => {
-  clearTimeout(searchTimer); searchTimer = setTimeout(() => { offset = 0; load(); }, 230);
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const next = el("search-input").value;
+    el("search-input").value = committedSearch;
+    guardNavigation(() => { el("search-input").value = next; offset = 0; return load(); });
+  }, 230);
 });
 el("page-size").addEventListener("change", async () => {
-  offset = 0;
-  try { await preference({page_size: el("page-size").value}); logUI("page-size-changed"); load(); }
-  catch (error) { message(error.message, true); }
+  const next = el("page-size").value;
+  el("page-size").value = pageSize();
+  guardNavigation(async () => {
+    offset = 0;
+    try { await preference({page_size: next}); el("page-size").value = next;
+      logUI("page-size-changed"); await load(); }
+    catch (error) { message(error.message, true); }
+  });
 });
 el("wrap").addEventListener("change", async () => {
   el("table").classList.toggle("nowrap", !el("wrap").checked);
@@ -569,14 +731,14 @@ el("prefill").addEventListener("change", async () => {
   } else if (el("prefill").checked && chosen && !el("translation").value) {
     el("translation").value = developer() ? chosen.text :
       chosen.translation || chosen.lekmod_target || "";
-    countText();
+    countText(); markDraft();
   }
 });
 el("prefill-keep").addEventListener("click", () => {
   el("prefill-dialog").close(); message("Auto-fill off; your text was kept.");
 });
 el("prefill-clear").addEventListener("click", () => {
-  el("translation").value = ""; countText(); el("prefill-dialog").close();
+  el("translation").value = ""; countText(); markDraft(); el("prefill-dialog").close();
   message("Auto-fill off; edit box cleared.");
 });
 for (const name of ["gender", "plurality"]) el(name).addEventListener("change", () => {
@@ -584,10 +746,17 @@ for (const name of ["gender", "plurality"]) el(name).addEventListener("change", 
   custom.hidden = el(name).value !== "__custom__";
   custom.disabled = custom.hidden;
   if (!custom.hidden) custom.focus();
+  markDraft();
 });
-el("translation").addEventListener("input", countText);
-el("prev").addEventListener("click", () => { offset = Math.max(0, offset - pageStep()); logUI("page-changed"); load(); });
-el("next").addEventListener("click", () => { offset += pageStep(); logUI("page-changed"); load(); });
+el("translation").addEventListener("input", () => { countText(); markDraft(); });
+for (const name of ["gender", "gender-custom", "plurality", "plurality-custom", "note", "new-key"])
+  el(name).addEventListener("input", markDraft);
+el("prev").addEventListener("click", () => guardNavigation(() => {
+  offset = Math.max(0, offset - pageStep()); logUI("page-changed"); return load();
+}));
+el("next").addEventListener("click", () => guardNavigation(() => {
+  offset += pageStep(); logUI("page-changed"); return load();
+}));
 async function openLogs() {
   inLogs = true;
   logUI("logs-open");
@@ -605,7 +774,7 @@ function closeLogs() {
   el("logs-view").hidden = true;
   renderConnections();
 }
-el("logs-button").addEventListener("click", () => inLogs ? closeLogs() : openLogs());
+el("logs-button").addEventListener("click", () => inLogs ? closeLogs() : guardNavigation(openLogs));
 el("logs-back").addEventListener("click", closeLogs);
 el("logs-download").addEventListener("click", () => {
   logUI("logs-download");
@@ -620,16 +789,22 @@ el("filters-button").addEventListener("click", () => {
 el("filters-close").addEventListener("click", () => {
   const from = el("filter-from").value, to = el("filter-to").value;
   if (from && to && from > to) { message("The end date must follow the start date.", true); return; }
-  filters = {kind: el("filter-kind").value, status: developer() ? "" : el("filter-status").value,
+  const next = {kind: el("filter-kind").value, status: developer() ? "" : el("filter-status").value,
     date_field: developer() ? "english_edited_at" : el("filter-date-field").value,
     date_from: from, date_to: to};
-  offset = 0; renderFilterChoices(); el("filters-dialog").close();
-  logUI("filter-changed"); load();
+  el("filters-dialog").close();
+  guardNavigation(() => {
+    filters = next; offset = 0; renderFilterChoices();
+    logUI("filter-changed"); return load();
+  });
 });
 el("filters-reset").addEventListener("click", () => {
-  filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
-  offset = 0; renderFilterChoices(); el("filters-dialog").close();
-  logUI("filter-changed"); load(); message("Filters cleared.");
+  el("filters-dialog").close();
+  guardNavigation(async () => {
+    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+    offset = 0; renderFilterChoices(); logUI("filter-changed");
+    await load(); message("Filters cleared.");
+  });
 });
 el("discard").addEventListener("click", () => { if (chosen) el("discard-dialog").showModal(); });
 el("discard-cancel").addEventListener("click", () => el("discard-dialog").close());
@@ -640,15 +815,33 @@ el("discard-confirm").addEventListener("click", () => {
     setGrammar("plurality", chosen.translation_plurality || "");
     el("note").value = chosen.translator_note || "";
     el("new-key").value = "";
+    savedDraft = captureDraft(); markDraft();
     countText(); logUI("discard"); message("Unsaved edits discarded; saved files unchanged.");
   }
   el("discard-dialog").close();
 });
 el("exports-button").addEventListener("click", () => el("exports-dialog").showModal());
 el("exports-close").addEventListener("click", () => el("exports-dialog").close());
-el("save").addEventListener("click", async () => {
-  if (!chosen) return;
-  el("save").disabled = true; message("Saving and validating…");
+el("unsaved-keep").addEventListener("click", () => {
+  pendingNavigation = null; el("unsaved-dialog").close();
+});
+el("unsaved-dialog").addEventListener("cancel", event => {
+  if (guardSaving) event.preventDefault();
+  else pendingNavigation = null;
+});
+el("unsaved-discard").addEventListener("click", () => continueNavigation(false));
+el("unsaved-save").addEventListener("click", () => continueNavigation(true));
+window.addEventListener("beforeunload", event => {
+  if (hasUnsaved()) { event.preventDefault(); event.returnValue = ""; }
+});
+async function saveCurrent() {
+  if (!chosen) return false;
+  if (developer() && el("new-key").value.trim()) {
+    message("Use Create text key or Rename selected key before leaving; saving English text alone does not save that identifier.", true);
+    return false;
+  }
+  el("save").disabled = true; el("save").classList.add("busy-action");
+  message("Saving and validating…");
   try {
     const result = developer()
       ? await api("/api/primary", {index: chosen.index, key: chosen.key,
@@ -656,6 +849,8 @@ el("save").addEventListener("click", async () => {
       : await api("/api/translate", {locale: el("locale").value,
           category: el("category").value, key: chosen.key,
           source_fingerprint: chosen.source_fingerprint,
+          english_source_sha256: chosen.english_source_sha256,
+          approved_sha256: chosen.approved_sha256,
           translation: el("translation").value, translation_gender: grammarValue("gender"),
           translation_plurality: grammarValue("plurality"), translator_note: el("note").value});
     updateHistory(result); await load();
@@ -668,12 +863,17 @@ el("save").addEventListener("click", async () => {
       message(result.applied_to_game === false ? "Saved. XML generation is Off in config.json." :
         "Saved to project CSV and generated game XML. Use Apply to installed game for a local test.");
     }
-  } catch (error) { message(error.message, true); el("save").disabled = false; }
-});
+    return true;
+  } catch (error) { message(error.message, true); el("save").disabled = false; return false; }
+  finally { el("save").classList.remove("busy-action"); }
+}
+el("save").addEventListener("click", saveCurrent);
 for (const name of ["undo", "redo"]) el(name).addEventListener("click", async () => {
-  try { const result = await api("/api/" + name, {}); updateHistory(result); await load();
-    message(name === "undo" ? "Last saved change undone." : "Saved change restored.");
-  } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
+  guardNavigation(async () => {
+    try { const result = await api("/api/" + name, {}); updateHistory(result); await load();
+      message(name === "undo" ? "Last saved change undone." : "Saved change restored.");
+    } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
+  });
 });
 el("create-key").addEventListener("click", async () => {
   try {
@@ -686,6 +886,10 @@ el("create-key").addEventListener("click", async () => {
 });
 el("rename-key").addEventListener("click", async () => {
   if (!chosen) return;
+  if (el("translation").value !== chosen.text) {
+    message("Save the English text before renaming this key.", true);
+    return;
+  }
   try {
     const result = await api("/api/rename-primary", {index: chosen.index,
       key: chosen.key, new_key: el("new-key").value.trim()});
@@ -695,23 +899,35 @@ el("rename-key").addEventListener("click", async () => {
   } catch (error) { message(error.message, true); }
 });
 el("game-apply").addEventListener("click", async () => {
-  try {
-    const result = await api("/api/apply-game", {});
-    message(result.changed ? "Installed game XML updated. Backup: " + result.backup +
-      ". Restart Civilization V to test." : "Installed game XML already matches this project.");
-  } catch (error) { message(error.message, true); }
+  guardNavigation(async () => {
+    el("game-apply").disabled = true; el("game-apply").classList.add("busy-action");
+    try {
+      const result = await api("/api/apply-game", {});
+      message(result.changed ? "Installed game XML updated. Backup: " + result.backup +
+        ". Restart Civilization V to test." : "Installed game XML already matches this project.");
+    } catch (error) { message(error.message, true); }
+    finally { el("game-apply").classList.remove("busy-action"); renderConnections(); }
+  });
 });
 el("run-checks").addEventListener("click", async () => {
-  message("Running configured checks…");
-  try { const result = await api("/api/check", {});
-    message(result.summary);
-  } catch (error) { message(error.message, true); }
+  guardNavigation(async () => {
+    el("run-checks").disabled = true; el("run-checks").classList.add("busy-action");
+    message("Running configured checks…");
+    try { const result = await api("/api/check", {}); message(result.summary); }
+    catch (error) { message(error.message, true); }
+    finally { el("run-checks").disabled = false; el("run-checks").classList.remove("busy-action"); }
+  });
 });
-el("share").addEventListener("click", () => {
+el("share").addEventListener("click", () => guardNavigation(() => {
   logUI("translation-export");
   location.href = "/api/export?locale=" + encodeURIComponent(el("locale").value);
   message("Translation ZIP download started. Send it to a developer for review.");
-});
+}));
+el("share-english").addEventListener("click", () => guardNavigation(() => {
+  logUI("english-export");
+  location.href = "/api/export-english";
+  message("English source ZIP download started. Send it to a developer for review.");
+}));
 el("gamexml").addEventListener("click", () => {
   logUI("xml-export");
   location.href = "/api/game-xml";
@@ -719,6 +935,7 @@ el("gamexml").addEventListener("click", () => {
 });
 async function checkLatest() {
   logUI("update-check");
+  el("update-status").classList.add("busy-inline");
   el("update-status").textContent = "Checking published releases…";
   try {
     const info = await api("/api/editor-latest");
@@ -732,10 +949,12 @@ async function checkLatest() {
     if (info.available && !info.can_auto_update)
       el("update-status").textContent += " Source checkouts update with Git.";
   } catch (error) { el("update-status").textContent = "Update check unavailable: " + error.message; }
+  finally { el("update-status").classList.remove("busy-inline"); }
 }
 el("update-check").addEventListener("click", checkLatest);
 el("update-install").addEventListener("click", async () => {
   el("update-install").disabled = true;
+  el("update-status").classList.add("busy-inline");
   el("update-status").textContent = "Downloading and checking the editor update…";
   try {
     const result = await api("/api/editor-update", {});
@@ -744,6 +963,12 @@ el("update-install").addEventListener("click", async () => {
   } catch (error) {
     el("update-install").disabled = false;
     el("update-status").textContent = "Editor update failed: " + error.message;
+  } finally {
+    el("update-status").classList.remove("busy-inline");
   }
 });
-refresh().then(checkLatest).catch(error => message(error.message, true));
+refresh().then(checkLatest).catch(error => {
+  el("app-loading").textContent = "The editor could not load: " + error.message +
+    ". Reload the page to try again.";
+  message(error.message, true);
+});

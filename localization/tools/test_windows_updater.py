@@ -34,7 +34,15 @@ def main() -> int:
         stage = root / "localization/workspace/editor-updates/editor-v0.4"
         private = root / "localization/workspace/editor-settings.json"
         private.parent.mkdir(parents=True)
-        private.write_text("personal settings", encoding="utf-8")
+        preferences = json.dumps({"project_path": "C:/Lekmod", "snapshot_url":
+                                  "https://www.dropbox.com/example?dl=1",
+                                  "column_widths": {"key": 420}, "mode": "developer"})
+        private.write_text(preferences, encoding="utf-8")
+        snapshot = private.parent / "vanilla-snapshot.json.gz"
+        snapshot.write_bytes(b"private snapshot fixture")
+        project = private.parent / "projects/v35.3/localization/translations/RU_RU.csv"
+        project.parent.mkdir(parents=True)
+        project.write_text("approved row", encoding="utf-8")
         for name in UPDATE_FILES:
             previous, incoming = root / name, stage / name
             previous.parent.mkdir(parents=True, exist_ok=True)
@@ -56,7 +64,9 @@ def main() -> int:
         backups = list((root / "localization/workspace/editor-updates").glob("previous-editor-*"))
         assert len(backups) == 1
         assert (backups[0] / "localization/editor/app.js").read_text() == "old localization/editor/app.js"
-        assert private.read_text() == "personal settings"
+        assert private.read_text() == preferences
+        assert snapshot.read_bytes() == b"private snapshot fixture"
+        assert project.read_text() == "approved row"
         log = (root / "localization/workspace/editor-actions.jsonl").read_text(encoding="utf-8")
         assert json.loads(log.splitlines()[-1])["result"] == "success"
 
@@ -64,7 +74,9 @@ def main() -> int:
         failed = run(script, stage, root)
         assert failed.returncode != 0, "missing staged files must stop installation"
         assert (root / "localization/editor/app.js").read_text() == "new localization/editor/app.js"
-        assert private.read_text() == "personal settings"
+        assert private.read_text() == preferences
+        assert snapshot.read_bytes() == b"private snapshot fixture"
+        assert project.read_text() == "approved row"
         assert json.loads((root / "localization/workspace/editor-actions.jsonl").read_text(
             encoding="utf-8").splitlines()[-1])["result"] == "failure"
         assert "Staged editor file is missing" in (root /

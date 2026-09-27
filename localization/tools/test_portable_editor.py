@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import gzip
+import io
 import json
 from pathlib import Path
 import re
@@ -121,12 +122,19 @@ def main() -> int:
         try:
             meta = json.loads(get(base + "/api/meta"))
             assert not meta["ready"] and not meta["locales"]
+            assert b'id="snapshot-encrypt"' in get(base + "/")
             try:
                 get(base + "/api/rows?locale=RU_RU&category=buildings")
             except HTTPError as error:
                 assert error.code == 400
             else:
                 raise RuntimeError("editor exposed rows without a full project")
+            try:
+                post(base, token, "/api/snapshot-encrypt", {"password": "a-long-team-password"})
+            except HTTPError as error:
+                assert error.code == 400
+            else:
+                raise RuntimeError("editor encrypted a snapshot without a connected project")
         finally:
             stop_editor(process, base, token)
 
@@ -147,6 +155,11 @@ def main() -> int:
             assert meta["ready"] and meta["editor_version"] == expected_version
             assert not meta["vanilla_counts"]
             post(base, token, "/api/preferences", {"mode": "developer"})
+            checks = post(base, token, "/api/check", {})["summary"]
+            assert "Skipped outside a Git checkout" in checks, checks
+            with zipfile.ZipFile(io.BytesIO(get(base + "/api/export-english"))) as handoff:
+                assert "localization/en_US/primary.xml" in handoff.namelist()
+                assert not any("snapshot" in name for name in handoff.namelist())
             primary = json.loads(get(base + "/api/primary?offset=0"))["rows"]
             assert primary[0]["source_file"] == "localization/en_US/primary.xml"
             assert primary[0]["source_line"] > 0
@@ -170,6 +183,8 @@ def main() -> int:
             result = post(base, token, "/api/translate", {
                 "locale": "RU_RU", "category": category, "key": row["key"],
                 "source_fingerprint": row["source_fingerprint"],
+                "english_source_sha256": row["english_source_sha256"],
+                "approved_sha256": row["approved_sha256"],
                 "translation": "Portable editor smoke test", "translation_gender": "",
                 "translation_plurality": "", "translator_note": "",
             })

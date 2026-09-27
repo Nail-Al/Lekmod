@@ -25,10 +25,12 @@ START = """Lekmod Localization Editor for Windows
    Install the matching complete Lekmod release separately first.
 5. To compare original vanilla sentences, import the matching local
    vanilla-snapshot.json.gz or use an encrypted link and password from
-   your team in Settings. The app verifies the shared fingerprints.
+   your team in Settings. The app verifies the shared fingerprints. To
+   share a verified snapshot, use Vanilla reference > Encrypt and download
+   .enc; the EXE needs no Python installation for this operation.
 6. For future editor versions, check Settings > Editor updates. If you
    used an older unversioned EXE, install this release manually once.
-   If an automatic update from v0.2/v0.3 failed, start v0.4 from a new
+   If an automatic update from v0.2/v0.3 failed, start this release from a new
    folder and reconnect your existing project. Do not delete its old folder
    if the project was downloaded under localization/workspace/projects.
 

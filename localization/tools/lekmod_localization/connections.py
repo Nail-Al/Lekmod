@@ -20,10 +20,16 @@ import xml.etree.ElementTree as ET
 APP_HOME = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
             else Path(__file__).resolve().parents[3])
 SETTINGS_FILE = APP_HOME / "localization" / "workspace" / "editor-settings.json"
+TEAM_SNAPSHOT_URL = (
+    "https://www.dropbox.com/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc"
+    "?rlkey=fwcgddzwanyaljhe9tja6ytk1&dl=1"
+)
 DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
     "mode": "translator", "prefill": True, "wrap": True, "locale": "RU_RU",
-    "category": "", "visible_columns": [], "column_widths": {}, "snapshot_url": "",
+    "category": "", "visible_columns": [], "translator_visible_columns": [],
+    "developer_visible_columns": [], "column_widths": {},
+    "snapshot_url": TEAM_SNAPSHOT_URL, "snapshot_url_cleared": False,
     "page_size": "100",
 }
 KEY = re.compile(r"^v?\d+(?:\.\d+)+$", re.IGNORECASE)
@@ -45,20 +51,24 @@ def settings(home: Path = APP_HOME) -> dict:
     for name in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url"):
         if isinstance(raw.get(name), str) and len(raw[name]) < 4096:
             result[name] = raw[name]
-    for name in ("onboarded", "prefill", "wrap"):
+    for name in ("onboarded", "prefill", "wrap", "snapshot_url_cleared"):
         if type(raw.get(name)) is bool:
             result[name] = raw[name]
     if raw.get("mode") in ("translator", "developer"):
         result["mode"] = raw["mode"]
     if raw.get("page_size") in ("25", "50", "100", "250", "500", "1000", "all"):
         result["page_size"] = raw["page_size"]
-    if isinstance(raw.get("visible_columns"), list):
-        result["visible_columns"] = [x for x in raw["visible_columns"]
-                                     if isinstance(x, str) and len(x) < 64][:40]
+    for name in ("visible_columns", "translator_visible_columns", "developer_visible_columns"):
+        if isinstance(raw.get(name), list):
+            result[name] = [x for x in raw[name]
+                            if isinstance(x, str) and len(x) < 64][:40]
     if isinstance(raw.get("column_widths"), dict):
         result["column_widths"] = {k: v for k, v in raw["column_widths"].items()
                                    if isinstance(k, str) and type(v) is int
                                    and 100 <= v <= 1500}
+    if not result["snapshot_url"] and not result["snapshot_url_cleared"]:
+        # Older editor releases persisted an empty link before the team URL existed.
+        result["snapshot_url"] = TEAM_SNAPSHOT_URL
     return result
 
 
@@ -68,9 +78,12 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
     if set(values) - set(DEFAULTS):
         raise ValueError("unknown editor setting")
     candidate = {**current, **values}
+    if "snapshot_url" in values:
+        candidate["snapshot_url_cleared"] = values["snapshot_url"] == ""
     # Validate the whole object through the same schema used at startup.
     if candidate["mode"] not in ("translator", "developer") or any(
-        type(candidate[k]) is not bool for k in ("onboarded", "prefill", "wrap")
+        type(candidate[k]) is not bool for k in ("onboarded", "prefill", "wrap",
+                                              "snapshot_url_cleared")
     ):
         raise ValueError("invalid editor mode or preference")
     if candidate["page_size"] not in ("25", "50", "100", "250", "500", "1000", "all"):
@@ -78,8 +91,10 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
     if any(not isinstance(candidate[k], str) or len(candidate[k]) > 4096
            for k in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url")):
         raise ValueError("invalid editor path or selection")
-    if (not isinstance(candidate["visible_columns"], list) or
-        any(not isinstance(x, str) or len(x) > 64 for x in candidate["visible_columns"]) or
+    if (any(not isinstance(candidate[name], list) or any(
+        not isinstance(x, str) or len(x) > 64 for x in candidate[name])
+            for name in ("visible_columns", "translator_visible_columns",
+                         "developer_visible_columns")) or
         not isinstance(candidate["column_widths"], dict) or
         any(not isinstance(k, str) or type(v) is not int or not 100 <= v <= 1500
             for k, v in candidate["column_widths"].items())):
