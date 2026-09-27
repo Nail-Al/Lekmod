@@ -17,7 +17,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
-    UPDATE_FILES, latest_release, stage_release, installer_command,
+    UPDATE_FILES, latest_release, stage_release, installer_command, launch_update,
 )
 
 
@@ -133,6 +133,32 @@ class UpdateTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
+
+    def test_old_editor_waits_for_helper_acknowledgement(self):
+        """A failed-to-launch new EXE cannot make the current server shut down."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "localization/workspace/editor-updates/editor-v0.9"
+            stage.mkdir(parents=True)
+            with patch("lekmod_localization.editor_update.sys.platform", "win32"), \
+                 patch.object(sys, "frozen", True, create=True), \
+                 patch.object(subprocess, "CREATE_NO_WINDOW", 0, create=True), \
+                 patch("lekmod_localization.editor_update.subprocess.Popen") as process:
+                process.return_value.poll.return_value = 1
+                with self.assertRaisesRegex(RuntimeError, "exited early"):
+                    launch_update(stage, root, 123, 8123)
+                command = process.call_args.args[0]
+                self.assertIn("--handoff-ticket", command)
+                ticket = command[command.index("--handoff-ticket") + 1]
+                marker = stage.parent / ("helper-ready-" + ticket)
+                marker.write_text("ready", encoding="utf-8")
+                launch_update_ack = patch("lekmod_localization.editor_update.uuid.uuid4")
+                with launch_update_ack as uuid_mock:
+                    uuid_mock.return_value.hex = ticket
+                    launch_update(stage, root, 123, 8123)
+                self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

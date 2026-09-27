@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_portable_editor.py --archive dist/LekmodLocalizationEditor-Windows.zip
-      - name: Smoke test windowless updater through browser API
+      - name: Smoke test windowless updater and localhost restart
         shell: pwsh
         run: |
           python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip
@@ -57,6 +57,17 @@ jobs:
               --notes "Portable Windows localization editor. Extract the ZIP before launching."
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
+      - name: Verify upgrade from the previous released editor
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force dist/previous | Out-Null
+          gh release download editor-v0.8 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -B localization/tools/test_editor_upgrade_online.py `
+            --old-archive dist/previous/LekmodLocalizationEditor-Windows.zip `
+            --new-archive dist/LekmodLocalizationEditor-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: LekmodLocalizationEditor-Windows

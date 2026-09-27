@@ -135,13 +135,15 @@ def stage_release(release: dict, home: Path = APP_HOME,
 
 
 def installer_command(stage: Path, home: Path, old_pid: int, port: int = 0, *,
-                      no_browser: bool = False) -> list[str]:
+                      no_browser: bool = False, handoff_ticket: str = "") -> list[str]:
     """Start the downloaded GUI EXE as updater, independent of the old EXE."""
     command = [str(stage / "LekmodLocalizationEditor.exe"), "--install-update",
                "--editor-root", str(home), "--stage", str(stage),
                "--old-pid", str(old_pid), "--port", str(port)]
     if no_browser:
         command.append("--no-browser")
+    if handoff_ticket:
+        command.extend(("--handoff-ticket", handoff_ticket))
     return command
 
 
@@ -150,12 +152,24 @@ def launch_update(stage: Path, home: Path = APP_HOME, old_pid: int | None = None
     """Run the staged helper without PowerShell, a terminal, or inherited handles."""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         raise ValueError("automatic installation requires the packaged Windows editor")
-    subprocess.Popen(installer_command(stage, home, old_pid or os.getpid(), port,
-                                       no_browser=bool(port)), cwd=stage,
-                     env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, close_fds=True,
-                     creationflags=subprocess.CREATE_NO_WINDOW)
+    ticket = uuid.uuid4().hex
+    ready = home / "localization/workspace/editor-updates" / ("helper-ready-" + ticket)
+    process = subprocess.Popen(installer_command(stage, home, old_pid or os.getpid(), port,
+                                                 no_browser=bool(port), handoff_ticket=ticket),
+                               cwd=stage, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, close_fds=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+    for _ in range(150):
+        if ready.is_file():
+            ready.unlink(missing_ok=True)
+            return
+        if process.poll() is not None:
+            raise RuntimeError("The downloaded editor update helper exited early. "
+                               "The current editor remains open; see editor-startup.log.")
+        time.sleep(.2)
+    raise RuntimeError("The downloaded editor did not start its update helper. "
+                       "The current editor remains open; retry the download.")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -259,14 +273,6 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
     """Backup, install, validate startup, and restore the old editor on failure."""
     home, stage = home.resolve(), stage.resolve()
     updates = home / "localization/workspace/editor-updates"
-    if stage.parent != updates or stage == home or not home.is_dir():
-        raise ValueError("invalid editor update location")
-    expected = editor_manifest(stage)["version"]
-    if tuple(map(int, expected.split("."))) <= tuple(map(int, editor_manifest(home)["version"].split("."))):
-        raise ValueError("the staged editor is not newer than this installation")
-    for name in UPDATE_FILES:
-        if not (stage / name).is_file() or (stage / name).is_symlink():
-            raise ValueError(f"Staged editor file is missing or unsafe: {name}")
     backup = updates / ("previous-editor-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
                         + "-" + uuid.uuid4().hex[:6])
     process: subprocess.Popen | None = None
@@ -274,6 +280,14 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
     started = False
     try:
         _wait_old_process(old_pid)
+        if stage.parent != updates or stage == home or not home.is_dir():
+            raise ValueError("invalid editor update location")
+        expected = editor_manifest(stage)["version"]
+        if tuple(map(int, expected.split("."))) <= tuple(map(int, editor_manifest(home)["version"].split("."))):
+            raise ValueError("the staged editor is not newer than this installation")
+        for name in UPDATE_FILES:
+            if not (stage / name).is_file() or (stage / name).is_symlink():
+                raise ValueError(f"Staged editor file is missing or unsafe: {name}")
         backup.mkdir(parents=True)
         for name in UPDATE_FILES:
             target = home / name
@@ -322,7 +336,8 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
                     rollback_ok = False
                     failure += f"; restoring {name} failed: {rollback_error}"
         _record(home, "failure", failure)
-        if rollback_ok and started and (home / "LekmodLocalizationEditor.exe").is_file():
+        if (rollback_ok and not _pid_alive(old_pid) and
+                (home / "LekmodLocalizationEditor.exe").is_file()):
             try:
                 command = [str(home / "LekmodLocalizationEditor.exe")]
                 if port:
@@ -348,9 +363,17 @@ def installer_main(argv: list[str]) -> int:
     parser.add_argument("--old-pid", type=int, required=True)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--handoff-ticket", default="")
     args = parser.parse_args(argv)
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         parser.error("the update helper must be the packaged Windows EXE")
+    if args.handoff_ticket:
+        if not re.fullmatch(r"[0-9a-f]{32}", args.handoff_ticket):
+            parser.error("invalid update ticket")
+        marker = args.editor_root / "localization/workspace/editor-updates" / (
+            "helper-ready-" + args.handoff_ticket)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ready", encoding="utf-8")
     try:
         install_update(args.editor_root, args.stage, args.old_pid, port=args.port,
                        no_browser=args.no_browser)

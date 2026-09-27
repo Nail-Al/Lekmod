@@ -75,9 +75,12 @@ def main() -> int:
         raise RuntimeError("run this executable test on a Windows runner")
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
         root = Path(directory) / "Editor With Spaces"
-        stage = root / "localization/workspace/editor-updates/editor-v0.8"
         with zipfile.ZipFile(args.archive) as archive:
             assert set(archive.namelist()) == set(UPDATE_FILES)
+            new_version = json.loads(archive.read("localization/editor/version.json"))["version"]
+            major, minor = map(int, new_version.split("."))
+            old_version, broken_version = f"{major}.{minor - 1}", f"{major}.{minor + 1}"
+            stage = root / "localization/workspace/editor-updates" / ("editor-v" + new_version)
             archive.extractall(root)
             archive.extractall(stage)
         binary = (root / "LekmodLocalizationEditor.exe").read_bytes()
@@ -85,7 +88,7 @@ def main() -> int:
         subsystem = struct.unpack_from("<H", binary, pe + 24 + 68)[0]
         assert subsystem == 2, "editor EXE is a Windows GUI application, not a console application"
         version = root / "localization/editor/version.json"
-        version.write_text(json.dumps({"version": "0.7", "release_tag": "editor-v0.7",
+        version.write_text(json.dumps({"version": old_version, "release_tag": "editor-v" + old_version,
                                        "compatible_releases": ["v35.3"]}), encoding="utf-8")
         settings = root / "localization/workspace/editor-settings.json"
         preferences = {"project_path": "C:/Lekmod", "snapshot_url": "https://example.invalid",
@@ -98,7 +101,7 @@ def main() -> int:
         project.write_text("approved row", encoding="utf-8")
 
         old, base, pid = start(root)
-        wait_for(base, "0.7")
+        wait_for(base, old_version)
         helper = subprocess.Popen(installer_command(stage, root, pid, int(base.rsplit(":", 1)[1]),
                                                     no_browser=True), cwd=stage,
                                   env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
@@ -109,7 +112,7 @@ def main() -> int:
         assert helper.wait(timeout=150) == 0, (root /
             "localization/workspace/editor-updates/update.log").read_text(encoding="utf-8")
         old.wait(timeout=30)
-        meta = wait_for(base, "0.8")
+        meta = wait_for(base, new_version)
         assert meta["preferences"]["column_widths"] == {"key": 420}
         assert meta["preferences"]["project_path"] == "C:/Lekmod"
         with zipfile.ZipFile(args.archive) as archive:
@@ -119,20 +122,21 @@ def main() -> int:
         assert project.read_text(encoding="utf-8") == "approved row"
         backups = list((root / "localization/workspace/editor-updates").glob("previous-editor-*"))
         assert len(backups) == 1
-        assert json.loads((backups[0] / "localization/editor/version.json").read_text())["version"] == "0.7"
+        assert json.loads((backups[0] / "localization/editor/version.json").read_text())["version"] == old_version
 
         # A downloaded copy whose page cannot load must fail after file replacement.
         # The helper must restore the original EXE and reopen the original URL.
-        broken = stage.parent / "editor-v0.9"
+        broken = stage.parent / ("editor-v" + broken_version)
         with zipfile.ZipFile(args.archive) as archive:
             archive.extractall(broken)
         (broken / "localization/editor/version.json").write_text(json.dumps({
-            "version": "0.9", "release_tag": "editor-v0.9",
+            "version": broken_version, "release_tag": "editor-v" + broken_version,
             "compatible_releases": ["v35.3"]}), encoding="utf-8")
         (broken / "localization/editor/index.html").write_text("broken page", encoding="utf-8")
         previous = (root / "LekmodLocalizationEditor.exe").read_bytes()
         success_log = (stage.parent / "update.log").read_text(encoding="utf-8")
-        pid = int(re.search(r"Installed v0\.8;[^\n]*pid: (\d+)", success_log).group(1))
+        pid = int(re.search(r"Installed v" + re.escape(new_version) +
+                            r";[^\n]*pid: (\d+)", success_log).group(1))
         failed = subprocess.Popen(installer_command(broken, root, pid,
                                   int(base.rsplit(":", 1)[1]), no_browser=True), cwd=broken,
                                   env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
@@ -141,7 +145,7 @@ def main() -> int:
                                   creationflags=subprocess.CREATE_NO_WINDOW)
         stop(base, token_at(base))
         assert failed.wait(timeout=150) != 0, "invalid UI unexpectedly passed readiness"
-        wait_for(base, "0.8")
+        wait_for(base, new_version)
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == previous
         assert (root / "localization/editor/index.html").read_bytes() == (stage /
             "localization/editor/index.html").read_bytes()
