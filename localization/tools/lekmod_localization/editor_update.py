@@ -80,28 +80,37 @@ def stage_release(release: dict, home: Path = APP_HOME) -> Path:
     folder = home / "localization/workspace/editor-updates"
     folder.mkdir(parents=True, exist_ok=True)
     stage = folder / tag
-    if stage.exists():
-        raise ValueError("a pending editor update already exists; restart the editor")
-    with tempfile.TemporaryDirectory(dir=folder, prefix=".stage-") as temporary:
-        temp = Path(temporary)
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = set(archive.namelist())
-            if len(names) != len(archive.infolist()):
-                raise ValueError("release archive has duplicate file names")
-            if not set(UPDATE_FILES).issubset(names):
-                raise ValueError("release archive is missing editor files")
-            if any(name not in UPDATE_FILES for name in names):
-                raise ValueError("release archive contains unexpected files")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = set(archive.namelist())
+        if len(names) != len(archive.infolist()):
+            raise ValueError("release archive has duplicate file names")
+        if names != set(UPDATE_FILES):
+            raise ValueError("release archive has missing or unexpected editor files")
+        for name in UPDATE_FILES:
+            if archive.getinfo(name).file_size > 90 * 1024 * 1024:
+                raise ValueError("oversized editor file in release")
+        if stage.is_symlink():
+            raise ValueError("pending editor update path is a link; choose a fresh folder")
+        if stage.exists():
+            # A failed helper leaves an intact stage. Reuse it only after comparing
+            # every byte with this freshly authenticated release archive.
+            if not stage.is_dir() or {p.relative_to(stage).as_posix()
+                                      for p in stage.rglob("*") if p.is_file()} != names or any(
+                                          (stage / name).is_symlink() or
+                                          (stage / name).read_bytes() != archive.read(name)
+                                          for name in UPDATE_FILES):
+                raise ValueError("pending update differs from the verified release; "
+                                 "close the editor and remove that editor-v folder")
+            return stage
+        with tempfile.TemporaryDirectory(dir=folder, prefix=".stage-") as temporary:
+            temp = Path(temporary)
             for name in UPDATE_FILES:
-                entry = archive.getinfo(name)
-                if entry.file_size > 90 * 1024 * 1024:
-                    raise ValueError("oversized editor file in release")
                 target = temp / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(entry))
-        if editor_manifest(temp)["version"] != release["latest"]:
-            raise ValueError("downloaded editor version differs from release tag")
-        temp.rename(stage)
+                target.write_bytes(archive.read(name))
+            if editor_manifest(temp)["version"] != release["latest"]:
+                raise ValueError("downloaded editor version differs from release tag")
+            temp.rename(stage)
     return stage
 
 
@@ -109,41 +118,76 @@ def write_windows_updater(stage: Path, home: Path = APP_HOME) -> Path:
     """Create a separate PowerShell process that can replace a closed EXE."""
     script = home / "localization/workspace/editor-updates/install-update.ps1"
     files = ",\n  ".join("'" + name + "'" for name in UPDATE_FILES)
-    content = r"""param([int]$OldPid, [string]$Stage, [string]$Home)
+    content = r"""param([int]$OldPid, [string]$Stage, [string]$EditorRoot)
 $ErrorActionPreference = 'Stop'
-try { Wait-Process -Id $OldPid -Timeout 90 -ErrorAction SilentlyContinue } catch {}
 $files = @(
   FILES
 )
-$backup = Join-Path $Home ('localization/workspace/editor-updates/previous-editor-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
-New-Item -ItemType Directory -Force -Path $backup | Out-Null
-foreach ($file in $files) {
-  $old = Join-Path $Home $file
-  if (Test-Path -LiteralPath $old) {
-    $saved = Join-Path $backup $file
-    New-Item -ItemType Directory -Force -Path (Split-Path $saved) | Out-Null
-    Copy-Item -LiteralPath $old -Destination $saved -Force
-  }
+$updates = Join-Path $EditorRoot 'localization/workspace/editor-updates'
+$log = Join-Path $updates 'update.log'
+$events = Join-Path $EditorRoot 'localization/workspace/editor-actions.jsonl'
+$backup = $null
+$copyStarted = $false
+$existed = @{}
+function Record-Update([string]$state, [string]$detail) {
+  $when = [DateTime]::UtcNow.ToString('o')
+  Add-Content -LiteralPath $log -Value "$when  $state  $detail" -Encoding UTF8
+  $record = @{at=$when; action='editor-update-install'; result=$state} | ConvertTo-Json -Compress
+  [System.IO.File]::AppendAllText($events, $record + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 }
 try {
+  if (-not (Test-Path -LiteralPath $EditorRoot -PathType Container)) {
+    throw 'Editor folder does not exist.'
+  }
+  try { Wait-Process -Id $OldPid -Timeout 90 -ErrorAction SilentlyContinue } catch {}
+  if (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) {
+    throw 'The old editor is still running; close it before retrying.'
+  }
+  foreach ($file in $files) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Stage $file) -PathType Leaf)) {
+      throw "Staged editor file is missing: $file"
+    }
+  }
+  $backup = Join-Path $updates ('previous-editor-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
+  New-Item -ItemType Directory -Force -Path $backup | Out-Null
+  foreach ($file in $files) {
+    $old = Join-Path $EditorRoot $file
+    $existed[$file] = Test-Path -LiteralPath $old -PathType Leaf
+    if ($existed[$file]) {
+      $saved = Join-Path $backup $file
+      New-Item -ItemType Directory -Force -Path (Split-Path $saved) | Out-Null
+      Copy-Item -LiteralPath $old -Destination $saved -Force
+    }
+  }
+  $copyStarted = $true
   foreach ($file in $files) {
     $source = Join-Path $Stage $file
-    $target = Join-Path $Home $file
+    $target = Join-Path $EditorRoot $file
     New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
     Copy-Item -LiteralPath $source -Destination $target -Force
   }
-  Start-Process -FilePath (Join-Path $Home 'LekmodLocalizationEditor.exe') -WorkingDirectory $Home
+  Start-Process -FilePath (Join-Path $EditorRoot 'LekmodLocalizationEditor.exe') -WorkingDirectory $EditorRoot
+  Record-Update 'success' "Editor installed from $Stage; backup: $backup"
 } catch {
-  foreach ($file in $files) {
-    $saved = Join-Path $backup $file
-    if (Test-Path -LiteralPath $saved) {
-      Copy-Item -LiteralPath $saved -Destination (Join-Path $Home $file) -Force
-    } else {
-      Remove-Item -LiteralPath (Join-Path $Home $file) -Force -ErrorAction SilentlyContinue
+  $failure = $_.ToString()
+  if ($copyStarted) {
+    foreach ($file in $files) {
+      try {
+        $target = Join-Path $EditorRoot $file
+        if ($existed[$file]) {
+          Copy-Item -LiteralPath (Join-Path $backup $file) -Destination $target -Force
+        } else {
+          Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        }
+      } catch { $failure += "; rollback failed for ${file}: $_" }
     }
   }
-  Write-Host "Editor update failed and previous files were restored: $_"
-  Read-Host 'Press Enter to close'
+  Record-Update 'failure' $failure
+  Write-Error "Editor update failed. See $log. $failure"
+  exit 1
+}
+try { Remove-Item -LiteralPath $Stage -Recurse -Force } catch {
+  Record-Update 'warning' "Installed editor, but could not remove staged files: $_"
 }
 """.replace("FILES", files)
     script.parent.mkdir(parents=True, exist_ok=True)

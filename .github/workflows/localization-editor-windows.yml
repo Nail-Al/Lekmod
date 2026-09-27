@@ -35,6 +35,10 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_portable_editor.py --archive dist/LekmodLocalizationEditor-Windows.zip
+      - name: Smoke test PowerShell updater
+        shell: pwsh
+        run: |
+          python -B localization/tools/test_windows_updater.py
       - name: Publish versioned Windows download
         shell: pwsh
         env:

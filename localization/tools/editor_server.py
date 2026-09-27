@@ -1036,7 +1036,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.server.update_script = write_windows_updater(stage)
                     self.server.update_stage = stage
                     self.respond(200, {"updating": True, "version": latest["latest"]})
-                    editor.record_event("editor-update", "success")
+                    editor.record_event("editor-update", "staged")
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
                 elif self.path == "/api/preferences":
@@ -1147,7 +1147,7 @@ def main() -> int:
         subprocess.Popen([
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(server.update_script), "-OldPid", str(os.getpid()),
-            "-Stage", str(server.update_stage), "-Home", str(APP_HOME),
+            "-Stage", str(server.update_stage), "-EditorRoot", str(APP_HOME),
         ], creationflags=subprocess.CREATE_NEW_CONSOLE)
     elif getattr(server, "restart_requested", False):
         if getattr(sys, "frozen", False):

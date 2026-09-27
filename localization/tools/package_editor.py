@@ -28,6 +28,9 @@ START = """Lekmod Localization Editor for Windows
    your team in Settings. The app verifies the shared fingerprints.
 6. For future editor versions, check Settings > Editor updates. If you
    used an older unversioned EXE, install this release manually once.
+   If an automatic update from v0.2/v0.3 failed, start v0.4 from a new
+   folder and reconnect your existing project. Do not delete its old folder
+   if the project was downloaded under localization/workspace/projects.
 
 The standalone package is a translation workspace, not an installable
 Civilization V mod. Close both the browser tab and console when finished.

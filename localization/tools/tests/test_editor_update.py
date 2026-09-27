@@ -24,18 +24,18 @@ class UpdateTests(unittest.TestCase):
             home = Path(temporary)
             version = home / "localization/editor/version.json"
             version.parent.mkdir(parents=True)
-            version.write_text(json.dumps({"version": "0.2", "compatible_releases": ["v35.3"]}))
+            version.write_text(json.dumps({"version": "0.3", "compatible_releases": ["v35.3"]}))
             with io.BytesIO() as stream:
                 with zipfile.ZipFile(stream, "w") as archive:
                     for name in UPDATE_FILES:
-                        archive.writestr(name, json.dumps({"version": "0.3",
+                        archive.writestr(name, json.dumps({"version": "0.4",
                             "compatible_releases": ["v35.3"]}) if name.endswith("version.json")
                             else "fixture")
                 content = stream.getvalue()
-            link = "https://github.com/Nail-Al/Lekmod/releases/download/editor-v0.3/" + \
+            link = "https://github.com/Nail-Al/Lekmod/releases/download/editor-v0.4/" + \
                    "LekmodLocalizationEditor-Windows.zip"
             payload = [{"tag_name": "v35.3", "assets": []},
-                       {"tag_name": "editor-v0.3", "html_url": "https://github.com/release",
+                       {"tag_name": "editor-v0.4", "html_url": "https://github.com/release",
                         "assets": [{"name": "LekmodLocalizationEditor-Windows.zip",
                                     "browser_download_url": link,
                                     "digest": "sha256:" + sha256(content).hexdigest()}]}]
@@ -50,8 +50,13 @@ class UpdateTests(unittest.TestCase):
                 stage = stage_release(found, home)
             self.assertTrue((stage / "LekmodLocalizationEditor.exe").is_file())
             self.assertEqual(private.read_text(), "private settings")
+            with patch("lekmod_localization.editor_update._download", return_value=content):
+                self.assertEqual(stage_release(found, home), stage)
             script = write_windows_updater(stage, home)
             self.assertIn("Wait-Process", script.read_text())
+            self.assertIn("[string]$EditorRoot", script.read_text())
+            self.assertNotIn("[string]$Home", script.read_text())
+            self.assertIn("editor-update-install", script.read_text())
             bad = dict(found, digest="sha256:" + "0" * 64)
             with tempfile.TemporaryDirectory() as other:
                 with patch("lekmod_localization.editor_update._download", return_value=content):
