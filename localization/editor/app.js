@@ -14,13 +14,16 @@ const translatorColumns = [
 ];
 const developerColumns = [["key", "Key"], ["kind", "Operation"],
   ["text", "English text"], ["characters", "Characters"],
-  ["english_edited_at", "English edited"]];
+  ["english_edited_at", "English edited"], ["source_file", "Source file"],
+  ["source_line", "Line"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
   "lekmod_en_US", "lekmod_target", "text"]);
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
 let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
 let inLogs = false;
+let downloadTimer;
+let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
 function logUI(name) { api("/api/event", {name}).catch(() => {}); }
 
 async function api(path, body) {
@@ -44,10 +47,13 @@ function message(value, error = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, error ? 5500 : 3200);
 }
-function dialogMessage(value, error = false) {
-  el("settings-status").textContent = value;
-  el("settings-status").style.color = error ? "#a22d24" : "#246a39";
+function sectionMessage(section, value, tone = "success") {
+  const target = el(section + "-status");
+  target.textContent = value ? ({success: "✓ ", warning: "⚠ ", error: "✕ "}[tone] || "") + value : "";
+  target.className = "section-status " + tone;
 }
+function pageSize() { return prefs.page_size || "100"; }
+function pageStep() { return pageSize() === "all" ? total : Number(pageSize()); }
 async function preference(values) {
   const result = await api("/api/preferences", values);
   prefs = result.preferences;
@@ -91,7 +97,7 @@ function renderConnections() {
     project.version.toLowerCase() && selected.release.toLowerCase() === meta.release.toLowerCase();
   el("game-badge").textContent = selected ? "Game: " + selected.name +
     (matches ? " · matched" : " · version mismatch")
-    : game.path ? "Game: no installed Lekmod selected" : "Game: disconnected";
+    : game.path ? "Game: Lekmod not installed" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
   el("game-apply").disabled = !matches || !meta.ready;
   el("workspace").hidden = !meta.ready || inLogs;
@@ -113,7 +119,8 @@ function updateBaselineNotice() {
   }
 }
 function changeMode() {
-  el("mode").textContent = developer() ? "Developer" : "Translator";
+  el("mode-name").textContent = developer() ? "Developer" : "Translator";
+  el("mode").setAttribute("aria-pressed", developer() ? "true" : "false");
   el("locale-label").hidden = developer();
   el("category-label").hidden = developer();
   el("key-tools").hidden = !developer();
@@ -130,6 +137,8 @@ function changeMode() {
   offset = 0;
   visible = new Set(prefs.visible_columns.length ? prefs.visible_columns
     : [...translatorColumns, ...developerColumns].map(item => item[0]));
+  if (!activeColumns().some(([field]) => visible.has(field)))
+    visible = new Set(activeColumns().map(([field]) => field));
   if (!developer() && !prefs.visible_columns.length) {
     if (!Object.keys(meta.vanilla_counts).length) {
       visible.delete("vanilla_en_US"); visible.delete("vanilla_en_US_characters");
@@ -139,7 +148,25 @@ function changeMode() {
     }
   }
   renderColumnChoices();
+  renderFilterChoices();
   load();
+}
+function renderFilterChoices() {
+  const select = el("filter-kind");
+  select.replaceChildren(new Option("Any", ""));
+  for (const item of (developer() ? ["Row", "Replace"] : ["lekmod_new", "vanilla_modified"]))
+    select.append(new Option(item, item));
+  el("filter-kind-title").textContent = developer() ? "Operation" : "Type";
+  el("filter-status-label").hidden = developer();
+  el("filter-date-field").querySelector('option[value="translation_updated_at"]').hidden = developer();
+  if (developer()) filters.date_field = "english_edited_at";
+  select.value = filters.kind;
+  el("filter-status").value = filters.status;
+  el("filter-date-field").value = filters.date_field;
+  el("filter-from").value = filters.date_from;
+  el("filter-to").value = filters.date_to;
+  el("filters-button").classList.toggle("active", Object.entries(filters).some(
+    ([key, value]) => key !== "date_field" && !!value));
 }
 function categories() {
   const select = el("category");
@@ -254,6 +281,7 @@ function selectRow(row, tr) {
   el("selected").textContent = row.key + (developer() ? " · English source" : " · " + locale);
   el("translation").disabled = false;
   el("save").disabled = false;
+  el("discard").disabled = false;
   el("rename-key").disabled = !developer();
   for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer();
   if (el("prefill").checked) {
@@ -297,25 +325,29 @@ async function load() {
   const sequence = ++requestId;
   chosen = null;
   el("save").disabled = true;
+  el("discard").disabled = true;
   el("rename-key").disabled = true;
   el("translation").disabled = true;
   for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
     el(field).disabled = true;
   el("selected").textContent = "Select a row";
-  const args = new URLSearchParams({q: el("search-input").value, offset});
+  const args = new URLSearchParams({q: el("search-input").value, offset,
+    limit: pageSize(), kind: filters.kind, date_field: filters.date_field,
+    date_from: filters.date_from, date_to: filters.date_to});
   if (!developer()) {
     args.set("locale", el("locale").value);
     args.set("category", el("category").value);
+    args.set("status", filters.status);
   }
   try {
     const result = await api((developer() ? "/api/primary?" : "/api/rows?") + args);
     if (sequence !== requestId) return;
     total = result.total;
     renderTable(result.rows);
-    el("count").textContent = total ? (offset + 1) + "–" + Math.min(offset + 60, total) +
+    el("count").textContent = total ? (offset + 1) + "–" + Math.min(offset + result.rows.length, total) +
       " of " + total : "No rows";
-    el("prev").disabled = offset === 0;
-    el("next").disabled = offset + 60 >= total;
+    el("prev").disabled = offset === 0 || pageSize() === "all";
+    el("next").disabled = offset + pageStep() >= total || pageSize() === "all";
   } catch (error) { message(error.message, true); }
 }
 function fillSettings() {
@@ -323,13 +355,21 @@ function fillSettings() {
   el("game-path").value = prefs.game_path || meta.game.path;
   el("snapshot-url").value = prefs.snapshot_url || "";
   el("snapshot-password").value = "";
-  const select = el("game-mod");
-  select.replaceChildren(new Option("Select an installed version", ""));
-  for (const mod of meta.game.mods) {
-    select.append(new Option(mod.name + (mod.version ? " (" + mod.version + ")" : ""), mod.name));
-  }
-  select.value = prefs.game_mod || meta.game.selected_mod;
-  dialogMessage(meta.game.error || "");
+  sectionMessage("source", meta.ready ? "Compatible source connected: " + meta.release :
+    "Choose a complete Lekmod source, or download a compatible version.",
+    meta.ready ? "success" : "warning");
+  sectionMessage("game", meta.game.error || (meta.game.mods.length === 1 ?
+    "Lekmod " + meta.game.mods[0].version + " is installed here." :
+    meta.game.path ? "Civilization V found; Lekmod is not installed." :
+      "No game is connected; editing the project still works."),
+    meta.game.error ? "error" : meta.game.mods.length === 1 ? "success" : "warning");
+  const counts = Object.values(meta.vanilla_counts || {}).reduce((sum, value) => sum + value, 0);
+  el("vanilla-summary").textContent = counts ?
+    "Original vanilla text available for comparison." :
+    "Optional comparison: original vanilla text is not loaded.";
+  sectionMessage("snapshot", "");
+  updateDownload();
+  if (!downloadTimer) downloadTimer = setInterval(updateDownload, 1000);
   api("/api/versions").then(result => {
     const select = el("project-version");
     select.replaceChildren();
@@ -340,7 +380,38 @@ function fillSettings() {
       option.disabled = !item.supported;
       select.append(option);
     }
-  }).catch(error => dialogMessage(error.message, true));
+  }).catch(error => sectionMessage("source", error.message, "error"));
+}
+function sizeText(bytes) { return (bytes / 1048576).toFixed(1) + " MiB"; }
+async function updateDownload() {
+  if (!el("settings-dialog").open) return;
+  try {
+    const state = await api("/api/download-status");
+    const active = ["running", "canceling"].includes(state.state);
+    el("project-download").disabled = active;
+    el("project-progress-group").hidden = !active;
+    el("project-cancel").disabled = state.state === "canceling";
+    if (active) {
+      const progress = el("project-progress");
+      if (state.total) progress.value = Math.min(1, state.bytes / state.total);
+      else progress.removeAttribute("value");
+      progress.max = 1;
+      const fraction = state.total ? " / " + sizeText(state.total) +
+        " (" + Math.floor(100 * state.bytes / state.total) + "%)" : "";
+      el("project-progress-text").textContent = (state.state === "canceling" ? "Canceling… " : "") +
+        (state.phase || "connecting") + ": " + sizeText(state.bytes || 0) + fraction +
+        " · " + (state.destination || "");
+      sectionMessage("source", "Source " + state.phase + ". Existing files remain untouched.", "warning");
+    } else if (state.state === "complete") {
+      el("project-path").value = state.path;
+      sectionMessage("source", (state.reused ? "Reused validated source: " :
+        "Downloaded source: ") + state.path + ". Click Save connections.");
+    } else if (state.state === "error" || state.state === "canceled") {
+      sectionMessage("source", state.error + " You can retry with Download.",
+        state.state === "error" ? "error" : "warning");
+    }
+    if (!active && downloadTimer) { clearInterval(downloadTimer); downloadTimer = undefined; }
+  } catch (error) { sectionMessage("source", error.message, "error"); }
 }
 async function refresh() {
   meta = await api("/api/meta");
@@ -350,6 +421,7 @@ async function refresh() {
   el("wrap").checked = prefs.wrap;
   el("table").classList.toggle("nowrap", !prefs.wrap);
   el("prefill").checked = prefs.prefill;
+  el("page-size").value = pageSize();
   el("editor-version").textContent = "v" + (meta.editor_version || "unknown");
   renderConnections();
   const select = el("locale");
@@ -360,61 +432,51 @@ async function refresh() {
   updateHistory(meta);
   if (meta.ready) changeMode();
   if (!prefs.onboarded && !el("settings-dialog").open) {
-    fillSettings(); el("settings-dialog").showModal();
+    el("settings-dialog").showModal(); fillSettings();
   }
 }
 el("settings-button").addEventListener("click", () => {
   logUI("settings-open");
-  fillSettings(); el("settings-dialog").showModal();
+  el("settings-dialog").showModal(); fillSettings();
 });
 el("settings-close").addEventListener("click", () => el("settings-dialog").close());
+el("settings-dialog").addEventListener("close", () => {
+  clearInterval(downloadTimer); downloadTimer = undefined;
+});
 el("project-browse").addEventListener("click", async () => {
   try { const result = await api("/api/browse", {kind: "project"}); if (result.path) el("project-path").value = result.path; }
-  catch (error) { dialogMessage(error.message, true); }
+  catch (error) { sectionMessage("source", error.message, "error"); }
 });
 el("project-download").addEventListener("click", async () => {
-  const button = el("project-download");
-  button.disabled = true;
   try {
     await api("/api/download-project", {version: el("project-version").value});
-    dialogMessage("Downloading the compatible source into a new folder…");
-    for (let attempt = 0; attempt < 180; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const state = await api("/api/download-status");
-      if (state.state === "error") throw new Error(state.error);
-      if (state.state === "complete") {
-        el("project-path").value = state.path;
-        dialogMessage("Source ready. Click Save connections to use it.");
-        return;
-      }
-    }
-    throw new Error("Download is still running. Open Settings again to check it.");
-  } catch (error) { dialogMessage(error.message, true); }
-  finally { button.disabled = false; }
+    await updateDownload();
+    if (!downloadTimer) downloadTimer = setInterval(updateDownload, 1000);
+  } catch (error) { sectionMessage("source", error.message, "error"); }
+});
+el("project-cancel").addEventListener("click", async () => {
+  try { await api("/api/cancel-download", {}); await updateDownload(); }
+  catch (error) { sectionMessage("source", error.message, "error"); }
 });
 el("game-browse").addEventListener("click", async () => {
   try { const result = await api("/api/browse", {kind: "game"}); if (result.path) el("game-path").value = result.path; }
-  catch (error) { dialogMessage(error.message, true); }
+  catch (error) { sectionMessage("game", error.message, "error"); }
 });
 el("detect-game").addEventListener("click", async () => {
-  try { const found = await api("/api/detect-game", {}); el("game-path").value = found.path; dialogMessage(found.path ? "Game found." : "Game not found automatically."); }
-  catch (error) { dialogMessage(error.message, true); }
-});
-el("inspect-game").addEventListener("click", async () => {
   try {
-    const result = await api("/api/inspect-game", {path: el("game-path").value});
-    const select = el("game-mod");
-    select.replaceChildren(new Option("Select an installed version", ""));
-    for (const mod of result.mods) select.append(new Option(mod.name + " (" + (mod.version || "unknown") + ")", mod.name));
-    if (result.mods.length === 1) select.value = result.mods[0].name;
-    dialogMessage(result.mods.length ? "Found " + result.mods.length + " installed Lekmod version(s)." :
-      "This is a game installation, but no Lekmod DLC is installed.");
-  } catch (error) { dialogMessage(error.message, true); }
+    const found = await api("/api/detect-game", {path: el("game-path").value});
+    if (found.path) el("game-path").value = found.path;
+    if (found.state === "installed") sectionMessage("game", "Civilization V and Lekmod " +
+      found.mods[0].version + " found. Save connections to use it.");
+    else if (found.state === "vanilla") sectionMessage("game", "Civilization V found, but Lekmod is not installed. Install the matching release to test in game.", "warning");
+    else if (found.state === "multiple") sectionMessage("game", "Several Lekmod DLC folders found. Keep one installed version.", "warning");
+    else sectionMessage("game", found.error || "Civilization V was not found. Select its installation folder and try again.", "error");
+  } catch (error) { sectionMessage("game", error.message, "error"); }
 });
 el("settings-save").addEventListener("click", async () => {
   try {
     const result = await api("/api/connect", {project_path: el("project-path").value,
-      game_path: el("game-path").value, game_mod: el("game-mod").value});
+      game_path: el("game-path").value});
     el("settings-dialog").close();
     if (result.restart) {
       message("Switching project… the editor will reconnect.");
@@ -423,38 +485,54 @@ el("settings-save").addEventListener("click", async () => {
         try { await refresh(); message("Connected to the selected project."); break; } catch (error) {}
       }
     } else { await refresh(); message("Connections saved."); }
-  } catch (error) { dialogMessage(error.message, true); }
+  } catch (error) {
+    const section = error.message.startsWith("Game:") ? "game" : "source";
+    sectionMessage(section, error.message, "error");
+  }
 });
 el("snapshot-import").addEventListener("click", async () => {
   const file = el("snapshot-file").files[0];
-  if (!file) { dialogMessage("Choose a .json.gz file first.", true); return; }
+  if (!file) { sectionMessage("snapshot", "Choose a .json.gz file first.", "error"); return; }
   try {
     const response = await fetch("/api/snapshot", {method: "POST",
       headers: {"X-Editor-Token": token, "Content-Type": "application/octet-stream"}, body: file});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
-    dialogMessage("Snapshot matches the shared baseline. Reloading comparison rows…");
+    sectionMessage("snapshot", "Snapshot matches the shared baseline. Reloading comparison rows…");
     await refresh();
-  } catch (error) { dialogMessage(error.message, true); }
+    sectionMessage("snapshot", "Snapshot verified and imported.");
+  } catch (error) { sectionMessage("snapshot", error.message, "error"); }
+  finally { el("snapshot-file").value = ""; }
+});
+el("snapshot-reset").addEventListener("click", async () => {
+  el("snapshot-file").value = "";
+  el("snapshot-url").value = "";
+  el("snapshot-password").value = "";
+  try {
+    await preference({snapshot_url: ""});
+    sectionMessage("snapshot", "Inputs cleared. The installed reference, if any, is unchanged.");
+  } catch (error) { sectionMessage("snapshot", error.message, "error"); }
 });
 el("snapshot-cloud").addEventListener("click", async () => {
   const password = el("snapshot-password").value;
   try {
-    dialogMessage("Downloading and verifying the encrypted snapshot…");
+    sectionMessage("snapshot", "Downloading and verifying the encrypted snapshot…", "warning");
     const result = await api("/api/snapshot-cloud", {
       url: el("snapshot-url").value.trim(), password});
     el("snapshot-password").value = "";
     await refresh();
-    dialogMessage("Snapshot verified against this project's reference.");
+    sectionMessage("snapshot", "Snapshot verified against this project's reference.");
     message("Vanilla comparison is available for locales in the snapshot.");
   } catch (error) {
     el("snapshot-password").value = "";
-    dialogMessage(error.message, true);
+    sectionMessage("snapshot", error.message, "error");
   }
 });
 el("mode").addEventListener("click", async () => {
   try {
     await preference({mode: developer() ? "translator" : "developer"});
+    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+    if (inLogs) closeLogs();
     changeMode();
     logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
   } catch (error) {
@@ -472,6 +550,11 @@ el("category").addEventListener("change", async () => {
 });
 el("search-input").addEventListener("input", () => {
   clearTimeout(searchTimer); searchTimer = setTimeout(() => { offset = 0; load(); }, 230);
+});
+el("page-size").addEventListener("change", async () => {
+  offset = 0;
+  try { await preference({page_size: el("page-size").value}); logUI("page-size-changed"); load(); }
+  catch (error) { message(error.message, true); }
 });
 el("wrap").addEventListener("change", async () => {
   el("table").classList.toggle("nowrap", !el("wrap").checked);
@@ -503,8 +586,8 @@ for (const name of ["gender", "plurality"]) el(name).addEventListener("change", 
   if (!custom.hidden) custom.focus();
 });
 el("translation").addEventListener("input", countText);
-el("prev").addEventListener("click", () => { offset -= 60; logUI("page-changed"); load(); });
-el("next").addEventListener("click", () => { offset += 60; logUI("page-changed"); load(); });
+el("prev").addEventListener("click", () => { offset = Math.max(0, offset - pageStep()); logUI("page-changed"); load(); });
+el("next").addEventListener("click", () => { offset += pageStep(); logUI("page-changed"); load(); });
 async function openLogs() {
   inLogs = true;
   logUI("logs-open");
@@ -517,12 +600,13 @@ async function openLogs() {
       event.at + "  " + event.action + "  " + event.result).join("\n") || "No actions recorded yet.";
   } catch (error) { message(error.message, true); }
 }
-el("logs-button").addEventListener("click", openLogs);
-el("logs-back").addEventListener("click", () => {
+function closeLogs() {
   inLogs = false;
   el("logs-view").hidden = true;
   renderConnections();
-});
+}
+el("logs-button").addEventListener("click", () => inLogs ? closeLogs() : openLogs());
+el("logs-back").addEventListener("click", closeLogs);
 el("logs-download").addEventListener("click", () => {
   logUI("logs-download");
   location.href = "/api/logs/download";
@@ -530,6 +614,36 @@ el("logs-download").addEventListener("click", () => {
 });
 el("columns-button").addEventListener("click", () => el("columns-dialog").showModal());
 el("columns-close").addEventListener("click", () => el("columns-dialog").close());
+el("filters-button").addEventListener("click", () => {
+  renderFilterChoices(); el("filters-dialog").showModal();
+});
+el("filters-close").addEventListener("click", () => {
+  const from = el("filter-from").value, to = el("filter-to").value;
+  if (from && to && from > to) { message("The end date must follow the start date.", true); return; }
+  filters = {kind: el("filter-kind").value, status: developer() ? "" : el("filter-status").value,
+    date_field: developer() ? "english_edited_at" : el("filter-date-field").value,
+    date_from: from, date_to: to};
+  offset = 0; renderFilterChoices(); el("filters-dialog").close();
+  logUI("filter-changed"); load();
+});
+el("filters-reset").addEventListener("click", () => {
+  filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+  offset = 0; renderFilterChoices(); el("filters-dialog").close();
+  logUI("filter-changed"); load(); message("Filters cleared.");
+});
+el("discard").addEventListener("click", () => { if (chosen) el("discard-dialog").showModal(); });
+el("discard-cancel").addEventListener("click", () => el("discard-dialog").close());
+el("discard-confirm").addEventListener("click", () => {
+  if (chosen) {
+    el("translation").value = developer() ? chosen.text : chosen.translation || chosen.lekmod_target || "";
+    setGrammar("gender", chosen.translation_gender || "");
+    setGrammar("plurality", chosen.translation_plurality || "");
+    el("note").value = chosen.translator_note || "";
+    el("new-key").value = "";
+    countText(); logUI("discard"); message("Unsaved edits discarded; saved files unchanged.");
+  }
+  el("discard-dialog").close();
+});
 el("exports-button").addEventListener("click", () => el("exports-dialog").showModal());
 el("exports-close").addEventListener("click", () => el("exports-dialog").close());
 el("save").addEventListener("click", async () => {
@@ -622,14 +736,14 @@ async function checkLatest() {
 el("update-check").addEventListener("click", checkLatest);
 el("update-install").addEventListener("click", async () => {
   el("update-install").disabled = true;
-  dialogMessage("Downloading and checking the editor update…");
+  el("update-status").textContent = "Downloading and checking the editor update…";
   try {
     const result = await api("/api/editor-update", {});
     el("settings-dialog").close();
     message("Editor v" + result.version + " staged. This window will close; the new editor will open.");
   } catch (error) {
     el("update-install").disabled = false;
-    dialogMessage(error.message, true);
+    el("update-status").textContent = "Editor update failed: " + error.message;
   }
 });
 refresh().then(checkLatest).catch(error => message(error.message, true));

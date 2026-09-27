@@ -12,6 +12,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
@@ -23,6 +24,7 @@ DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
     "mode": "translator", "prefill": True, "wrap": True, "locale": "RU_RU",
     "category": "", "visible_columns": [], "column_widths": {}, "snapshot_url": "",
+    "page_size": "100",
 }
 KEY = re.compile(r"^v?\d+(?:\.\d+)+$", re.IGNORECASE)
 GAME_EXES = ("CivilizationV.exe", "CivilizationV_DX11.exe")
@@ -48,6 +50,8 @@ def settings(home: Path = APP_HOME) -> dict:
             result[name] = raw[name]
     if raw.get("mode") in ("translator", "developer"):
         result["mode"] = raw["mode"]
+    if raw.get("page_size") in ("25", "50", "100", "250", "500", "1000", "all"):
+        result["page_size"] = raw["page_size"]
     if isinstance(raw.get("visible_columns"), list):
         result["visible_columns"] = [x for x in raw["visible_columns"]
                                      if isinstance(x, str) and len(x) < 64][:40]
@@ -69,6 +73,8 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
         type(candidate[k]) is not bool for k in ("onboarded", "prefill", "wrap")
     ):
         raise ValueError("invalid editor mode or preference")
+    if candidate["page_size"] not in ("25", "50", "100", "250", "500", "1000", "all"):
+        raise ValueError("invalid table page size")
     if any(not isinstance(candidate[k], str) or len(candidate[k]) > 4096
            for k in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url")):
         raise ValueError("invalid editor path or selection")
@@ -252,16 +258,25 @@ def editor_manifest(home: Path = APP_HOME) -> dict:
     return data
 
 
-def extract_source_archive(archive: Path, destination: Path) -> None:
+class DownloadCancelled(ValueError):
+    """The contributor canceled a transfer before it touched a project."""
+
+
+def extract_source_archive(archive: Path, destination: Path, *,
+                           progress: Callable[[str, int, int | None], None] | None = None,
+                           cancelled: Callable[[], bool] | None = None) -> None:
     """Extract only localization and LEKMOD files without ZIP path traversal."""
     total = 0
     with zipfile.ZipFile(archive) as zipped:
-        for entry in zipped.infolist():
+        entries = [entry for entry in zipped.infolist()
+                   if len(Path(entry.filename).parts) >= 3 and
+                   Path(entry.filename).parts[1] in ("LEKMOD", "localization") and
+                   not entry.is_dir()]
+        size = sum(entry.file_size for entry in entries)
+        for entry in entries:
+            if cancelled and cancelled():
+                raise DownloadCancelled("download canceled; temporary files removed")
             parts = Path(entry.filename).parts
-            if len(parts) < 3 or parts[1] not in ("LEKMOD", "localization"):
-                continue
-            if entry.is_dir():
-                continue
             if any(part in ("..", "") for part in parts) or entry.file_size > 128 * 1024 * 1024:
                 raise ValueError("unsafe project ZIP entry")
             # Symlinks and device entries must never be followed or materialized.
@@ -276,17 +291,27 @@ def extract_source_archive(archive: Path, destination: Path) -> None:
                 raise ValueError("project ZIP entry leaves the destination")
             target.parent.mkdir(parents=True, exist_ok=True)
             with zipped.open(entry) as incoming, target.open("wb") as outgoing:
-                shutil.copyfileobj(incoming, outgoing)
+                while block := incoming.read(1024 * 1024):
+                    if cancelled and cancelled():
+                        raise DownloadCancelled("download canceled; temporary files removed")
+                    outgoing.write(block)
+                    if progress:
+                        progress("extracting", total - entry.file_size + outgoing.tell(), size)
 
 
-def download_compatible_source(version: str, home: Path = APP_HOME) -> Path:
+def download_compatible_source(version: str, home: Path = APP_HOME, *,
+                               progress: Callable[[str, int, int | None], None] | None = None,
+                               cancelled: Callable[[], bool] | None = None) -> Path:
     """Download the localization branch for the one reviewed release only."""
     if version not in editor_manifest(home)["compatible_releases"]:
         raise ValueError("This version has no compatible localization baseline. "
                          "A maintainer must migrate it before it can be edited.")
     destination = home / "localization/workspace/projects" / version
     if destination.exists():
-        raise ValueError(f"Project already exists: {destination}. Select it instead of overwriting it.")
+        validate_project(destination, full=True)
+        if release_version(destination) != version:
+            raise ValueError(f"Existing project has a different release: {destination}")
+        return destination  # Reuse; never replace a translator's files.
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".download-") as temporary:
         temporary_path = Path(temporary)
@@ -295,16 +320,29 @@ def download_compatible_source(version: str, home: Path = APP_HOME) -> Path:
         request = urllib.request.Request(url, headers={"User-Agent": "Lekmod-Localization-Editor"})
         with urllib.request.urlopen(request, timeout=45) as response, archive.open("wb") as output:
             size = 0
+            expected = int(response.headers.get("Content-Length") or 0) or None
+            if progress:
+                progress("downloading", 0, expected)
             while block := response.read(1024 * 1024):
+                if cancelled and cancelled():
+                    raise DownloadCancelled("download canceled; temporary files removed")
                 size += len(block)
                 if size > 750 * 1024 * 1024:
                     raise ValueError("project download exceeds 750 MB")
                 output.write(block)
+                if progress:
+                    progress("downloading", size, expected)
+        if cancelled and cancelled():
+            raise DownloadCancelled("download canceled; temporary files removed")
         content = temporary_path / "project"
         content.mkdir()
-        extract_source_archive(archive, content)
+        extract_source_archive(archive, content, progress=progress, cancelled=cancelled)
+        if progress:
+            progress("verifying", 0, None)
         info = validate_project(content, full=True)
         if release_version(content) != version:
             raise ValueError("downloaded project release differs from the selected version")
+        if cancelled and cancelled():
+            raise DownloadCancelled("download canceled; temporary files removed")
         content.rename(destination)
     return destination

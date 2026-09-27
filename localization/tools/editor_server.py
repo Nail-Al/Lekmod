@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 import csv
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
@@ -18,6 +19,7 @@ import sys
 import threading
 import os
 import tempfile
+import textwrap
 import xml.etree.ElementTree as ET
 import urllib.error
 from urllib.parse import parse_qs, urlsplit
@@ -37,7 +39,7 @@ from lekmod_localization.common import (
 from lekmod_localization.connections import (
     APP_HOME, apply_game, detect_game, installed_mods, release_version,
     save_settings, settings, validate_game, validate_project,
-    release_catalog, download_compatible_source, editor_manifest,
+    release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
 from lekmod_localization.editor_update import (
     latest_release, stage_release, write_windows_updater,
@@ -115,9 +117,68 @@ def primary_operations(document: str) -> list[dict]:
 
 
 def primary_text(value: str) -> str:
-    """Interpret XML entities in one Text element, preserving line breaks."""
-    import xml.etree.ElementTree as ET
-    return ET.fromstring("<Text>" + value + "</Text>").text or ""
+    """Hide XML indentation while retaining intentional text line breaks."""
+    value = ET.fromstring("<Text>" + value + "</Text>").text or ""
+    if "\n" not in value:
+        return value
+    lines = value.split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return textwrap.dedent("\n".join(lines))
+
+
+def formatted_primary_text(raw: str, text: str) -> str:
+    """Keep an existing Text element's multiline XML layout when editing it."""
+    if "\n" not in raw:
+        return escape(text)
+    first = re.search(r"\n([ \t]*)\S", raw)
+    last = re.search(r"\n([ \t]*)$", raw)
+    if first is None or last is None:
+        return escape(text)
+    indent, closing = first.group(1), last.group(1)
+    return "\n" + indent + ("\n" + indent).join(
+        escape(line) for line in text.split("\n")) + "\n" + closing
+
+
+PAGE_SIZES = {25, 50, 100, 250, 500, 1000}
+
+
+def page_slice(items: list[dict], offset: int, limit: str) -> list[dict]:
+    """Bound normal pages; allow an explicit complete view for a category."""
+    if limit == "all":
+        return items
+    count = int(limit)
+    if count not in PAGE_SIZES or offset < 0:
+        raise CatalogError("invalid page size or offset")
+    return items[offset:offset + count]
+
+
+def matches_filters(row: dict, filters: dict, *, primary: bool) -> bool:
+    """Apply exact category/status and inclusive UTC date filters."""
+    field = "kind" if primary else "classification"
+    if filters.get("kind") and row.get(field) != filters["kind"]:
+        return False
+    if not primary and filters.get("status") and row.get("translation_status") != filters["status"]:
+        return False
+    column = filters.get("date_field") or "english_edited_at"
+    if column not in ({"english_edited_at"} if primary else
+                      {"english_edited_at", "translation_updated_at"}):
+        raise CatalogError("invalid date field")
+    for param in ("date_from", "date_to"):
+        boundary = filters.get(param, "")
+        if boundary:
+            try:
+                date.fromisoformat(boundary)
+            except ValueError as error:
+                raise CatalogError("invalid date filter") from error
+            current = row.get(column, "")[:10]
+            if not current or (param == "date_from" and current < boundary) or (
+                param == "date_to" and current > boundary
+            ):
+                return False
+    return True
 
 
 class Editor:
@@ -160,6 +221,7 @@ class Editor:
         self.actions: list[dict] = []
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
+        self.download_cancel = threading.Event()
         self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
         self.events: list[dict] = []
         if self.log_path.is_file():
@@ -181,20 +243,44 @@ class Editor:
 
     def start_download(self, version: str) -> dict:
         """Fetch a reviewed source release in the background without replacing files."""
-        if self.download_state["state"] == "running":
+        if self.download_state["state"] in ("running", "canceling"):
             raise CatalogError("a source download is already running")
         if version not in {row["version"] for row in release_catalog() if row["supported"]}:
             raise CatalogError("this release needs a reviewed localization migration")
-        self.download_state = {"state": "running", "version": version}
+        destination = APP_HOME / "localization/workspace/projects" / version
+        self.download_cancel = threading.Event()
+        self.download_state = {"state": "running", "version": version, "phase": "connecting",
+                               "bytes": 0, "total": None, "destination": str(destination)}
+
+        def progress(phase: str, done: int, total: int | None) -> None:
+            self.download_state = {**self.download_state, "phase": phase,
+                                   "bytes": done, "total": total}
 
         def run() -> None:
             try:
-                path = download_compatible_source(version)
-                self.download_state = {"state": "complete", "path": str(path)}
+                existed = destination.exists()
+                path = download_compatible_source(version, progress=progress,
+                                                  cancelled=self.download_cancel.is_set)
+                if self.download_cancel.is_set() and not existed:
+                    raise DownloadCancelled("download canceled; temporary files removed")
+                self.download_state = {**self.download_state, "state": "complete",
+                                       "phase": "ready", "path": str(path),
+                                       "reused": existed}
+            except DownloadCancelled as error:
+                self.download_state = {**self.download_state, "state": "canceled",
+                                       "error": str(error)}
             except Exception as error:
-                self.download_state = {"state": "error", "error": str(error)}
+                self.download_state = {**self.download_state, "state": "error",
+                                       "error": str(error)}
 
         threading.Thread(target=run, daemon=True).start()
+        return self.download_state
+
+    def cancel_download(self) -> dict:
+        """Stop a current transfer; its temporary directory is then removed."""
+        if self.download_state["state"] in ("running", "canceling"):
+            self.download_cancel.set()
+            self.download_state = {**self.download_state, "state": "canceling"}
         return self.download_state
 
     def history_state(self) -> dict[str, bool]:
@@ -244,7 +330,7 @@ class Editor:
                 mods = installed_mods(Path(game_path))
             except ValueError as error:
                 game_error = str(error)
-        selected_mod = prefs["game_mod"] or (mods[0]["name"] if len(mods) == 1 else "")
+        selected_mod = mods[0]["name"] if len(mods) == 1 else ""
         return {
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
@@ -266,24 +352,25 @@ class Editor:
         """Validate selected folders before persisting; a project switch restarts."""
         project = str(data.get("project_path", "")).strip()
         game = str(data.get("game_path", "")).strip()
-        mod = str(data.get("game_mod", "")).strip()
         source_root = Path(project) if project else APP_HOME
-        validate_project(source_root, full=True)
+        try:
+            source_info = validate_project(source_root, full=True)
+        except ValueError as error:
+            raise CatalogError("Source: " + str(error)) from error
+        mod = ""
         if game:
-            mods = installed_mods(validate_game(Path(game)))
-            if mod and mod not in {entry["name"] for entry in mods}:
-                raise CatalogError("selected Lekmod DLC folder is not installed in this game")
-            if not mod and len(mods) == 1:
+            try:
+                mods = installed_mods(validate_game(Path(game)))
+            except ValueError as error:
+                raise CatalogError("Game: " + str(error)) from error
+            if len(mods) > 1:
+                raise CatalogError("Game: Multiple Lekmod DLC folders found. Keep only one installed version.")
+            if mods:
                 mod = mods[0]["name"]
-            if mod:
-                selected = next(entry for entry in mods if entry["name"] == mod)
-                if (selected["version"].casefold() != validate_project(
-                    source_root, full=True)["version"].casefold() or
-                    selected["release"].casefold() != release_version(source_root).casefold()):
-                    raise CatalogError("The selected game's Lekmod version differs from "
-                                       "the connected source. Choose a matching DLC release.")
-        elif mod:
-            raise CatalogError("select a game folder before selecting a DLC mod")
+                selected = mods[0]
+                if (selected["version"].casefold() != source_info["version"].casefold()
+                    or selected["release"].casefold() != release_version(source_root).casefold()):
+                    raise CatalogError("Game: Installed Lekmod version differs from the connected source.")
         changed = (Path(project).resolve() if project else APP_HOME) != REPO_ROOT
         saved = save_settings({"project_path": project, "game_path": game,
                                "game_mod": mod, "onboarded": True})
@@ -330,9 +417,9 @@ class Editor:
         if not game:
             raise CatalogError("connect a Civilization V installation in Settings")
         mods = installed_mods(Path(game))
-        name = prefs["game_mod"] or (mods[0]["name"] if len(mods) == 1 else "")
-        if not name:
-            raise CatalogError("select the installed Lekmod version in Settings")
+        if len(mods) != 1:
+            raise CatalogError("install exactly one matching Lekmod DLC in this game")
+        name = mods[0]["name"]
         candidate, _ = build_shipped_localization.build_candidate(self.snapshot)
         current = build_shipped_localization.DEFAULT_SOURCE.read_text(encoding="utf-8")
         if candidate != current:
@@ -417,7 +504,8 @@ class Editor:
             ))
         return stream.getvalue()
 
-    def rows(self, locale: str, category: str, query: str, offset: int) -> dict:
+    def rows(self, locale: str, category: str, query: str, offset: int,
+             limit: str = "100", filters: dict | None = None) -> dict:
         """Search a category and return one page with approval state."""
         rows = csv_rows(self.path(locale, category))
         approved = read_approvals(TRANSLATIONS).get(locale, {})
@@ -428,43 +516,48 @@ class Editor:
                 timestamps = {record["key"]: record.get("updated_at", "")
                               for record in csv.DictReader(handle)}
         query = query.casefold()
-        selected = [
-            row for row in rows
-            if not query or any(query in row[field].casefold()
-                                for field in ("key", "lekmod_en_US", "vanilla_en_US",
-                                              "vanilla_target", "translation"))
-        ]
-        page = []
-        for row in selected[max(0, offset):max(0, offset) + 60]:
+        filters = filters or {}
+        selected = []
+        shipped = manage.read_config()["build"]["shipped"]
+        for row in rows:
             item = dict(row)
             item["english_edited_at"] = self.english_dates.get(row["key"], "")
             item["translation_updated_at"] = timestamps.get(row["key"], "")
             saved = approved.get(row["key"])
             if saved:
                 item["translation_status"] = (
-                    ("applied" if manage.read_config()["build"]["shipped"] else "saved")
+                    ("applied" if shipped else "saved")
                     if saved["source_fingerprint"] == row["source_fingerprint"]
                     else "stale"
                 )
                 item["translation"] = saved["text"]
                 item["translation_characters"] = str(character_count(saved["text"]))
-            page.append(item)
-        return {"total": len(selected), "rows": page}
+            if (not query or any(query in item[field].casefold()
+                                 for field in ("key", "lekmod_en_US", "vanilla_en_US",
+                                               "vanilla_target", "translation"))) and matches_filters(
+                                                   item, filters, primary=False):
+                selected.append(item)
+        return {"total": len(selected), "rows": page_slice(selected, offset, limit)}
 
-    def primary(self, query: str, offset: int) -> dict:
+    def primary(self, query: str, offset: int, limit: str = "100",
+                filters: dict | None = None) -> dict:
         """Search the canonical English XML as a separate editor category."""
         document = sync_primary_english.DEFAULT_ENGLISH.read_text(encoding="utf-8")
         query = query.casefold()
-        selected = [
-            {"index": row["index"], "key": row["key"], "kind": row["kind"],
-             "text": primary_text(row["text"]),
-             "characters": character_count(primary_text(row["text"])),
-             "english_edited_at": self.english_dates.get(row["key"], "")}
-            for row in primary_operations(document)
-            if not query or query in row["key"].casefold()
-            or query in primary_text(row["text"]).casefold()
-        ]
-        return {"total": len(selected), "rows": selected[max(0, offset):max(0, offset) + 60]}
+        starts = [0] + [match.end() for match in re.finditer("\n", document)]
+        selected = []
+        for row in primary_operations(document):
+            value = primary_text(row["text"])
+            if query and query not in row["key"].casefold() and query not in value.casefold():
+                continue
+            item = {"index": row["index"], "key": row["key"], "kind": row["kind"],
+                    "text": value, "characters": character_count(value),
+                    "source_file": "localization/en_US/primary.xml",
+                    "source_line": bisect_right(starts, row["start"]),
+                    "english_edited_at": self.english_dates.get(row["key"], "")}
+            if matches_filters(item, filters or {}, primary=True):
+                selected.append(item)
+        return {"total": len(selected), "rows": page_slice(selected, offset, limit)}
 
     def history(self, index: int | None = None, key: str | None = None) -> dict:
         """Show the last committed edit date for a selected English row."""
@@ -617,7 +710,9 @@ class Editor:
             or primary_text(row["text"]) != data.get("old_text")
         ):
             raise CatalogError("primary row changed; reload before saving")
-        replacement = before[:row["text_start"]] + escape(new_text) + before[row["text_end"]:]
+        replacement = (before[:row["text_start"]] +
+                       formatted_primary_text(row["text"], new_text) +
+                       before[row["text_end"]:])
         sync_primary_english.validate_source(replacement)
         old_game = game.read_bytes()
         old_game_hash = hashlib.sha256(old_game).hexdigest()
@@ -865,11 +960,17 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif url.path == "/api/rows":
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
-                    self.respond(200, editor.rows(one("locale"), one("category"), one("q"), int(one("offset", "0"))))
+                    filters = {name: one(name) for name in
+                               ("kind", "status", "date_field", "date_from", "date_to")}
+                    self.respond(200, editor.rows(one("locale"), one("category"), one("q"),
+                                                  int(one("offset", "0")), one("limit", "100"), filters))
                 elif url.path == "/api/primary":
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
-                    self.respond(200, editor.primary(one("q"), int(one("offset", "0"))))
+                    filters = {name: one(name) for name in
+                               ("kind", "date_field", "date_from", "date_to")}
+                    self.respond(200, editor.primary(one("q"), int(one("offset", "0")),
+                                                     one("limit", "100"), filters))
                 elif url.path == "/api/history":
                     self.respond(200, editor.history(
                         key=one("key") if "key" in args else None,
@@ -925,6 +1026,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     return
                 elif self.path == "/api/download-project":
                     result = editor.start_download(str(data.get("version", "")))
+                elif self.path == "/api/cancel-download":
+                    result = editor.cancel_download()
                 elif self.path == "/api/snapshot-cloud":
                     result = editor.import_cloud_snapshot(data.get("url"), data.get("password"))
                 elif self.path == "/api/editor-update":
@@ -938,7 +1041,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     return
                 elif self.path == "/api/preferences":
                     allowed = {"mode", "prefill", "wrap", "locale", "category",
-                               "visible_columns", "column_widths", "onboarded"}
+                               "visible_columns", "column_widths", "onboarded", "page_size",
+                               "snapshot_url"}
                     if set(data) - allowed:
                         raise CatalogError("unknown editor preference")
                     if data.get("mode") == "developer":
@@ -949,7 +1053,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     if name not in {"row-selected", "mode-switch", "settings-open",
                                     "columns-changed", "page-changed", "prefill-changed",
                                     "logs-open", "logs-download", "copy", "wrap-changed",
-                                    "translation-export", "xml-export", "update-check"}:
+                                    "translation-export", "xml-export", "update-check",
+                                    "filter-changed", "page-size-changed", "discard"}:
                         raise CatalogError("unknown interface action")
                     editor.record_event(name, "ui")
                     result = {"logged": True}
@@ -970,9 +1075,18 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif self.path == "/api/check":
                     result = editor.check_project()
                 elif self.path == "/api/detect-game":
-                    result = {"path": detect_game()}
-                elif self.path == "/api/inspect-game":
-                    result = {"mods": installed_mods(Path(str(data.get("path", ""))))}
+                    path = str(data.get("path", "")).strip() or detect_game()
+                    if not path:
+                        result = {"path": "", "mods": [], "state": "missing_game"}
+                    else:
+                        try:
+                            mods = installed_mods(Path(path))
+                            state = "installed" if len(mods) == 1 else (
+                                "multiple" if mods else "vanilla")
+                            result = {"path": path, "mods": mods, "state": state}
+                        except ValueError as error:
+                            result = {"path": path, "mods": [], "state": "missing_game",
+                                      "error": str(error)}
                 elif self.path == "/api/undo":
                     result = editor.replay(undo=True)
                 elif self.path == "/api/redo":

@@ -37,7 +37,8 @@
     .toolbar label { flex: 0 1 210px; }
     #search { flex: 1 1 240px; min-width: 130px; }
     .toolbar .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-    .pager { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
+    .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
+    .pager .page-choice { margin-left: auto; }
     #count { min-width: 100px; text-align: center; }
     .table-scroll { flex: 1; min-width: 0; min-height: 0; width: 100%; overflow: auto; scrollbar-gutter: stable; }
     table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; }
@@ -63,13 +64,30 @@
     .fields { display: flex; flex-wrap: wrap; gap: 10px; }
     .fields label { flex: 1 1 160px; }
     .quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-    #message { min-height: 21px; font-weight: 600; }
+    #message { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .tokens { display: flex; flex-wrap: wrap; gap: 5px; }
     .tokens button { border-radius: 4px; background: #e6eef8; padding: 3px 6px; font: .86rem ui-monospace, monospace; }
     .select-custom { display: flex; gap: 5px; }
     .select-custom > * { flex: 1; max-width: 100%; }
-    .section-divider { border: 0; border-top: 1px solid #d9e2ed; width: 100%; margin: 4px 0; }
-    #toast { position: fixed; top: 18%; left: 50%; transform: translateX(-50%); z-index: 200; max-width: min(90vw, 600px); padding: 12px 18px; border-radius: 10px; background: #204b73; color: white; box-shadow: 0 10px 32px #10263c70; text-align: center; }
+    .settings-group { border-top: 1px solid #d9e2ed; padding-top: 14px; display: grid; gap: 10px; }
+    .settings-group:first-of-type { border: 0; padding-top: 0; }
+    .section-status:not(:empty) { padding: 9px 11px; border-radius: 7px; background: #e9f5eb; color: #246a39; }
+    .section-status.warning:not(:empty) { background: #fff3d8; color: #78501d; }
+    .icon-control.active { background: #dcecff; border-color: #23619a; }
+    .section-status.error:not(:empty) { background: #fcecea; color: #a22d24; }
+    .progress-group { display: grid; gap: 7px; }
+    .progress-group progress { width: 100%; height: 14px; }
+    details > summary { cursor: pointer; font-weight: 650; }
+    details > summary .hint { font-weight: normal; display: block; }
+    .accordion-body { display: grid; gap: 10px; padding: 12px 0 0; }
+    .compact-check { display: inline-flex !important; width: fit-content; max-width: 100%; align-self: start; }
+    .quick .push-right { margin-left: auto; }
+    .mode-chip { border-radius: 50px; font-weight: 650; }
+    .mode-chip .switch-mark { display: inline-block; border: 1px solid currentColor; border-radius: 50%; width: 18px; height: 18px; line-height: 14px; text-align: center; margin-right: 6px; }
+    .icon-control { width: 38px; height: 36px; display: inline-flex; align-items: center; justify-content: center; padding: 5px; }
+    .icon-control svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .filters-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    #toast { position: fixed; bottom: clamp(22px, 7vh, 95px); left: 50%; transform: translateX(-50%); z-index: 200; max-width: min(90vw, 600px); padding: 12px 18px; border-radius: 10px; background: #204b73; color: white; box-shadow: 0 10px 32px #10263c70; text-align: center; }
     #toast.error { background: #963a34; }
     #logs-view { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
     #logs-list { white-space: pre-wrap; font: .86rem/1.5 ui-monospace, monospace; }
@@ -92,6 +110,7 @@
       .panel { max-height: 45vh; }
       .pager { justify-content: space-between; }
       .fields label { flex: 1 1 100%; }
+      .filters-grid { grid-template-columns: 1fr; }
       button { min-height: 39px; }
     }
   </style>
@@ -101,7 +120,7 @@
   <div class="headline">
     <h1>Lekmod Localization Editor <small id="editor-version"></small></h1>
     <span id="update-badge" class="badge" hidden>Editor update available</span>
-    <button id="mode" title="Switch between translation and English source">Translator</button>
+    <button id="mode" class="mode-chip" title="Switch between Translator and Developer" aria-pressed="false"><span class="switch-mark" aria-hidden="true">↔</span><span id="mode-name">Translator</span></button>
     <button id="logs-button" title="Open the local action log">Logs</button>
     <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
   </div>
@@ -123,7 +142,8 @@
       <label id="search">Search<input id="search-input" type="search" placeholder="Key or text"></label>
       <div class="actions">
         <label class="inline"><input type="checkbox" id="wrap" checked> Wrap lines</label>
-        <button id="columns-button" title="Select visible columns">Columns</button>
+        <button id="columns-button" class="icon-control" title="Show or hide table columns" aria-label="Show or hide table columns">☷</button>
+        <button id="filters-button" class="icon-control" title="Filter table rows" aria-label="Filter table rows"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg></button>
       </div>
     </section>
     <p id="baseline-notice" class="hint" hidden></p>
@@ -132,6 +152,7 @@
         <button id="prev" aria-label="Previous page">‹ Previous</button>
         <span id="count"></span>
         <button id="next" aria-label="Next page">Next ›</button>
+        <label class="inline page-choice">Rows<select id="page-size"><option>25</option><option>50</option><option selected>100</option><option>250</option><option>500</option><option>1000</option><option value="all">All</option></select></label>
       </nav>
       <div class="table-scroll" id="table-scroll">
         <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
@@ -146,7 +167,7 @@
       </div>
       <label><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Saved in this project's language CSV; game XML is rebuilt after saving.</small><textarea id="translation" disabled></textarea></label>
       <p id="characters" class="hint">Characters: 0 · spaces: 0</p>
-      <label class="inline"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
+      <label class="inline compact-check"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
       <div id="grammar" class="fields">
         <label>Gender<span class="select-custom"><select id="gender" disabled><option value="">None</option><option value="feminine">feminine</option><option value="masculine">masculine</option><option value="neuter:the">neuter:the</option><option value="neuter:an">neuter:an</option><option value="__custom__">Custom…</option></select><input id="gender-custom" placeholder="Custom gender" hidden disabled></span></label>
         <label>Plurality<span class="select-custom"><select id="plurality" disabled><option value="">None</option><option value="1">1</option><option value="2">2</option><option value="__custom__">Custom…</option></select><input id="plurality-custom" placeholder="Custom plurality" hidden disabled></span></label>
@@ -165,6 +186,7 @@
         <button id="game-apply" disabled>Apply to installed game</button>
         <button id="run-checks" hidden>Run checks</button>
         <button id="exports-button">Exports…</button>
+        <button id="discard" class="icon-control push-right" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled>↺</button>
       </div>
       <p id="message" role="status"></p>
     </section>
@@ -173,35 +195,44 @@
 </main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>
+<dialog id="discard-dialog"><section><h2>Discard unsaved changes?</h2><p>Restore the selected row's saved text, grammar and note? Changes already saved in project files remain; use Undo to reverse a saved edit.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Discard changes</button></div></section></dialog>
 <dialog id="settings-dialog">
   <section>
-    <h2>Connections and settings</h2>
-    <p class="hint">Connect a complete compatible Lekmod project. A clean game installation alone cannot supply its English source or localization tools.</p>
-    <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Choose a compatible project folder"></label><button id="project-browse">Browse…</button></div>
-    <div class="row"><label>Get a compatible project<select id="project-version"><option>Loading available versions…</option></select></label><button id="project-download">Download selected source</button></div>
-    <p class="hint">This downloads a separate source folder; it never overwrites your existing work. Earlier official releases are shown for reference but need a reviewed localization migration.</p>
-    <p class="hint"><a href="https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure" target="_blank" rel="noopener">Compatible localization project</a> · <a href="https://github.com/EnormousApplePie/Lekmod" target="_blank" rel="noopener">Official Lekmod source</a>. The official main branch does not yet contain this localization system; matching releases require a reviewed migration.</p>
-    <hr class="section-divider"><h2>Optional in-game testing</h2>
-    <p class="hint">Only connect the game if Lekmod is already installed. An empty list means no Lekmod DLC was detected; the vanilla game does not unlock editing.</p>
-    <div class="row"><label>Civilization V folder<input id="game-path" placeholder="Path to the game installation"></label><button id="game-browse">Browse…</button></div>
-    <label>Lekmod installed in this game<select id="game-mod"></select></label>
-    <div class="row"><button id="detect-game">Detect game</button><button id="inspect-game">Check game folder</button></div>
-    <hr class="section-divider"><h2>Vanilla reference</h2>
-    <p class="hint" id="settings-status"></p>
-    <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
-    <button id="snapshot-import">Import and verify snapshot</button>
-    <p class="hint">Or download a previously encrypted snapshot. Enter a direct HTTPS download link and the decryption password. The password is never saved.</p>
-    <label>Encrypted snapshot link<input id="snapshot-url" type="url" placeholder="https://www.dropbox.com/...&dl=1"></label>
-    <label>Snapshot password<input id="snapshot-password" type="password" autocomplete="off"></label>
-    <button id="snapshot-cloud">Download, decrypt and verify</button>
-    <p class="hint">Vanilla text stays on this computer. Without it, English classifications and translation still work.</p>
-    <hr class="section-divider"><h2>Editor updates</h2>
-    <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
-    <div class="row"><button id="update-check">Check latest version</button><button id="update-install" disabled>Download and update editor</button></div>
+    <div class="settings-group"><h2>Connections and settings</h2>
+      <p class="hint">Connect a complete compatible Lekmod project. A clean game installation alone cannot supply its English source or localization tools.</p>
+      <p id="source-status" class="section-status" role="status" aria-live="polite"></p>
+      <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Choose a compatible project folder"></label><button id="project-browse">Browse…</button></div>
+      <div class="row"><label>Get a compatible Lekmod version<select id="project-version"><option>Loading available versions…</option></select></label><button id="project-download">Download</button></div>
+      <div id="project-progress-group" class="progress-group" hidden><progress id="project-progress"></progress><p id="project-progress-text" class="hint"></p><button id="project-cancel" type="button">Cancel download</button></div>
+      <p class="hint">Downloads into this editor's <code>localization/workspace/projects/&lt;version&gt;</code> folder. Existing projects are reused after validation and are never overwritten. Earlier releases need a reviewed localization migration.</p>
+      <p class="hint"><a href="https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure" target="_blank" rel="noopener">Compatible localization project</a> · <a href="https://github.com/EnormousApplePie/Lekmod" target="_blank" rel="noopener">Official Lekmod source</a>.</p>
+    </div>
+    <div class="settings-group"><h2>Optional in-game testing</h2>
+      <p class="hint">A connected project can be edited without a game. To apply its XML in game, install one matching Lekmod DLC first.</p>
+      <p id="game-status" class="section-status" role="status" aria-live="polite"></p>
+      <div class="row"><label>Civilization V folder<input id="game-path" placeholder="Path to the game installation"></label><button id="game-browse">Browse…</button></div>
+      <button id="detect-game">Find / verify game</button>
+    </div>
+    <div class="settings-group"><details id="vanilla-details"><summary>Vanilla reference <span id="vanilla-summary" class="hint">Optional comparison: original vanilla text is not loaded.</span></summary>
+      <div class="accordion-body"><p id="snapshot-status" class="section-status" role="status" aria-live="polite"></p>
+        <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
+        <div class="row"><button id="snapshot-import">Import and verify snapshot</button><button id="snapshot-reset">Clear inputs</button></div>
+        <p class="hint">Or download a previously encrypted snapshot. Enter a direct HTTPS link and decryption password; the password is never saved.</p>
+        <label>Encrypted snapshot link<input id="snapshot-url" type="url" placeholder="https://www.dropbox.com/...&dl=1"></label>
+        <label>Snapshot password<input id="snapshot-password" type="password" autocomplete="off"></label>
+        <button id="snapshot-cloud">Download, decrypt and verify</button>
+        <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
+      </div></details>
+    </div>
+    <div class="settings-group"><h2>Editor updates</h2>
+      <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
+      <div class="row"><button id="update-check" class="icon-control" title="Check latest editor version" aria-label="Check latest editor version">⟳</button><button id="update-install" disabled>Download and update editor</button></div>
+    </div>
     <div class="foot"><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
   </section>
 </dialog>
 <dialog id="columns-dialog"><section><h2>Visible columns</h2><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
+<dialog id="filters-dialog"><section><h2>Filter rows</h2><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><label id="filter-date-label">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
 <dialog id="exports-dialog"><section><h2>Downloads</h2><p>Send an approved translation ZIP to a developer for review. Test game XML is one file and is not a complete mod.</p><button id="share">Download translation ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
 <script src="/app.js" defer></script>
 </body>

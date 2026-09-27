@@ -17,11 +17,11 @@ START = """Lekmod Localization Editor for Windows
    the browser editor is running. No Python, Git, VS Code, or game install
    is needed to open it.
 3. In Settings, select a complete compatible Lekmod project folder or click
-   Download selected source. A plain Civilization V installation is not a
+   Download. Progress and destination are shown. A plain Civilization V installation is not a
    project. Save connections, then select a language and translate.
 4. For in-game testing, connect to the Civilization V installation in
-   Settings, select its installed Lekmod DLC, and click Apply to installed
-   game after saving. This checks versions and backs up the existing XML.
+   Settings and click Find / verify game, then Apply to installed game after
+   saving. One matching Lekmod DLC must be installed; the XML is backed up.
    Install the matching complete Lekmod release separately first.
 5. To compare original vanilla sentences, import the matching local
    vanilla-snapshot.json.gz or use an encrypted link and password from

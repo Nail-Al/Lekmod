@@ -1,15 +1,19 @@
 """Guard the editor's filesystem and game deployment boundaries."""
 
 from pathlib import Path
+import io
+import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.connections import (
-    apply_game, extract_source_archive, save_settings, settings,
+    DownloadCancelled, apply_game, download_compatible_source, extract_source_archive,
+    save_settings, settings,
 )
 
 
@@ -83,6 +87,59 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe"):
             extract_source_archive(archive, self.home / "fresh")
         self.assertFalse((self.home / "outside.txt").exists())
+
+    def test_download_progress_cancel_and_existing_project_reuse(self):
+        """A canceled transfer cannot replace a valid project or leave a partial one."""
+        manifest = self.home / "localization/editor/version.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"version": "0.3", "release_tag": "editor-v0.3",
+                                        "compatible_releases": ["v35.3"]}), encoding="utf-8")
+        (self.project / "LEKMOD/Lua/tmp").mkdir(parents=True)
+        tests = self.project / "localization/tools/tests"
+        tests.mkdir(parents=True)
+        (tests.parent / "manage.py").touch()
+        (self.project / "LEKMOD/Art/localization.xml").touch()
+        (self.project / "LEKMOD/Lua/tmp/script.lua").touch()
+        (tests / "test_sample.py").touch()
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as archive:
+            for path in self.project.rglob("*"):
+                if path.is_file():
+                    archive.write(path, "source/" + path.relative_to(self.project).as_posix())
+        payload = archive_bytes.getvalue()
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        phases = []
+        with patch("urllib.request.urlopen", return_value=Response(payload)) as fetch:
+            path = download_compatible_source("v35.3", self.home,
+                                              progress=lambda phase, done, size: phases.append(phase))
+            self.assertEqual(fetch.call_count, 1)
+            self.assertIn("downloading", phases)
+            self.assertIn("extracting", phases)
+            self.assertEqual(phases[-1], "verifying")
+            self.assertTrue((path / "localization/en_US/primary.xml").is_file())
+        marker = path / "localization/translator-draft.txt"
+        marker.write_text("unsaved work", encoding="utf-8")
+        with patch("urllib.request.urlopen", side_effect=AssertionError("should reuse")):
+            self.assertEqual(download_compatible_source("v35.3", self.home), path)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unsaved work")
+        other_manifest = self.home / "other/localization/editor/version.json"
+        other_manifest.parent.mkdir(parents=True)
+        other_manifest.write_bytes(manifest.read_bytes())
+        with patch("urllib.request.urlopen", return_value=Response(payload)):
+            with self.assertRaises(DownloadCancelled):
+                download_compatible_source("v35.3", self.home / "other",
+                                           cancelled=lambda: True)
+        self.assertFalse((self.home / "other/localization/workspace/projects/v35.3").exists())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unsaved work")
 
 
 if __name__ == "__main__":
