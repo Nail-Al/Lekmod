@@ -69,6 +69,7 @@ The command prompts for the password, verifies the shared baseline, and atomical
 In a Git checkout, `localization/en_US/primary.xml` is the canonical editable English source. The `Language_en_US` block in `LEKMOD/Override/CIV5Units_Mongol.xml` is generated from it; changes made directly to that block will be overwritten. A new `TXT_KEY_*` entry also needs a reference in gameplay XML, SQL, or Lua before the game will use it. Developers can use **Developer** mode to edit/create a key or edit `primary.xml` directly. Saving English rebuilds outputs and makes earlier translations with changed fingerprints stale. After direct file edits:
 
 ```powershell
+python -m pip install "cryptography>=45,<47"
 python -B .\localization\tools\manage.py prepare
 python -B .\localization\tools\manage.py check
 git diff --check

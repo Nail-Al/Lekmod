@@ -37,5 +37,8 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install snapshot encryption dependency
+        run: python -m pip install "cryptography>=45,<47"
+
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci
