@@ -75,7 +75,16 @@ def main() -> int:
         assert metadata["preferences"]["column_widths"] == {"key": 515}
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
         assert (workspace / "vanilla-snapshot.json.gz").read_bytes() == b"private snapshot fixture"
-        assert "success" in (workspace / "editor-updates/update.log").read_text(encoding="utf-8")
+        # The new server may answer /api/meta before the helper records success.
+        log = workspace / "editor-updates/update.log"
+        for _ in range(40):
+            details = log.read_text(encoding="utf-8") if log.exists() else ""
+            if f"success  Installed v{version}" in details:
+                break
+            time.sleep(.25)
+        else:
+            raise RuntimeError("The helper reopened the editor without confirming the update: "
+                               + details[-2000:])
         stop(base, token_at(base))
         old.wait(timeout=20)
     print(f"Editor v{previous} downloaded v{version} from GitHub and reopened the same tab.")

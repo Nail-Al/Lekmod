@@ -62,12 +62,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          New-Item -ItemType Directory -Force dist/previous | Out-Null
+          New-Item -ItemType Directory -Force dist/previous, dist/published | Out-Null
           gh release download editor-v0.8 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
+          gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python -B localization/tools/test_editor_upgrade_online.py `
             --old-archive dist/previous/LekmodLocalizationEditor-Windows.zip `
-            --new-archive dist/LekmodLocalizationEditor-Windows.zip
+            --new-archive dist/published/LekmodLocalizationEditor-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: LekmodLocalizationEditor-Windows
