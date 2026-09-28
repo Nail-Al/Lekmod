@@ -193,6 +193,7 @@
         <p class="hint">Keep these formatting tokens exactly as shown. Icons and colors work in game; you may translate the words around them.</p>
         <div class="tokens" id="tokens"></div>
       </div>
+      <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
       <label><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Saved in this project's language CSV; game XML is rebuilt after saving.</small><textarea id="translation" disabled></textarea></label>
       <p id="characters" class="hint">Characters: 0 · spaces: 0</p>
       <label class="inline compact-check"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
@@ -202,7 +203,6 @@
         <label>Translator note<input id="note" disabled></label>
       </div>
       <p class="hint" id="note-help">The note is stored in the approved language CSV for reviewers; it is not shown in the game.</p>
-      <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
       <div class="quick">
         <button id="create-key" hidden>Create new key</button>
         <button id="save" class="primary" disabled>Save and apply</button>

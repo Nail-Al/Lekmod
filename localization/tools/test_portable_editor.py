@@ -123,7 +123,9 @@ def main() -> int:
         try:
             meta = json.loads(get(base + "/api/meta"))
             assert not meta["ready"] and not meta["locales"]
-            assert b'id="snapshot-encrypt"' in get(base + "/")
+            initial_html = get(base + "/")
+            assert b'id="snapshot-encrypt"' in initial_html
+            assert initial_html.index(b'id="identifier"') < initial_html.index(b'id="translation"')
             assert b"<svg" in get(base + "/favicon.svg")
             try:
                 get(base + "/api/rows?locale=RU_RU&category=buildings")
@@ -147,7 +149,9 @@ def main() -> int:
                     live = json.loads(get(base + "/api/meta"))
                     if live["server_instance"] != meta["server_instance"] and live["ready"]:
                         break
-                except (URLError, TimeoutError):
+                except OSError:
+                    # Closing the old Windows server can reset a request mid-flight.
+                    # A new instance must still answer before this check succeeds.
                     pass
                 time.sleep(.5)
             else:
