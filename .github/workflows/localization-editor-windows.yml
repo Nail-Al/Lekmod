@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force dist/previous, dist/published | Out-Null
-          gh release download editor-v0.8 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
+          gh release download editor-v0.9 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
