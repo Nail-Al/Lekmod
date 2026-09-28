@@ -4,20 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="editor-token" content="{{TOKEN}}">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Lekmod Localization Editor</title>
   <style>
-    :root { font: 15px/1.45 system-ui, sans-serif; color: #18283d; background: #f2f5fa; }
+    :root { font: 15px/1.45 system-ui, sans-serif; color: #18283d; background: #f2f5fa;
+      --control-height: 38px; --control-radius: 7px; --panel-radius: 10px;
+      --control-border: #b9c7d7; --control-padding: 8px 12px; }
     * { box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; }
     body { margin: 0; min-width: 280px; display: flex; flex-direction: column; }
     button, input, textarea, select { font: inherit; }
-    button { border: 1px solid #b9c7d7; border-radius: 7px; background: #fff; padding: 8px 12px; color: #183a61; cursor: pointer; }
+    button { border: 1px solid var(--control-border); border-radius: var(--control-radius); background: #fff; padding: var(--control-padding); min-height: var(--control-height); color: #183a61; cursor: pointer; }
     button:hover:not(:disabled) { background: #eaf2fb; }
     button:disabled { opacity: .48; cursor: default; }
     button.primary { color: #fff; background: #23619a; border-color: #23619a; }
     button.primary:hover:not(:disabled) { background: #164c7c; }
-    button.icon { min-width: 36px; padding: 6px; font-size: 1.25rem; line-height: 1; }
-    input, textarea, select { padding: 8px; border: 1px solid #b6c4d4; border-radius: 6px; background: white; min-width: 0; }
+    button.icon { min-width: var(--control-height); padding: 6px; font-size: 1.25rem; line-height: 1; }
+    input, textarea, select { padding: 8px; border: 1px solid #b6c4d4; border-radius: var(--control-radius); background: white; min-width: 0; }
+    input:not([type=checkbox]):not([type=file]), select { min-height: var(--control-height); }
     input[type=checkbox] { width: 17px; height: 17px; padding: 0; }
     label { display: grid; gap: 4px; font-size: .88rem; }
     label.inline { display: flex; align-items: center; gap: 7px; }
@@ -32,7 +36,7 @@
     main { flex: 1; min-height: 0; min-width: 0; padding: 12px clamp(10px, 2vw, 26px); display: flex; flex-direction: column; gap: 10px; overflow: auto; }
     #workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
     .table-card { flex: 1; min-width: 0; min-height: 160px; display: flex; flex-direction: column; overflow: hidden; }
-    .card { background: #fff; border: 1px solid #d5dfeb; border-radius: 10px; box-shadow: 0 2px 7px #183a6110; }
+    .card { background: #fff; border: 1px solid #d5dfeb; border-radius: var(--panel-radius); box-shadow: 0 2px 7px #183a6110; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 12px; }
     .toolbar label { flex: 0 1 210px; }
     #search { flex: 1 1 240px; min-width: 130px; }
@@ -90,8 +94,9 @@
     .compact-check { display: inline-flex !important; width: fit-content; max-width: 100%; align-self: start; }
     .quick .push-right { margin-left: auto; }
     .mode-chip { border-radius: 50px; font-weight: 650; }
-    .mode-chip .switch-mark { display: inline-block; border: 1px solid currentColor; border-radius: 50%; width: 18px; height: 18px; line-height: 14px; text-align: center; margin-right: 6px; }
-    .icon-control { width: 38px; height: 36px; display: inline-flex; align-items: center; justify-content: center; padding: 5px; }
+    .mode-chip { display: inline-flex; align-items: center; gap: 7px; }
+    .mode-chip svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-control { width: var(--control-height); height: var(--control-height); display: inline-flex; align-items: center; justify-content: center; padding: 5px; }
     .icon-control svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .filters-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
     .filter-dates { grid-column: 1 / -1; border-top: 1px solid #d9e2ed; padding-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
@@ -106,6 +111,8 @@
     dialog::backdrop { background: #10263caa; }
     dialog section { padding: 18px; display: grid; gap: 12px; }
     dialog h2 { font-size: 1.2rem; }
+    .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .dialog-heading .icon-control { flex: none; }
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
     .row > label { flex: 1 1 260px; }
     .row > button { flex: 0 0 auto; }
@@ -115,6 +122,9 @@
     dialog a { overflow-wrap: anywhere; }
     #no-source { padding: 20px; }
     #app-loading { padding: 24px; display: flex; align-items: center; gap: 10px; }
+    #app-loading .spinner { flex: none; }
+    #create-text { width: 100%; min-height: 130px; resize: vertical; }
+    #key-tools label { flex: 1 1 270px; }
     [hidden] { display: none !important; }
     @media (max-width: 680px) {
       header { padding: 12px; }
@@ -134,7 +144,7 @@
   <div class="headline">
     <h1>Lekmod Localization Editor <small id="editor-version"></small></h1>
     <span id="update-badge" class="badge" hidden>Editor update available</span>
-    <button id="mode" class="mode-chip" title="Switch between Translator and Developer" aria-pressed="false"><span class="switch-mark" aria-hidden="true">↔</span><span id="mode-name">Translator</span></button>
+    <button id="mode" class="mode-chip" title="Switch between Translator and Developer" aria-pressed="false"><svg id="translator-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h10M8 3v3m3 0c-.4 4-3 7-7 9m1-6c1.1 2.3 3.5 4.4 6 5.5M13 20l4-10 4 10m-6.5-3h5"/></svg><svg id="developer-icon" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-3-16-2 18"/></svg><span id="mode-name">Translator</span></button>
     <button id="logs-button" title="Open the local action log">Logs</button>
     <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
   </div>
@@ -144,7 +154,7 @@
   </div>
 </header>
 <main>
-  <section id="app-loading" class="card" role="status"><span class="spinner" aria-hidden="true"></span> Opening editor and checking the connected source…</section>
+  <section id="app-loading" class="card" role="status"><span id="loading-spinner" class="spinner" aria-hidden="true"></span><span id="loading-label">Opening editor and checking the connected source…</span><button id="loading-retry" hidden>Retry connection</button></section>
   <section id="no-source" class="card" hidden>
     <h2>Connect a Lekmod source to begin</h2>
     <p id="connection-error" class="warning"></p>
@@ -192,12 +202,9 @@
         <label>Translator note<input id="note" disabled></label>
       </div>
       <p class="hint" id="note-help">The note is stored in the approved language CSV for reviewers; it is not shown in the game.</p>
-      <div id="key-tools" class="fields" hidden>
-        <label>New TXT_KEY identifier<input id="new-key" placeholder="TXT_KEY_MY_NEW_DESCRIPTION"></label>
-        <button id="create-key">Create text key</button>
-        <button id="rename-key" disabled>Rename selected key</button>
-      </div>
+      <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
       <div class="quick">
+        <button id="create-key" hidden>Create new key</button>
         <button id="save" class="primary" disabled>Save and apply</button>
         <button id="discard" class="icon-control" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
         <button id="undo" class="icon" aria-label="Undo saved edit" title="Undo saved edit" disabled>↶</button>
@@ -255,8 +262,9 @@
     <div class="foot"><button id="editor-quit" class="exit" title="Stop the editor running in the background">Quit editor</button><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
   </section>
 </dialog>
-<dialog id="columns-dialog"><section><h2>Visible columns</h2><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
-<dialog id="filters-dialog"><section><h2>Filter rows</h2><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
+<dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
+<dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
+<dialog id="create-key-dialog"><section><div class="dialog-heading"><h2>Create new English text key</h2><button id="create-x" type="button" class="icon-control" aria-label="Close without creating a key" title="Close without creating">×</button></div><p class="hint">Creates a new Row in the primary English source. The key appears in game only when gameplay XML, SQL or Lua refers to it.</p><label>Create TXT_KEY identifier<input id="create-identifier" placeholder="TXT_KEY_MY_NEW_DESCRIPTION" autocomplete="off"></label><label>English source text<textarea id="create-text"></textarea></label><div class="fields"><label>Source file<input id="create-source" disabled></label><label>Line<input id="create-line" disabled></label><label>Operation<select id="create-operation" disabled><option>Row</option></select></label></div><p id="create-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="create-cancel">Cancel</button><button id="create-confirm" class="primary">Create key</button></div></section></dialog>
 <dialog id="exports-dialog"><section><h2>Downloads</h2><p>Share a translation or English source ZIP with a maintainer. Downloads do not send data or install the mod.</p><button id="share">Download translation ZIP</button><button id="share-english" hidden>Download English source ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
 <script src="/app.js" defer></script>
 </body>

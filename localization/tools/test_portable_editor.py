@@ -119,10 +119,12 @@ def main() -> int:
             address.bind(("127.0.0.1", 0))
             port = address.getsockname()[1]
         process, base, token = start_editor(root, port, root / "first-launch.log")
+        new_token = None
         try:
             meta = json.loads(get(base + "/api/meta"))
             assert not meta["ready"] and not meta["locales"]
             assert b'id="snapshot-encrypt"' in get(base + "/")
+            assert b"<svg" in get(base + "/favicon.svg")
             try:
                 get(base + "/api/rows?locale=RU_RU&category=buildings")
             except HTTPError as error:
@@ -135,8 +137,46 @@ def main() -> int:
                 assert error.code == 400
             else:
                 raise RuntimeError("editor encrypted a snapshot without a connected project")
+            project = root / "full-project"
+            source_fixture(project)
+            connected = post(base, token, "/api/connect", {"project_path": str(project),
+                                                           "game_path": ""})
+            assert connected["restart"], "first project connection must restart the editor"
+            for _ in range(120):
+                try:
+                    live = json.loads(get(base + "/api/meta"))
+                    if live["server_instance"] != meta["server_instance"] and live["ready"]:
+                        break
+                except (URLError, TimeoutError):
+                    pass
+                time.sleep(.5)
+            else:
+                raise RuntimeError("connected editor did not reopen the original browser URL")
+            try:
+                post(base, token, "/api/preferences", {"mode": "developer"})
+            except HTTPError as error:
+                assert error.code == 403
+            else:
+                raise RuntimeError("old browser token remained valid after project restart")
+            html = get(base + "/").decode("utf-8")
+            new_token = re.search(r'<meta name="editor-token" content="([^"]+)">', html).group(1)
+            post(base, new_token, "/api/preferences", {"mode": "developer"})
+            location = json.loads(get(base + "/api/primary-create-info"))
+            assert location["operation"] == "Row" and location["line"] > 0
+            post(base, new_token, "/api/stop", {})
         finally:
+            if new_token:
+                try:
+                    post(base, new_token, "/api/stop", {})
+                except (HTTPError, URLError, TimeoutError):
+                    pass
             stop_editor(process, base, token)
+        for _ in range(60):
+            try:
+                get(base + "/api/meta")
+            except (URLError, TimeoutError):
+                break
+            time.sleep(.25)
 
         project = root / "full-project"
         source_fixture(project)

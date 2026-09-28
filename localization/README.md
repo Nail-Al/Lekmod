@@ -13,11 +13,11 @@ The English column is the current Lekmod text. Optional **Vanilla EN** and **Van
 
 **Status:** `missing` means no approved translation; `stale` means English changed since approval and the game falls back to English; `applied` means the CSV text is in the project's generated XML; `saved` means XML generation is Off. Neither `applied` nor `saved` means the installed game was updated. Formatting tokens such as icons, colors, and `{1_Name}` must keep their names and counts; the editor checks them. Character counts are information, not a length limit. Notes stay in the CSV and do not appear in game.
 
-Use the filter icon for type/status/edit dates, the column icon to show columns, and drag a column's right edge to change its width. The table scrolls inside its own area. Column widths, visible columns per mode, page size, wrapping, language and other settings survive a normal editor update. If you change a row and navigate away, choose **Save and continue**, **Discard and continue**, or **Keep editing**. Undo/redo reverse saved edits from the current session; the trash icon discards only the current unsaved form. **Logs** lists actions and errors without recording passwords or translation text.
+Use the filter icon for type/status/edit dates, the column icon to show columns, and drag a column's right edge to change its width. **Done** saves column choices; **×** or Escape cancels them. The table scrolls inside its own area. Column widths, visible columns per mode, page size, wrapping, language and other settings survive a normal editor update. **Save and apply** becomes available only after you change the selected row. If you change a row and navigate away, choose **Save and continue**, **Discard and continue**, or **Keep editing**. Undo/redo reverse saved edits from the current session; the trash icon discards only the current unsaved form. **Logs** lists actions and redacted warnings/errors without recording passwords or translation text.
 
 ## Developer: English source and team handoff
 
-The canonical English text and operations are in `localization/en_US/primary.xml`. Its `Language_en_US` block in `LEKMOD/Override/CIV5Units_Mongol.xml` is generated and must not be edited directly. In **Developer** mode, select an English row, edit its text, or create a `TXT_KEY_*`. A new key must also be referenced by gameplay XML, SQL, or Lua before it appears in game. Changing English makes old approvals stale until reviewed. An editor user without Git can use **Exports → Download English source ZIP**; a maintainer must compare the included file with their current branch and merge only the intended changes.
+The canonical English text and operations are in `localization/en_US/primary.xml`. Its `Language_en_US` block in `LEKMOD/Override/CIV5Units_Mongol.xml` is generated and must not be edited directly. In **Developer** mode, select an English row and change its text or **Change TXT_KEY identifier**, then use the single **Save and apply** button. A rename is allowed only for a key with no gameplay references or approved translations; the text and ID are saved together. **Create new key** opens a separate form showing the destination file and insertion line. New IDs use `Row`; `Replace` is for existing game keys and cannot be selected for a new ID. A new key must also be referenced by gameplay XML, SQL, or Lua before it appears in game. Changing English makes old approvals stale until reviewed. An editor user without Git can use **Exports → Download English source ZIP**; a maintainer must compare the included file with their current branch and merge only the intended changes.
 
 Developers who prefer VS Code can edit `primary.xml` and `localization/translations/*.csv` in a **Git checkout**. After direct edits, run this from the repository root:
 
@@ -50,9 +50,33 @@ The full snapshot copies official game text. Keep it out of this public Git hist
 
 ### Completing the team baseline (maintainers)
 
-The current reference has EN and RU text; DE, ES, FR, IT, JA, KO, PL and ZH_HANT_HK are empty. First run `python -B localization/tools/collect_vanilla.py inspect --vanilla-db "<path to Localization-Merged.db>"` against an **unmodded** Civilization V cache. If a language already has at least 1,000 rows, capture it immediately; there is no need to switch Steam language for that one. For an empty language, switch it in **Steam → Civilization V → Properties → Language**, let Steam finish updating, launch the unmodded game once, then close it. Run `inspect` again to confirm that language is populated. Capture it with `python -B localization/tools/collect_vanilla.py capture --vanilla-db "<same database path>" --locale DE_DE`, replacing `DE_DE` as needed. Repeat for the eight languages. The collector saves separate files under ignored `localization/workspace/vanilla-captures/` and rejects a different English baseline, a missing language, too few rows, or Lekmod text.
+The current reference already contains English and Russian. Keep the full `localization/workspace/vanilla-snapshot.json.gz` beside these tools; do not remake English from a different game build. Close the game, keep its DLC unmodded, and work in a current Git checkout. In PowerShell, find the cache database (select the correct path if several are shown):
 
-After all eight captures, run `python -B localization/tools/collect_vanilla.py merge`. It creates **proposals** in `localization/workspace/`: a full `vanilla-snapshot-proposed.json.gz` and a text-free `vanilla-fingerprints-proposed.json.gz`. It refuses missing languages and never overwrites the current baseline. Review row counts and source consistency with the team. Then create the next encrypted archive without changing the current reference yet:
+```powershell
+Set-Location C:\Projects\Lekmod
+Get-ChildItem "$env:USERPROFILE\Documents\My Games" -Recurse -File `
+  -Filter Localization-Merged.db -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty FullName
+$mergedDatabase = 'C:\path\shown\above\Localization-Merged.db'
+py -3.13 -B .\localization\tools\collect_vanilla.py inspect --vanilla-db $mergedDatabase
+```
+
+Start with **English** in Steam and confirm `en_US` shows at least 1,000 rows and `matches baseline`. Russian is already pinned too; there is no new EN or RU capture to make. For each missing locale below, choose that language in **Steam Library → Civilization V → Properties → Language** (some Steam layouts put it under **General**), wait for any download, launch the **unmodded** game once, then close it. Run `inspect` again and confirm that locale has at least 1,000 rows and English still matches. If a locale was already populated in the clean cache, capture it without changing Steam language.
+
+| Steam language | `--locale` |
+| --- | --- |
+| German | `DE_DE` |
+| Spanish - Spain | `ES_ES` |
+| French | `FR_FR` |
+| Italian | `IT_IT` |
+| Japanese | `JA_JP` |
+| Korean | `KO_KR` |
+| Polish | `PL_PL` |
+| Traditional Chinese | `ZH_HANT_HK` |
+
+After each inspection, save **that one** language using `py -3.13 -B .\localization\tools\collect_vanilla.py capture --vanilla-db $mergedDatabase --locale DE_DE`, replacing `DE_DE` with its table code. The collector creates a separate ignored `localization/workspace/vanilla-captures/<locale>.json.gz` and refuses an existing filename, changed English, or an incomplete table. If it fails, resolve the reason; do not overwrite an earlier capture. Changing Steam language does not replace captures already saved in the workspace.
+
+After all eight captures, run `py -3.13 -B .\localization\tools\collect_vanilla.py merge`. It creates **proposals** in `localization/workspace/`: a full `vanilla-snapshot-proposed.json.gz` and a text-free `vanilla-fingerprints-proposed.json.gz`. It refuses missing languages and never overwrites the current baseline. Review the counts for all ten languages, then encrypt the proposed full snapshot without changing the current reference yet:
 
 ```powershell
 py -3.13 -B .\localization\tools\snapshot_cloud.py encrypt `
@@ -61,7 +85,7 @@ py -3.13 -B .\localization\tools\snapshot_cloud.py encrypt `
   --output .\localization\workspace\vanilla-snapshot-complete.enc
 ```
 
-Upload the new `.enc` and verify its link with `snapshot_cloud.py fetch --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz --url "<direct link>" --output .\localization\workspace\verified-proposal.json.gz`. Then replace the tracked fingerprint index with the reviewed proposal, install the proposed full snapshot locally, update the editor's team link if it changed, and release those changes together. Keep the old encrypted archive until collaborators have migrated. Ordinary translators only enter the team's link and password; they never need to switch game languages.
+Upload **only** the new `.enc` to Dropbox, copy its direct link (`dl=1`), and verify the download with `py -3.13 -B .\localization\tools\snapshot_cloud.py fetch --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz --url "<direct link>" --output .\localization\workspace\verified-proposal.json.gz`. Enter the password at the terminal prompt, never as a command argument. After team review, replace the tracked fingerprint index with the proposal, install the proposed full snapshot locally, update the editor's team link, and release those changes together. Keep the old encrypted archive until collaborators have migrated. Ordinary translators only enter the team's link and password; they never need to switch game languages.
 
 ## Updates and game test
 

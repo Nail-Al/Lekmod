@@ -11,7 +11,8 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from editor_server import (Editor, formatted_primary_text, matches_filters,
-                           page_slice, primary_text, require_fresh_translation_files)
+                           page_slice, primary_text, primary_creation_info,
+                           require_fresh_translation_files, safe_ui_event_detail)
 from lekmod_localization.common import CatalogError
 
 
@@ -41,6 +42,54 @@ class EditorViewTests(unittest.TestCase):
         self.assertTrue(replaced.endswith("\n\t\t"))
         self.assertEqual(primary_text(formatted_primary_text(raw, "First\nSecond")),
                          "First\nSecond")
+
+    def test_creation_location_matches_new_row_and_rejects_ambiguous_source(self):
+        document = "<GameData>\n\t<Language_en_US>\n\t</Language_en_US>\n</GameData>"
+        self.assertEqual(primary_creation_info(document), {
+            "source_file": "localization/en_US/primary.xml", "line": 3,
+            "operation": "Row"})
+        with self.assertRaisesRegex(CatalogError, "cannot locate"):
+            primary_creation_info(document.replace("</Language_en_US>", "</Other>"))
+        editor = object.__new__(Editor)
+        with patch.object(Editor, "require_developer"), \
+             self.assertRaisesRegex(CatalogError, "new English keys use Row"):
+            editor.create_primary({"key": "TXT_KEY_NEW", "text": "New text",
+                                   "operation": "Replace"})
+
+    def test_renaming_and_text_edit_are_one_validated_source_change(self):
+        """A Developer save must not rename an ID and silently drop text edits."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "LEKMOD").mkdir()
+            source = root / "localization/en_US/primary.xml"
+            source.parent.mkdir(parents=True)
+            source.write_text('<GameData>\n\t<Language_en_US>\n\t\t<Row Tag="TXT_KEY_OLD">\n'
+                              '\t\t\t<Text>Before</Text>\n\t\t</Row>\n'
+                              '\t</Language_en_US>\n</GameData>',
+                              encoding="utf-8")
+            editor = object.__new__(Editor)
+            with patch("editor_server.REPO_ROOT", root), \
+                 patch("editor_server.sync_primary_english.DEFAULT_ENGLISH", source), \
+                 patch("editor_server.read_reference", return_value={"english": {}}), \
+                 patch.object(Editor, "require_developer"), \
+                 patch.object(Editor, "manifest", return_value={"locales": {}}), \
+                 patch.object(Editor, "_save_structure", side_effect=lambda before, after, key: after):
+                data = {"index": 0, "key": "TXT_KEY_OLD", "new_key": "TXT_KEY_NEW",
+                        "old_text": "Before", "text": "After & later"}
+                updated = editor.rename_primary(data)
+                self.assertIn('Tag="TXT_KEY_NEW"', updated)
+                self.assertIn('<Text>After &amp; later</Text>', updated)
+                with self.assertRaisesRegex(CatalogError, "changed; reload"):
+                    editor.rename_primary({**data, "old_text": "Outdated"})
+
+    def test_warning_log_scrubs_links_paths_and_secrets(self):
+        detail = safe_ui_event_detail(
+            "Download failed at https://example.org/private?token=abc "
+            "C:\\Users\\Neil\\secret.txt password=correct-horse")
+        self.assertNotIn("example.org", detail)
+        self.assertNotIn("Users", detail)
+        self.assertNotIn("correct-horse", detail)
+        self.assertIn("Download failed", detail)
 
     def test_filters_and_paging_use_selected_rows_and_inclusive_dates(self):
         row = {"classification": "vanilla_modified", "translation_status": "stale",

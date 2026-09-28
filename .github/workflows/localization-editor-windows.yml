@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install "pyinstaller==6.22.3" "cryptography>=45,<47"
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools localization/tools/editor_main.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools --add-data "localization/editor/favicon.svg;." localization/tools/editor_main.py
       - name: Package contributor files
         shell: pwsh
         run: |
@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force dist/previous, dist/published | Out-Null
-          gh release download editor-v0.9 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
+          gh release download editor-v0.10 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published

@@ -57,6 +57,8 @@ from snapshot_cloud import decrypt_snapshot, download_encrypted, encrypt_snapsho
 
 PAGE = APP_HOME / "localization" / "editor" / "index.html"
 SCRIPT = APP_HOME / "localization" / "editor" / "app.js"
+FAVICON = (Path(sys._MEIPASS) / "favicon.svg" if getattr(sys, "frozen", False)
+           else APP_HOME / "localization" / "editor" / "favicon.svg")
 LOG = logging.getLogger("lekmod.editor")
 TRANSLATIONS = REPO_ROOT / "localization" / "translations"
 APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at")
@@ -66,6 +68,17 @@ OPERATIONS = re.compile(
 )
 TAG = re.compile(r'\bTag="(TXT_KEY_[A-Za-z0-9_]+)"')
 TEXT = re.compile(r"<Text>(.*?)</Text>", re.DOTALL)
+
+
+def safe_ui_event_detail(detail: str) -> str:
+    """Keep useful warning context while excluding links, paths and secrets."""
+    if not isinstance(detail, str) or len(detail) > 500:
+        raise CatalogError("invalid interface event detail")
+    detail = re.sub(r"[\r\n\t]+", " ", detail)
+    detail = re.sub(r"(?i)\b(?:https?://|file://)\S+", "[link]", detail)
+    detail = re.sub(r"(?i)\b[A-Z]:[\\/]\S+|(?<!\w)/(?:[^\s/]+/)+[^\s]*", "[path]", detail)
+    detail = re.sub(r"(?i)\b(password|secret|token)\s*[:=]\s*\S+", r"\1=[redacted]", detail)
+    return detail[:240]
 
 
 def csv_rows(path: Path) -> list[dict[str, str]]:
@@ -127,6 +140,16 @@ def primary_operations(document: str) -> list[dict]:
             "text_end": match.start("body") + value.end(1),
         })
     return result
+
+
+def primary_creation_info(document: str) -> dict[str, str | int]:
+    """Describe the exact insertion point for a new English Row."""
+    closing = "\t</Language_en_US>"
+    if document.count(closing) != 1:
+        raise CatalogError("cannot locate the end of the primary English table")
+    return {"source_file": "localization/en_US/primary.xml",
+            "line": document.count("\n", 0, document.index(closing)) + 1,
+            "operation": "Row"}
 
 
 def primary_text(value: str) -> str:
@@ -241,6 +264,7 @@ class Editor:
             except (OSError, ValueError):
                 pass
         self.actions: list[dict] = []
+        self.instance_id = secrets.token_hex(16)
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
         self.update_state: dict = {"state": "idle"}
@@ -365,6 +389,7 @@ class Editor:
             "connection_error": self.connection_error,
             "project": self.project_info,
             "editor_version": editor_manifest()["version"],
+            "server_instance": self.instance_id,
             "update_notice": next((item for item in reversed(self.events)
                                    if item.get("action") == "editor-update-install"), None),
             "included_source": REPO_ROOT == APP_HOME,
@@ -837,7 +862,10 @@ class Editor:
         """Add a text key; gameplay entity references remain a developer task."""
         self.require_developer()
         key, value = data.get("key"), data.get("text")
-        if not isinstance(key, str) or not KEY_RE.fullmatch(key) or not isinstance(value, str):
+        if data.get("operation", "Row") != "Row":
+            raise CatalogError("new English keys use Row; Replace is for an existing game key")
+        if (not isinstance(key, str) or not KEY_RE.fullmatch(key) or
+            not isinstance(value, str) or not value.strip()):
             raise CatalogError("enter a TXT_KEY_* identifier and English text")
         if len(value) > 200000:
             raise CatalogError("English text is too large for this editor")
@@ -850,12 +878,17 @@ class Editor:
                 key in path.read_text(encoding="utf-8", errors="ignore")
             ):
                 raise CatalogError(f"key already exists in {path.relative_to(REPO_ROOT)}")
+        primary_creation_info(before)
         closing = "\t</Language_en_US>"
-        if before.count(closing) != 1:
-            raise CatalogError("cannot locate the end of the primary English table")
         operation = (f'\t\t<Row Tag="{key}">\n\t\t\t<Text>{escape(value)}</Text>\n'
                      "\t\t</Row>\n")
         return self._save_structure(before, before.replace(closing, operation + closing, 1), key)
+
+    def creation_info(self) -> dict[str, str | int]:
+        """Show the destination computed from the current source, not stale UI rows."""
+        self.require_developer()
+        source = sync_primary_english.DEFAULT_ENGLISH
+        return primary_creation_info(source.read_text(encoding="utf-8"))
 
     def rename_primary(self, data: dict) -> dict:
         """Rename only an unreferenced key; changing a live ID needs a migration."""
@@ -883,10 +916,20 @@ class Editor:
                 raise CatalogError(f"key is referenced in {path.relative_to(REPO_ROOT)}; "
                                    "update gameplay references in a reviewed migration")
         row = rows[index]
+        if "text" in data:
+            new_text = data["text"]
+            if (not isinstance(new_text, str) or len(new_text) > 200000 or
+                data.get("old_text") != primary_text(row["text"])):
+                raise CatalogError("primary row changed; reload before saving")
+        else:
+            new_text = primary_text(row["text"])
         prefix = before[:row["start"]]
         body = before[row["start"]:row["text_end"]]
         if body.count(f'Tag="{old}"') != 1:
             raise CatalogError("cannot identify a unique Tag attribute")
+        start = row["text_start"] - row["start"]
+        end = row["text_end"] - row["start"]
+        body = body[:start] + formatted_primary_text(row["text"], new_text) + body[end:]
         after = prefix + body.replace(f'Tag="{old}"', f'Tag="{new}"', 1) + before[row["text_end"]:]
         return self._save_structure(before, after, new)
 
@@ -985,6 +1028,16 @@ class Editor:
 def make_handler(editor: Editor, token: str, port: int):
     """Bind HTTP endpoints to this one private editor instance."""
     class Handler(BaseHTTPRequestHandler):
+        def download_inline_svg(self, data: bytes) -> None:
+            """Serve the static favicon from the packaged editor folder."""
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def respond(self, status: int, payload: object) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -1029,6 +1082,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+                elif url.path == "/favicon.svg":
+                    self.download_inline_svg(FAVICON.read_bytes())
                 elif url.path == "/api/meta":
                     self.respond(200, editor.metadata())
                 elif url.path == "/api/logs":
@@ -1064,6 +1119,8 @@ def make_handler(editor: Editor, token: str, port: int):
                                ("kind", "date_field", "date_from", "date_to")}
                     self.respond(200, editor.primary(one("q"), int(one("offset", "0")),
                                                      one("limit", "100"), filters))
+                elif url.path == "/api/primary-create-info":
+                    self.respond(200, editor.creation_info())
                 elif url.path == "/api/history":
                     self.respond(200, editor.history(
                         key=one("key") if "key" in args else None,
@@ -1176,9 +1233,11 @@ def make_handler(editor: Editor, token: str, port: int):
                                     "columns-changed", "page-changed", "prefill-changed",
                                     "logs-open", "logs-download", "copy", "wrap-changed",
                                     "translation-export", "english-export", "xml-export", "update-check",
-                                    "filter-changed", "page-size-changed", "discard"}:
+                                    "filter-changed", "page-size-changed", "discard",
+                                    "ui-error", "ui-warning", "project-reconnect", "key-dialog"}:
                         raise CatalogError("unknown interface action")
-                    editor.record_event(name, "ui")
+                    detail = safe_ui_event_detail(data.get("detail", ""))
+                    editor.record_event(name, "ui" + (": " + detail if detail else ""))
                     result = {"logged": True}
                 elif self.path == "/api/browse":
                     if data.get("kind") not in ("project", "game"):
@@ -1193,7 +1252,9 @@ def make_handler(editor: Editor, token: str, port: int):
                         dialog.update()
                         result = {"path": filedialog.askdirectory(
                             title="Select Lekmod project" if data["kind"] == "project"
-                            else "Select Civilization V installation", parent=dialog)}
+                            else "Select Civilization V installation", parent=dialog,
+                            initialdir=str(APP_HOME.parent if data["kind"] == "project"
+                                           else APP_HOME))}
                     finally:
                         dialog.destroy()
                 elif self.path == "/api/apply-game":
@@ -1290,12 +1351,12 @@ def main() -> int:
         server.server_close()
     if getattr(server, "restart_requested", False):
         if getattr(sys, "frozen", False):
-            command = [sys.executable, "--port", str(server.server_port)]
+            command = [sys.executable, "--port", str(server.server_port), "--no-browser"]
             environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         else:
             command = [sys.executable, "-B", str(APP_HOME / "localization/tools/editor_server.py"),
-                       "--port", str(server.server_port)]
+                       "--port", str(server.server_port), "--no-browser"]
             environment = os.environ.copy()
             flags = 0
         subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags,
