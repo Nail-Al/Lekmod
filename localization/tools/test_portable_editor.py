@@ -90,7 +90,7 @@ def stop_editor(process: subprocess.Popen, base: str, token: str) -> None:
     if process.poll() is None:
         try:
             post(base, token, "/api/stop", {})
-        except (URLError, TimeoutError):
+        except OSError:
             pass
     try:
         process.wait(timeout=12)
@@ -101,6 +101,22 @@ def stop_editor(process: subprocess.Popen, base: str, token: str) -> None:
         else:
             process.terminate()
         process.wait(timeout=10)
+
+
+def stop_restarted_editor(base: str, token: str) -> None:
+    """Stop the detached replacement, allowing a reset during Windows shutdown."""
+    for _ in range(60):
+        try:
+            post(base, token, "/api/stop", {})
+        except OSError:
+            # Windows can reset the last HTTP request as the EXE exits.
+            pass
+        time.sleep(.25)
+        try:
+            get(base + "/api/meta")
+        except OSError:
+            return
+    raise RuntimeError("replacement editor did not close its localhost port")
 
 
 def main() -> int:
@@ -167,14 +183,12 @@ def main() -> int:
             post(base, new_token, "/api/preferences", {"mode": "developer"})
             location = json.loads(get(base + "/api/primary-create-info"))
             assert location["operation"] == "Row" and location["line"] > 0
-            post(base, new_token, "/api/stop", {})
         finally:
-            if new_token:
-                try:
-                    post(base, new_token, "/api/stop", {})
-                except (HTTPError, URLError, TimeoutError):
-                    pass
-            stop_editor(process, base, token)
+            try:
+                if new_token:
+                    stop_restarted_editor(base, new_token)
+            finally:
+                stop_editor(process, base, token)
         for _ in range(60):
             try:
                 get(base + "/api/meta")
