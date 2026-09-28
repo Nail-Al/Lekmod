@@ -57,8 +57,8 @@ def source_fixture(destination: Path) -> None:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPOSITORY / name, target)
-    (destination / "LEKMOD/Lua/tmp").mkdir(parents=True)
-    (destination / "localization/tools/tests").mkdir(parents=True)
+    (destination / "LEKMOD/Lua/tmp").mkdir(parents=True, exist_ok=True)
+    (destination / "localization/tools/tests").mkdir(parents=True, exist_ok=True)
 
 
 def start_editor(root: Path, port: int, log: Path) -> tuple[subprocess.Popen, str, str]:
