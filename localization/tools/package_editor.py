@@ -29,9 +29,10 @@ START = """Lekmod Localization Editor for Windows
    share a verified snapshot, use Vanilla reference > Encrypt and download
    .enc; the EXE needs no Python installation for this operation.
 6. For future editor versions, use Settings > Editor updates > Check latest
-   version > Download and update. The app shows download progress and reloads
-   this tab after confirming the new EXE is serving its actual version.
-   Settings, projects and the snapshot stay in place.
+   version > Download and update. The wrench button checks app files against
+   the published release; Fix version repairs missing or changed app files.
+   The app shows download progress and reloads this tab after checking the
+   new EXE. Saved translations, settings, projects and the snapshot remain.
    A legacy EXE with a broken updater can be repaired once from a current
    project checkout with localization/tools/repair_editor.py --editor-root
    "<folder containing your old LekmodLocalizationEditor.exe>". Close the

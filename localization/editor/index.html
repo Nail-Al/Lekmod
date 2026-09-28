@@ -70,7 +70,15 @@
     .nowrap .cell-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .copy { border: none; background: transparent; padding: 1px 3px; font-size: .87rem; opacity: .65; }
     .copy:hover { opacity: 1; }
-    .panel { flex: 0 1 auto; max-height: 39vh; min-height: 100px; min-width: 0; overflow: auto; padding: 12px; display: grid; gap: 8px; }
+    .panel { flex: 0 1 auto; max-height: 39vh; min-height: 100px; min-width: 0; overflow: auto; padding: 12px; }
+    .panel:not([open]) { flex: none; max-height: none; min-height: 0; }
+    .panel:not([open]) .panel-content { display: none; }
+    .panel summary { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      cursor: pointer; list-style: none; font-weight: 650; font-size: 1.05rem; }
+    .panel summary::-webkit-details-marker { display: none; }
+    .panel summary::after { content: "▾"; font-size: 1.1rem; }
+    .panel[open] summary::after { content: "▴"; }
+    .panel-content { display: grid; gap: 8px; padding-top: 8px; }
     h2 { font-size: 1.05rem; margin: 0; }
     p { margin: 0; }
     .hint { font-size: .85rem; color: #5c6e82; }
@@ -89,7 +97,7 @@
     .column-choice:hover { background: #eaf2fb; }
     .column-choice:has(input:disabled) { color: #697788; }
     .quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-    .panel > .quick { border-top: 1px solid var(--divider); padding-top: 13px; margin-top: 4px; }
+    .panel-content > .quick { border-top: 1px solid var(--divider); padding-top: 13px; margin-top: 4px; }
     #message { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .tokens { display: flex; flex-wrap: wrap; gap: 5px; }
     .tokens button { border-radius: 4px; background: #e6eef8; padding: 3px 6px; font: .86rem ui-monospace, monospace; }
@@ -217,8 +225,9 @@
         <div id="table-loading" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span>Loading rows…</div>
       </div>
     </section>
-    <section class="panel card">
-      <h2 id="selected">Select a row</h2>
+    <details id="row-panel" class="panel card" open>
+      <summary id="selected">Select a row</summary>
+      <div class="panel-content">
       <p id="context" class="hint"></p>
       <div id="token-help" hidden>
         <p class="hint">Keep these formatting tokens exactly as shown. Icons and colors work in game; you may translate the words around them.</p>
@@ -245,7 +254,8 @@
         <button id="exports-button">Exports…</button>
       </div>
       <p id="message" role="status"></p>
-    </section>
+      </div>
+    </details>
   </div>
   <section id="logs-view" class="card" hidden><div class="quick"><h2>Action log</h2><button id="logs-back">Back to editor</button><button id="logs-download">Download log</button></div><p class="hint">Actions and errors are recorded locally. Text, passwords, and snapshot contents are excluded.</p><pre id="logs-list"></pre></section>
 </main>
@@ -289,7 +299,7 @@
     <div class="settings-group editor-update-group"><h2>Editor updates</h2>
       <p id="update-failure" class="section-status error" role="alert" hidden></p>
       <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
-      <div class="row"><button id="update-check" class="icon-control" title="Check latest editor version" aria-label="Check latest editor version">⟳</button><button id="update-install" disabled>Download and update editor</button></div>
+      <div class="row"><button id="update-check" class="icon-control" title="Check latest editor version" aria-label="Check latest editor version">⟳</button><button id="update-install" disabled>Download and update editor</button><button id="update-verify" class="icon-control" title="Verify editor files against the published release" aria-label="Verify editor files against the published release"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3a6 6 0 0 1-7.7 7.7l-7.6 7.6a2 2 0 0 1-2.8-2.8l7.6-7.6A6 6 0 0 1 18 1l-3.2 3.2 3 3z"/></svg></button></div>
     </div>
     <div class="foot"><button id="editor-quit" class="exit" title="Stop the editor running in the background">Quit editor</button><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
   </section>

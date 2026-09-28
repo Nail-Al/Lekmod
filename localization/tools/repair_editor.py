@@ -1,7 +1,7 @@
-"""Repair a legacy Windows editor in place without downloading a ZIP manually.
+"""Repair a Windows editor in place without downloading a ZIP manually.
 
-This is a one-time bootstrap for executables whose built-in updater cannot be
-changed retroactively. Close the old editor before running it from a fresh
+Use this when the executable's UI is damaged or the built-in updater cannot be
+changed retroactively. Close the old editor before running it from a current
 localization project checkout. Subsequent releases update in the editor UI.
 """
 
@@ -14,7 +14,9 @@ import subprocess
 import sys
 
 from lekmod_localization.connections import editor_manifest
-from lekmod_localization.editor_update import latest_release, stage_release, installer_command
+from lekmod_localization.editor_update import (
+    latest_release, stage_release, installer_command, verify_installation,
+)
 
 
 def main() -> int:
@@ -29,18 +31,23 @@ def main() -> int:
     if not (root / "LekmodLocalizationEditor.exe").is_file():
         parser.error("select the folder containing LekmodLocalizationEditor.exe")
     try:
-        current = editor_manifest(root)["version"]
-        release = latest_release(root)
-        if not release["available"]:
-            print(f"Editor v{current} is already current; no repair needed.")
+        try:
+            current = editor_manifest(root)["version"]
+        except (OSError, ValueError):
+            current = None
+        release = latest_release(root) if current else latest_release()
+        integrity = verify_installation(root) if current else None
+        repair = not integrity or bool(integrity["damaged_files"])
+        if not release["available"] and not repair:
+            print(f"Editor v{current} is current and its files are verified.")
             return 0
         print(f"Downloading and verifying editor v{release['latest']} for {root}...", flush=True)
         release["can_auto_update"] = True
-        stage = stage_release(release, root)
-        result = subprocess.run(installer_command(stage, root, 0), cwd=stage,
+        stage = stage_release(release, root, repair=repair)
+        result = subprocess.run(installer_command(stage, root, 0, repair=repair), cwd=stage,
             env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=180,
+            stderr=subprocess.DEVNULL, timeout=240,
             creationflags=subprocess.CREATE_NO_WINDOW)
         if result.returncode:
             log = root / "localization/workspace/editor-updates/update.log"

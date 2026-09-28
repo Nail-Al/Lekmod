@@ -20,6 +20,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--old-archive", type=Path, required=True)
     parser.add_argument("--new-archive", type=Path, required=True)
+    parser.add_argument("--test-repair", action="store_true")
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("run the online upgrade test on Windows")
@@ -39,6 +40,12 @@ def main() -> int:
         workspace.mkdir(parents=True)
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
         (workspace / "vanilla-snapshot.json.gz").write_bytes(b"private snapshot fixture")
+        translation = root / "localization/translations/RU_RU.csv"
+        translation.parent.mkdir(parents=True)
+        translation.write_text("saved translation from the old editor", encoding="utf-8")
+        english = root / "localization/en_US/primary.xml"
+        english.parent.mkdir(parents=True)
+        english.write_text("saved English source", encoding="utf-8")
         old, base, _ = start(root)
         previous = json.loads((root / "localization/editor/version.json").read_text())["version"]
         wait_for(base, previous)
@@ -80,6 +87,8 @@ def main() -> int:
         for name, expected in expected_ui.items():
             assert (root / name).read_bytes() == expected, f"editor kept an old {name}"
         assert (workspace / "vanilla-snapshot.json.gz").read_bytes() == b"private snapshot fixture"
+        assert translation.read_text(encoding="utf-8") == "saved translation from the old editor"
+        assert english.read_text(encoding="utf-8") == "saved English source"
         # The new server may answer /api/meta before the helper records success.
         log = workspace / "editor-updates/update.log"
         for _ in range(40):
@@ -90,6 +99,56 @@ def main() -> int:
         else:
             raise RuntimeError("The helper reopened the editor without confirming the update: "
                                + details[-2000:])
+        if args.test_repair:
+            old_instance = metadata["server_instance"]
+            readme = root / "README-START.txt"
+            readme.write_text("damaged", encoding="utf-8")
+            request = Request(base + "/api/editor-verify", data=b"{}", headers={
+                "Origin": base, "X-Editor-Token": token_at(base),
+                "Content-Type": "application/json"})
+            with urlopen(request, timeout=15) as response:
+                assert response.status == 202
+            for _ in range(900):
+                with urlopen(base + "/api/editor-verify-status", timeout=15) as response:
+                    integrity = json.load(response)
+                if integrity["state"] == "complete":
+                    break
+                if integrity["state"] == "error":
+                    raise RuntimeError("Editor file verification failed: " + integrity["error"])
+                time.sleep(.2)
+            else:
+                raise RuntimeError("Editor file verification did not finish")
+            assert integrity["damaged_files"] == ["README-START.txt"]
+            assert not integrity["available"] and integrity["current"] == version
+            request = Request(base + "/api/editor-update", data=b'{"repair":true}', headers={
+                "Origin": base, "X-Editor-Token": token_at(base),
+                "Content-Type": "application/json"})
+            with urlopen(request, timeout=15) as response:
+                assert response.status == 202
+            for _ in range(720):
+                try:
+                    with urlopen(base + "/api/health", timeout=3) as response:
+                        health = json.load(response)
+                    if health["server_instance"] != old_instance:
+                        break
+                except (URLError, TimeoutError, ConnectionError):
+                    pass
+                time.sleep(.25)
+            else:
+                raise RuntimeError("Same-version repair did not reopen the editor")
+            with zipfile.ZipFile(args.new_archive) as archive:
+                assert readme.read_bytes() == archive.read("README-START.txt")
+            assert translation.read_text(encoding="utf-8") == "saved translation from the old editor"
+            assert english.read_text(encoding="utf-8") == "saved English source"
+            assert (workspace / "vanilla-snapshot.json.gz").read_bytes() == b"private snapshot fixture"
+            assert json.loads((workspace / "editor-settings.json").read_text()) == preferences
+            for _ in range(40):
+                if details.count(f"success  Installed v{version}") >= 2:
+                    break
+                time.sleep(.25)
+                details = log.read_text(encoding="utf-8")
+            else:
+                raise RuntimeError("Repair restarted without confirming all editor files: " + details[-2000:])
         stop(base, token_at(base))
         old.wait(timeout=20)
     print(f"Editor v{previous} downloaded v{version} from GitHub and reopened the same tab.")

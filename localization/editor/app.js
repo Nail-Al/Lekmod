@@ -17,7 +17,7 @@ const developerColumns = [["key", "Key"], ["kind", "Operation"],
   ["english_edited_at", "English edited"], ["source_file", "Source file"],
   ["source_line", "Line"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
-  "lekmod_en_US", "lekmod_target", "text"]);
+  "lekmod_en_US", "lekmod_target", "text", "source_file"]);
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
 let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
@@ -25,6 +25,7 @@ let inLogs = false;
 let downloadTimer;
 let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "";
 let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
+let editorUpdateInstance = "", editorIntegrity = null, latestEditorInfo = null;
 let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
 let pendingColumns = null;
 let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
@@ -446,17 +447,9 @@ function selectRow(row, tr) {
 async function load() {
   if (!meta.ready) return;
   const sequence = ++requestId;
-  chosen = null;
-  savedDraft = null;
+  clearSelection();
   el("table-loading").hidden = false;
   el("table-scroll").setAttribute("aria-busy", "true");
-  el("save").disabled = true;
-  el("discard").disabled = true;
-  el("identifier").disabled = true;
-  el("translation").disabled = true;
-  for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
-    el(field).disabled = true;
-  el("selected").textContent = "Select a row";
   const args = new URLSearchParams({q: el("search-input").value, offset,
     limit: pageSize(), kind: filters.kind, date_field: filters.date_field,
     date_from: filters.date_from, date_to: filters.date_to});
@@ -482,6 +475,27 @@ async function load() {
       el("table-scroll").removeAttribute("aria-busy");
     }
   }
+}
+function clearSelection() {
+  chosen = null;
+  savedDraft = null;
+  el("selected").textContent = "Select a row";
+  el("context").textContent = "";
+  el("tokens").replaceChildren();
+  el("token-help").hidden = true;
+  el("translation").value = "";
+  el("identifier").value = "";
+  el("note").value = "";
+  el("save").disabled = true;
+  el("discard").disabled = true;
+  el("identifier").disabled = true;
+  el("translation").disabled = true;
+  for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
+    el(field).disabled = true;
+  setGrammar("gender", "");
+  setGrammar("plurality", "");
+  document.querySelectorAll("tbody tr.selected").forEach(row => row.classList.remove("selected"));
+  countText();
 }
 function fillSettings() {
   el("project-path").value = prefs.project_path;
@@ -555,6 +569,7 @@ async function refresh() {
   meta = await api("/api/meta");
   el("app-loading").hidden = true;
   prefs = meta.preferences;
+  el("row-panel").open = prefs.panel_expanded !== false;
   locales = meta.locales;
   widths = {...prefs.column_widths};
   el("wrap").checked = prefs.wrap;
@@ -591,6 +606,11 @@ el("settings-button").addEventListener("click", () => {
     logUI("settings-open");
     el("settings-dialog").showModal(); fillSettings();
   });
+});
+el("row-panel").addEventListener("toggle", async () => {
+  if (!prefs || prefs.panel_expanded === el("row-panel").open) return;
+  try { await preference({panel_expanded: el("row-panel").open}); }
+  catch (error) { message(error.message, true); }
 });
 el("settings-close").addEventListener("click", () => el("settings-dialog").close());
 el("editor-quit").addEventListener("click", () => guardNavigation(async () => {
@@ -1100,24 +1120,89 @@ async function checkLatest() {
   el("update-status").textContent = "Checking published releases…";
   try {
     const info = await api("/api/editor-latest");
+    latestEditorInfo = info;
     el("update-link").href = info.release_url;
     el("update-link").hidden = false;
-    el("update-status").textContent = info.available
-      ? "Editor v" + info.latest + " is available (current v" + info.current + ")."
-      : "Editor v" + info.current + " is up to date.";
-    el("update-install").disabled = editorUpdateLocked || !info.available || !info.can_auto_update;
+    showEditorVersionStatus();
     el("update-badge").hidden = !info.available;
     if (info.available && !info.can_auto_update)
       el("update-status").textContent += " Source checkouts update with Git.";
   } catch (error) { el("update-status").textContent = "Update check unavailable: " + error.message; }
   finally { el("update-status").classList.remove("busy-inline"); }
 }
+function showEditorVersionStatus() {
+  const info = latestEditorInfo || editorIntegrity;
+  if (!info) return;
+  const broken = editorIntegrity?.current === info.current && editorIntegrity.damaged_files.length > 0;
+  const action = el("update-install");
+  el("update-status").parentElement.classList.toggle("warning", broken);
+  action.textContent = broken ? "Fix version" : "Download and update editor";
+  action.disabled = editorUpdateLocked || !info.can_auto_update || (!broken && !info.available);
+  if (broken) {
+    el("update-status").textContent = "Editor v" + info.current + " has " +
+      editorIntegrity.damaged_files.length + " changed or missing app file(s): " +
+      editorIntegrity.damaged_files.join(", ") + ". Fix version installs v" + info.latest +
+      "; projects and translations stay in place.";
+  } else if (info.available) {
+    el("update-status").textContent = "Editor v" + info.latest +
+      " is available (current v" + info.current + ")." +
+      (editorIntegrity?.verified ? " Installed v" + info.current + " files verified." : "");
+  } else {
+    el("update-status").textContent = "Editor v" + info.current +
+      (editorIntegrity?.verified ? " files verified. Up to date." : " is up to date.");
+  }
+}
+async function verifyEditorFiles() {
+  logUI("update-verify");
+  const button = el("update-verify");
+  button.disabled = true;
+  button.classList.add("busy-action");
+  el("update-install").disabled = true;
+  el("update-failure").hidden = true;
+  el("update-status").classList.add("busy-inline");
+  el("update-status").textContent = "Downloading the published editor files for comparison…";
+  try {
+    await api("/api/editor-verify", {});
+    for (;;) {
+      const state = await api("/api/editor-verify-status");
+      if (state.state === "complete") {
+        editorIntegrity = state;
+        if (!latestEditorInfo || latestEditorInfo.current !== state.current ||
+            latestEditorInfo.latest !== state.latest) {
+          latestEditorInfo = {...state};
+        }
+        showEditorVersionStatus();
+        message(state.verified ? "Editor files match the published release." :
+          "Some editor files differ. Use Fix version to restore them.", !state.verified);
+        break;
+      }
+      if (state.state === "error") throw new Error(state.error);
+      const amount = state.total ? " of " + (state.total / 1048576).toFixed(1) : "";
+      el("update-status").textContent = "Verifying editor files: " +
+        ((state.bytes || 0) / 1048576).toFixed(1) + amount + " MB downloaded…";
+      await new Promise(resolve => setTimeout(resolve, 450));
+    }
+  } catch (error) {
+    editorIntegrity = null;
+    el("update-status").parentElement.classList.add("warning");
+    el("update-status").textContent = "File check failed: " + error.message;
+    el("update-install").textContent = "Download and update editor";
+    el("update-install").disabled = !latestEditorInfo?.available || !latestEditorInfo.can_auto_update;
+    message("Editor file check failed: " + error.message, true);
+  } finally {
+    button.classList.remove("busy-action");
+    button.disabled = editorUpdateLocked;
+    el("update-status").classList.remove("busy-inline");
+  }
+}
 el("update-check").addEventListener("click", checkLatest);
+el("update-verify").addEventListener("click", verifyEditorFiles);
 async function followEditorUpdate() {
   if (!editorUpdateStarted) return;
   try {
     const live = await api("/api/meta");
-    if (live.editor_version === editorUpdateVersion ||
+    if ((live.editor_version === editorUpdateVersion &&
+         live.server_instance !== editorUpdateInstance) ||
         (live.update_notice?.result === "failure" &&
          Date.parse(live.update_notice.at) > editorUpdateStarted)) {
       location.reload();
@@ -1141,20 +1226,22 @@ async function followEditorUpdate() {
   } catch (_) {
     el("update-status").textContent = "The editor is restarting. This page will reconnect automatically…";
   }
-  if (Date.now() - editorUpdateStarted > 180000) {
+  if (Date.now() - editorUpdateStarted > 210000) {
     editorUpdateFailed("The editor did not reopen. Double-click its EXE to retry.");
     return;
   }
   editorUpdateTimer = setTimeout(followEditorUpdate, 700);
 }
 async function startEditorUpdate() {
+  const repair = !!editorIntegrity?.damaged_files.length;
+  editorUpdateInstance = meta.server_instance;
   setEditorUpdateLock(true);
   el("update-failure").hidden = true;
   el("update-status").classList.add("busy-inline");
   el("update-status").textContent = "Checking editor release…";
   try {
     editorUpdateVersion = (await api("/api/editor-latest")).latest;
-    await api("/api/editor-update", {});
+    await api("/api/editor-update", {repair});
     editorUpdateStarted = Date.now();
     clearTimeout(editorUpdateTimer);
     followEditorUpdate();

@@ -138,6 +138,9 @@ def main() -> int:
         new_token = None
         try:
             meta = json.loads(get(base + "/api/meta"))
+            health = json.loads(get(base + "/api/health"))
+            assert health["editor_version"] == meta["editor_version"]
+            assert health["server_instance"] == meta["server_instance"]
             assert not meta["ready"] and not meta["locales"]
             initial_html = get(base + "/")
             assert b'id="snapshot-encrypt"' in initial_html

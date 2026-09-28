@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.error import URLError
 import unittest
 from unittest.mock import patch, Mock
 from urllib.request import Request, urlopen
@@ -18,10 +19,89 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
     UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
+    _wait_ready, verify_installation,
 )
 
 
 class UpdateTests(unittest.TestCase):
+    def test_verification_and_same_version_repair_stage_exclude_translations(self):
+        """Damaged application files are found; all personal files stay untouched."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            manifest = json.dumps({"version": "0.13", "release_tag": "editor-v0.13",
+                                   "compatible_releases": ["v35.3"]}).encode()
+            expected = {name: (manifest if name.endswith("version.json") else b"published file")
+                        for name in UPDATE_FILES}
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                for name, content in expected.items():
+                    archive.writestr(name, content)
+            data = stream.getvalue()
+            for name, content in expected.items():
+                target = home / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            # These files may live beside the portable editor or in its workspace.
+            personal = {"localization/translations/RU_RU.csv": b"my saved Russian text",
+                        "localization/en_US/primary.xml": b"developer English text",
+                        "localization/workspace/vanilla-snapshot.json.gz": b"private reference",
+                        "localization/workspace/projects/v35.3/localization/translations/RU_RU.csv":
+                            b"another contributor's translation"}
+            for name, content in personal.items():
+                path = home / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            (home / "localization/editor/app.js").write_bytes(b"corrupted UI")
+            (home / "README-START.txt").unlink()
+            release = {"current": "0.13", "latest": "0.13", "available": False,
+                       "can_auto_update": True,
+                       "download_url": "https://github.com/Nail-Al/Lekmod/releases/download/editor-v0.13/"
+                                       "LekmodLocalizationEditor-Windows.zip",
+                       "digest": "sha256:" + sha256(data).hexdigest()}
+            with patch("lekmod_localization.editor_update.latest_release", return_value=release), \
+                 patch("lekmod_localization.editor_update._download", return_value=data):
+                report = verify_installation(home)
+                self.assertEqual(report["damaged_files"],
+                                 ["README-START.txt", "localization/editor/app.js"])
+                stage = stage_release(release, home, repair=True)
+            self.assertEqual((stage / "localization/editor/app.js").read_bytes(),
+                             expected["localization/editor/app.js"])
+            self.assertEqual((home / "localization/editor/app.js").read_bytes(), b"corrupted UI")
+            for name, content in personal.items():
+                self.assertEqual((home / name).read_bytes(), content)
+
+    def test_slow_new_editor_can_open_after_old_sixty_second_limit(self):
+        """A cold first launch beyond a minute must not trigger rollback."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            marker = home / "localization/workspace/editor-updates/ready-slow.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"ticket": "slow", "port": 51234, "pid": 1234}))
+            clock = [0.0]
+
+            def respond(request, *, timeout):
+                if clock[0] < 65:
+                    raise URLError("editor is still opening")
+                if request.endswith("/api/health"):
+                    return io.BytesIO(b'{"editor_version":"0.13"}')
+                if request.endswith("/app.js"):
+                    return io.BytesIO(b"function renderTable() {}")
+                return io.BytesIO(b"Lekmod Localization Editor")
+
+            fake_time = Mock(monotonic=lambda: clock[0],
+                             sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+            process = Mock()
+            process.poll.return_value = None
+            with patch("lekmod_localization.editor_update.time", fake_time), \
+                 patch("lekmod_localization.editor_update._pid_alive", return_value=True), \
+                 patch("lekmod_localization.editor_update.urllib.request.urlopen", side_effect=respond):
+                signal = _wait_ready(home, "slow", "0.13", process)
+            self.assertEqual(signal["port"], 51234)
+            self.assertGreaterEqual(clock[0], 65)
+            self.assertFalse(marker.exists())
+            self.assertIn("still opening after 60s", (
+                home / "localization/workspace/editor-updates/update.log").read_text())
+
     def test_failed_installer_is_explained_in_local_action_log(self):
         """A rollback preserves its cause in Logs without disclosing a password."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -113,6 +193,7 @@ class UpdateTests(unittest.TestCase):
 
         editor = Mock()
         editor.update_state = {"state": "idle"}
+        editor.integrity_state = {"state": "idle"}
         token = "test-token"
         server = HTTPServer(("127.0.0.1", 0), make_handler(editor, token, 0))
         server.RequestHandlerClass = make_handler(editor, token, server.server_port)
@@ -123,7 +204,7 @@ class UpdateTests(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_port}"
         release = {"available": True, "latest": "0.8"}
 
-        def stage(release, progress):
+        def stage(release, progress, *, repair=False):
             progress(1048576, 2097152)
             return Path("staged-editor")
 
@@ -143,6 +224,58 @@ class UpdateTests(unittest.TestCase):
                 launch.assert_called_once_with(Path("staged-editor"), port=server.server_port)
                 with urlopen(base + "/api/editor-update-status", timeout=5) as response:
                     self.assertEqual(json.load(response)["state"], "installing")
+        finally:
+            server.shutdown = real_shutdown
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_browser_repairs_damaged_current_version(self):
+        """The wrench report allows Fix version when no newer version exists."""
+        from editor_server import make_handler
+
+        editor = Mock()
+        editor.update_state = {"state": "idle"}
+        editor.integrity_state = {"state": "idle"}
+        server = HTTPServer(("127.0.0.1", 0), make_handler(editor, "test-token", 0))
+        server.RequestHandlerClass = make_handler(editor, "test-token", server.server_port)
+        real_shutdown = server.shutdown
+        server.shutdown = Mock()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        headers = {"Origin": base, "X-Editor-Token": "test-token",
+                   "Content-Type": "application/json"}
+        report = {"current": "0.13", "latest": "0.13", "available": False,
+                  "can_auto_update": True, "damaged_files": ["README-START.txt"],
+                  "verified": False}
+        try:
+            with patch("editor_server.verify_installation", return_value=report), \
+                 patch("editor_server.latest_release", return_value=report), \
+                 patch("editor_server.stage_release", return_value=Path("staged")) as stage, \
+                 patch("editor_server.launch_update") as launch:
+                request = Request(base + "/api/editor-verify", data=b"{}", headers=headers)
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 202)
+                for _ in range(100):
+                    with urlopen(base + "/api/editor-verify-status", timeout=5) as response:
+                        status = json.load(response)
+                    if status["state"] == "complete":
+                        break
+                    time.sleep(.01)
+                self.assertEqual(status["damaged_files"], ["README-START.txt"])
+                request = Request(base + "/api/editor-update", data=b'{"repair":true}',
+                                  headers=headers)
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 202)
+                for _ in range(100):
+                    if server.shutdown.called:
+                        break
+                    time.sleep(.01)
+                self.assertTrue(server.shutdown.called)
+                self.assertTrue(stage.call_args.kwargs["repair"])
+                launch.assert_called_once_with(Path("staged"), port=server.server_port,
+                                               repair=True)
         finally:
             server.shutdown = real_shutdown
             server.shutdown()

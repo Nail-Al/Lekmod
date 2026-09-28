@@ -22,6 +22,7 @@ import threading
 import os
 import tempfile
 import textwrap
+import time
 import xml.etree.ElementTree as ET
 import urllib.error
 from urllib.parse import parse_qs, urlsplit
@@ -44,7 +45,7 @@ from lekmod_localization.connections import (
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
 from lekmod_localization.editor_update import (
-    latest_release, stage_release, launch_update,
+    latest_release, stage_release, launch_update, verify_installation,
 )
 from lekmod_localization.english_dates import read_dates
 from lekmod_localization.shipped import read_approvals
@@ -268,6 +269,7 @@ class Editor:
         self.cursor = 0
         self.download_state: dict = {"state": "idle"}
         self.update_state: dict = {"state": "idle"}
+        self.integrity_state: dict = {"state": "idle"}
         self.download_cancel = threading.Event()
         self.last_encrypted_archive: Path | None = None
         self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
@@ -1073,6 +1075,10 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.wfile.write(data)
                 elif url.path == "/favicon.svg":
                     self.download_inline_svg(FAVICON.read_bytes())
+                elif url.path == "/api/health":
+                    # The updater must not wait on metadata's game XML inspection.
+                    self.respond(200, {"editor_version": editor_manifest()["version"],
+                                       "server_instance": editor.instance_id})
                 elif url.path == "/api/meta":
                     self.respond(200, editor.metadata())
                 elif url.path == "/api/logs":
@@ -1087,6 +1093,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(200, latest_release())
                 elif url.path == "/api/editor-update-status":
                     self.respond(200, editor.update_state.copy())
+                elif url.path == "/api/editor-verify-status":
+                    self.respond(200, editor.integrity_state.copy())
                 elif url.path == "/api/encrypted-snapshot":
                     archive = editor.last_encrypted_archive
                     if archive is None or not archive.is_file():
@@ -1174,9 +1182,43 @@ def make_handler(editor: Editor, token: str, port: int):
                     result = editor.import_cloud_snapshot(data.get("url"), data.get("password"))
                 elif self.path == "/api/snapshot-encrypt":
                     result = editor.encrypt_local_snapshot(data.get("password"))
+                elif self.path == "/api/editor-verify":
+                    if editor.integrity_state["state"] == "running":
+                        raise CatalogError("an editor file check is already running")
+                    if editor.update_state["state"] not in ("idle", "error"):
+                        raise CatalogError("wait until the editor update finishes")
+                    editor.integrity_state = {"state": "running", "bytes": 0, "total": None}
+                    self.respond(202, editor.integrity_state)
+
+                    def verify_in_background() -> None:
+                        try:
+                            def progress(done: int, total: int | None) -> None:
+                                editor.integrity_state = {"state": "running", "bytes": done,
+                                                          "total": total}
+
+                            result = verify_installation(progress=progress)
+                            editor.integrity_state = {"state": "complete", **result}
+                            editor.record_event("editor-verify", "damaged" if result["damaged_files"]
+                                                else "success")
+                        except Exception as error:
+                            editor.integrity_state = {"state": "error", "error": str(error)}
+                            editor.record_event("editor-verify", "error:" + type(error).__name__ +
+                                                ": " + safe_ui_event_detail(str(error)))
+                            LOG.exception("Editor file check failed")
+
+                    threading.Thread(target=verify_in_background, daemon=True).start()
+                    return
                 elif self.path == "/api/editor-update":
                     if editor.update_state["state"] not in ("idle", "error"):
                         raise CatalogError("an editor update is already running")
+                    if editor.integrity_state["state"] == "running":
+                        raise CatalogError("wait until the editor file check finishes")
+                    repair = data.get("repair") is True
+                    report = editor.integrity_state
+                    if repair and (report.get("state") != "complete" or
+                                   report.get("current") != editor_manifest()["version"] or
+                                   not report.get("damaged_files")):
+                        raise CatalogError("check editor files before requesting a repair")
                     editor.update_state = {"state": "checking"}
                     self.respond(202, editor.update_state)
                     server = self.server
@@ -1185,7 +1227,7 @@ def make_handler(editor: Editor, token: str, port: int):
                         """Keep the localhost API responsive during a slow download."""
                         try:
                             release = latest_release()
-                            if not release["available"]:
+                            if not release["available"] and not repair:
                                 raise ValueError("this editor is already up to date")
                             editor.update_state = {"state": "downloading", "version": release["latest"],
                                                    "bytes": 0, "total": None}
@@ -1194,9 +1236,12 @@ def make_handler(editor: Editor, token: str, port: int):
                                 editor.update_state = {"state": "downloading", "version": release["latest"],
                                                        "bytes": done, "total": total}
 
-                            stage = stage_release(release, progress=progress)
+                            stage = stage_release(release, progress=progress, repair=repair)
                             editor.update_state = {"state": "installing", "version": release["latest"]}
-                            launch_update(stage, port=server.server_port)
+                            if repair:
+                                launch_update(stage, port=server.server_port, repair=True)
+                            else:
+                                launch_update(stage, port=server.server_port)
                             editor.record_event("editor-update", "installer-started")
                             threading.Thread(target=server.shutdown, daemon=True).start()
                         except Exception as error:
@@ -1208,7 +1253,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     threading.Thread(target=update_in_background, daemon=True).start()
                     return
                 elif self.path == "/api/preferences":
-                    allowed = {"mode", "prefill", "wrap", "locale", "category",
+                    allowed = {"mode", "prefill", "wrap", "panel_expanded", "locale", "category",
                                "visible_columns", "translator_visible_columns",
                                "developer_visible_columns", "column_widths", "onboarded", "page_size",
                                "snapshot_url"}
@@ -1223,6 +1268,7 @@ def make_handler(editor: Editor, token: str, port: int):
                                     "columns-changed", "page-changed", "prefill-changed",
                                     "logs-open", "logs-download", "copy", "wrap-changed",
                                     "translation-export", "english-export", "xml-export", "update-check",
+                                    "update-verify",
                                     "filter-changed", "page-size-changed", "discard",
                                     "ui-error", "ui-warning", "project-reconnect", "key-dialog"}:
                         raise CatalogError("unknown interface action")
@@ -1313,8 +1359,11 @@ def main() -> int:
         parser.error("invalid update ticket")
     if not 0 <= args.port <= 65535 or 0 < args.port < 1024:
         parser.error("choose port 0 or a port from 1024 to 65535")
+    started_at = time.monotonic()
+    LOG.info("Initializing editor process %s", os.getpid())
     try:
         editor = Editor()
+        LOG.info("Editor data initialized in %.1fs", time.monotonic() - started_at)
         token = secrets.token_urlsafe(32)
         server = HTTPServer(("127.0.0.1", args.port), make_handler(editor, token, args.port))
         # The handler compares the browser Origin with the actual assigned port.
@@ -1325,7 +1374,8 @@ def main() -> int:
     url = f"http://127.0.0.1:{server.server_port}/"
     if sys.stdout is not None:
         print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
-    LOG.info("Editor started at %s; version %s", url, editor_manifest()["version"])
+    LOG.info("Editor started at %s; version %s; elapsed %.1fs", url,
+             editor_manifest()["version"], time.monotonic() - started_at)
     if args.update_ticket:
         ready = APP_HOME / "localization/workspace/editor-updates" / (
             "ready-" + args.update_ticket + ".json")

@@ -99,6 +99,12 @@ def main() -> int:
         project = settings.parent / "projects/v35.3/localization/translations/RU_RU.csv"
         project.parent.mkdir(parents=True)
         project.write_text("approved row", encoding="utf-8")
+        translation = root / "localization/translations/RU_RU.csv"
+        translation.parent.mkdir(parents=True)
+        translation.write_text("translator's saved text", encoding="utf-8")
+        primary = root / "localization/en_US/primary.xml"
+        primary.parent.mkdir(parents=True)
+        primary.write_text("developer's English text", encoding="utf-8")
 
         old, base, pid = start(root)
         wait_for(base, old_version)
@@ -109,7 +115,7 @@ def main() -> int:
                                   stderr=subprocess.DEVNULL,
                                   creationflags=subprocess.CREATE_NO_WINDOW)
         stop(base, token_at(base))
-        assert helper.wait(timeout=150) == 0, (root /
+        assert helper.wait(timeout=210) == 0, (root /
             "localization/workspace/editor-updates/update.log").read_text(encoding="utf-8")
         old.wait(timeout=30)
         meta = wait_for(base, new_version)
@@ -120,9 +126,33 @@ def main() -> int:
                 "LekmodLocalizationEditor.exe")
         assert snapshot.read_bytes() == b"private snapshot fixture"
         assert project.read_text(encoding="utf-8") == "approved row"
+        assert translation.read_text(encoding="utf-8") == "translator's saved text"
+        assert primary.read_text(encoding="utf-8") == "developer's English text"
         backups = list((root / "localization/workspace/editor-updates").glob("previous-editor-*"))
         assert len(backups) == 1
         assert json.loads((backups[0] / "localization/editor/version.json").read_text())["version"] == old_version
+
+        # Repair the same version after damage, preserving editor drafts and
+        # project files that may share the portable installation folder.
+        (root / "README-START.txt").write_text("damaged", encoding="utf-8")
+        log_path = stage.parent / "update.log"
+        current_pid = int(re.findall(r"Installed v" + re.escape(new_version) +
+                                     r";[^\n]*pid: (\d+)", log_path.read_text())[-1])
+        repaired = subprocess.Popen(installer_command(stage, root, current_pid,
+                                   int(base.rsplit(":", 1)[1]), no_browser=True, repair=True),
+                                   cwd=stage, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+        stop(base, token_at(base))
+        assert repaired.wait(timeout=210) == 0, log_path.read_text(encoding="utf-8")
+        assert wait_for(base, new_version)["server_instance"] != meta["server_instance"]
+        assert (root / "README-START.txt").read_bytes() == (stage / "README-START.txt").read_bytes()
+        assert translation.read_text(encoding="utf-8") == "translator's saved text"
+        assert primary.read_text(encoding="utf-8") == "developer's English text"
+        assert project.read_text(encoding="utf-8") == "approved row"
+        assert snapshot.read_bytes() == b"private snapshot fixture"
+        assert settings.read_text(encoding="utf-8") == json.dumps(preferences)
 
         # A downloaded copy whose page cannot load must fail after file replacement.
         # The helper must restore the original EXE and reopen the original URL.
@@ -135,8 +165,8 @@ def main() -> int:
         (broken / "localization/editor/index.html").write_text("broken page", encoding="utf-8")
         previous = (root / "LekmodLocalizationEditor.exe").read_bytes()
         success_log = (stage.parent / "update.log").read_text(encoding="utf-8")
-        pid = int(re.search(r"Installed v" + re.escape(new_version) +
-                            r";[^\n]*pid: (\d+)", success_log).group(1))
+        pid = int(re.findall(r"Installed v" + re.escape(new_version) +
+                             r";[^\n]*pid: (\d+)", success_log)[-1])
         failed = subprocess.Popen(installer_command(broken, root, pid,
                                   int(base.rsplit(":", 1)[1]), no_browser=True), cwd=broken,
                                   env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
@@ -144,7 +174,7 @@ def main() -> int:
                                   stderr=subprocess.DEVNULL,
                                   creationflags=subprocess.CREATE_NO_WINDOW)
         stop(base, token_at(base))
-        assert failed.wait(timeout=150) != 0, "invalid UI unexpectedly passed readiness"
+        assert failed.wait(timeout=210) != 0, "invalid UI unexpectedly passed readiness"
         wait_for(base, new_version)
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == previous
         assert (root / "localization/editor/index.html").read_bytes() == (stage /
@@ -152,8 +182,11 @@ def main() -> int:
         assert settings.read_text(encoding="utf-8") == json.dumps(preferences)
         assert snapshot.read_bytes() == b"private snapshot fixture"
         assert project.read_text(encoding="utf-8") == "approved row"
+        assert translation.read_text(encoding="utf-8") == "translator's saved text"
+        assert primary.read_text(encoding="utf-8") == "developer's English text"
         log = (stage.parent / "update.log").read_text(encoding="utf-8")
         assert "success" in log and "failure" in log and "Previous editor reopened" in log
+        assert "incomplete page or script" in log
         stop(base, token_at(base))
     print("Windowless updater restarted the same browser URL and restored a failed release.")
     return 0

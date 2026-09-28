@@ -26,7 +26,7 @@ TEAM_SNAPSHOT_URL = (
 )
 DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
-    "mode": "translator", "prefill": True, "wrap": True, "locale": "RU_RU",
+    "mode": "translator", "prefill": True, "wrap": True, "panel_expanded": True, "locale": "RU_RU",
     "category": "", "visible_columns": [], "translator_visible_columns": [],
     "developer_visible_columns": [], "column_widths": {},
     "snapshot_url": TEAM_SNAPSHOT_URL, "snapshot_url_cleared": False,
@@ -51,7 +51,7 @@ def settings(home: Path = APP_HOME) -> dict:
     for name in ("project_path", "game_path", "game_mod", "locale", "category", "snapshot_url"):
         if isinstance(raw.get(name), str) and len(raw[name]) < 4096:
             result[name] = raw[name]
-    for name in ("onboarded", "prefill", "wrap", "snapshot_url_cleared"):
+    for name in ("onboarded", "prefill", "wrap", "panel_expanded", "snapshot_url_cleared"):
         if type(raw.get(name)) is bool:
             result[name] = raw[name]
     if raw.get("mode") in ("translator", "developer"):
@@ -82,7 +82,7 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
         candidate["snapshot_url_cleared"] = values["snapshot_url"] == ""
     # Validate the whole object through the same schema used at startup.
     if candidate["mode"] not in ("translator", "developer") or any(
-        type(candidate[k]) is not bool for k in ("onboarded", "prefill", "wrap",
+        type(candidate[k]) is not bool for k in ("onboarded", "prefill", "wrap", "panel_expanded",
                                               "snapshot_url_cleared")
     ):
         raise ValueError("invalid editor mode or preference")

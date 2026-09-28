@@ -80,11 +80,23 @@ def latest_release(home: Path = APP_HOME) -> dict:
     }
 
 
-def stage_release(release: dict, home: Path = APP_HOME,
-                  progress: Progress | None = None) -> Path:
-    """Verify GitHub's digest and allowlisted ZIP contents before staging."""
-    if not release["available"] or not release["can_auto_update"]:
-        raise ValueError("automatic update is available only for an older Windows EXE")
+def _published_version(version: str) -> dict:
+    """Find the official archive for the installed version, even if it is old."""
+    if not re.fullmatch(r"\d+\.\d+", version):
+        raise ValueError("invalid installed editor version")
+    metadata = json.loads(_download(
+        f"https://api.github.com/repos/{REPOSITORY}/releases/tags/editor-v{version}",
+        2 * 1024 * 1024))
+    asset = next((item for item in metadata.get("assets", [])
+                  if item.get("name") == ARCHIVE), None)
+    if metadata.get("draft") or not asset:
+        raise ValueError(f"no published files are available for editor v{version}")
+    return {"latest": version, "download_url": asset["browser_download_url"],
+            "digest": asset.get("digest", "")}
+
+
+def _verified_files(release: dict, progress: Progress | None = None) -> dict[str, bytes]:
+    """Read only signed-off package members after validating the release SHA-256."""
     tag = "editor-v" + release["latest"]
     expected_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/{ARCHIVE}"
     if release["download_url"] != expected_url:
@@ -95,47 +107,78 @@ def stage_release(release: dict, home: Path = APP_HOME,
     data = _download(expected_url, 100 * 1024 * 1024, progress)
     if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1]:
         raise ValueError("editor download failed its SHA-256 check")
-    folder = home / "localization/workspace/editor-updates"
-    folder.mkdir(parents=True, exist_ok=True)
-    stage = folder / tag
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = set(archive.namelist())
-        if len(names) != len(archive.infolist()):
-            raise ValueError("release archive has duplicate file names")
-        if names != set(UPDATE_FILES):
-            raise ValueError("release archive has missing or unexpected editor files")
+        if len(names) != len(archive.infolist()) or names != set(UPDATE_FILES):
+            raise ValueError("release archive has missing, duplicate or unexpected editor files")
+        if sum(info.file_size for info in archive.infolist()) > 180 * 1024 * 1024:
+            raise ValueError("release archive exceeds its uncompressed size limit")
         for name in UPDATE_FILES:
             info = archive.getinfo(name)
             if info.file_size > 90 * 1024 * 1024 or not name.isascii():
                 raise ValueError("unsafe editor file in release")
-        if stage.is_symlink():
-            raise ValueError("pending editor update path is a link; choose a fresh folder")
-        if stage.exists():
-            existing = list(stage.rglob("*")) if stage.is_dir() else []
-            valid = stage.is_dir() and not any(p.is_symlink() for p in existing) and {
-                p.relative_to(stage).as_posix() for p in existing if p.is_file()} == names
-            if valid:
-                valid = all((stage / name).read_bytes() == archive.read(name)
-                            for name in UPDATE_FILES)
-            if valid:
-                if editor_manifest(stage)["version"] != release["latest"]:
-                    raise ValueError("downloaded editor version differs from release tag")
-                return stage
-            stage.rename(folder / (tag + ".failed-" + uuid.uuid4().hex))
-        with tempfile.TemporaryDirectory(dir=folder, prefix=".stage-") as temporary:
-            temp = Path(temporary)
-            for name in UPDATE_FILES:
-                target = temp / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(name))
-            if editor_manifest(temp)["version"] != release["latest"]:
+        return {name: archive.read(name) for name in UPDATE_FILES}
+
+
+def verify_installation(home: Path = APP_HOME,
+                        progress: Progress | None = None) -> dict:
+    """Compare only application files with this version's official release.
+
+    Workspaces, project files, translations and vanilla references are never
+    read or compared against the release, much less replaced by a repair.
+    """
+    current = editor_manifest(home)["version"]
+    latest = latest_release(home)
+    published = latest if latest["latest"] == current else _published_version(current)
+    expected = _verified_files(published, progress)
+    damaged = [name for name in UPDATE_FILES
+               if (home / name).is_symlink() or not (home / name).is_file()
+               or hashlib.sha256((home / name).read_bytes()).digest() !=
+               hashlib.sha256(expected[name]).digest()]
+    return {"current": current, "latest": latest["latest"],
+            "available": latest["available"], "can_auto_update": latest["can_auto_update"],
+            "damaged_files": damaged, "verified": not damaged}
+
+
+def stage_release(release: dict, home: Path = APP_HOME,
+                  progress: Progress | None = None, *, repair: bool = False) -> Path:
+    """Verify GitHub's digest and allowlisted ZIP contents before staging."""
+    if (not release["available"] and not repair) or not release["can_auto_update"]:
+        raise ValueError("automatic installation requires an older or damaged Windows EXE")
+    tag = "editor-v" + release["latest"]
+    expected = _verified_files(release, progress)
+    folder = home / "localization/workspace/editor-updates"
+    folder.mkdir(parents=True, exist_ok=True)
+    stage = folder / tag
+    if stage.is_symlink():
+        raise ValueError("pending editor update path is a link; choose a fresh folder")
+    if stage.exists():
+        existing = list(stage.rglob("*")) if stage.is_dir() else []
+        valid = stage.is_dir() and not any(p.is_symlink() for p in existing) and {
+            p.relative_to(stage).as_posix() for p in existing if p.is_file()} == set(expected)
+        if valid:
+            valid = all((stage / name).read_bytes() == expected[name]
+                        for name in UPDATE_FILES)
+        if valid:
+            if editor_manifest(stage)["version"] != release["latest"]:
                 raise ValueError("downloaded editor version differs from release tag")
-            temp.rename(stage)
+            return stage
+        stage.rename(folder / (tag + ".failed-" + uuid.uuid4().hex))
+    with tempfile.TemporaryDirectory(dir=folder, prefix=".stage-") as temporary:
+        temp = Path(temporary)
+        for name in UPDATE_FILES:
+            target = temp / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(expected[name])
+        if editor_manifest(temp)["version"] != release["latest"]:
+            raise ValueError("downloaded editor version differs from release tag")
+        temp.rename(stage)
     return stage
 
 
 def installer_command(stage: Path, home: Path, old_pid: int, port: int = 0, *,
-                      no_browser: bool = False, handoff_ticket: str = "") -> list[str]:
+                      no_browser: bool = False, handoff_ticket: str = "",
+                      repair: bool = False) -> list[str]:
     """Start the downloaded GUI EXE as updater, independent of the old EXE."""
     command = [str(stage / "LekmodLocalizationEditor.exe"), "--install-update",
                "--editor-root", str(home), "--stage", str(stage),
@@ -144,18 +187,21 @@ def installer_command(stage: Path, home: Path, old_pid: int, port: int = 0, *,
         command.append("--no-browser")
     if handoff_ticket:
         command.extend(("--handoff-ticket", handoff_ticket))
+    if repair:
+        command.append("--repair")
     return command
 
 
 def launch_update(stage: Path, home: Path = APP_HOME, old_pid: int | None = None,
-                  port: int = 0) -> None:
+                  port: int = 0, *, repair: bool = False) -> None:
     """Run the staged helper without PowerShell, a terminal, or inherited handles."""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         raise ValueError("automatic installation requires the packaged Windows editor")
     ticket = uuid.uuid4().hex
     ready = home / "localization/workspace/editor-updates" / ("helper-ready-" + ticket)
     process = subprocess.Popen(installer_command(stage, home, old_pid or os.getpid(), port,
-                                                 no_browser=bool(port), handoff_ticket=ticket),
+                                                 no_browser=bool(port), handoff_ticket=ticket,
+                                                 repair=repair),
                                cwd=stage, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, close_fds=True,
@@ -250,34 +296,49 @@ def _record(home: Path, state: str, detail: str) -> None:
 
 
 def _wait_ready(home: Path, ticket: str, expected: str, process: subprocess.Popen) -> dict:
-    """Confirm the new editor responds over HTTP before declaring success."""
+    """Wait through a slow first launch, then check the lightweight server and UI."""
     ready = home / "localization/workspace/editor-updates" / ("ready-" + ticket + ".json")
-    for _ in range(300):
+    started = time.monotonic()
+    timeout_seconds = 150
+    last_report = 0
+    last_error = "the new editor has not opened its local server"
+    while time.monotonic() - started < timeout_seconds:
         if ready.is_file():
             try:
                 signal = json.loads(ready.read_text(encoding="utf-8"))
                 if signal.get("ticket") == ticket and _pid_alive(signal.get("pid", 0)):
                     url = f"http://127.0.0.1:{int(signal['port'])}"
-                    with urllib.request.urlopen(url + "/api/meta", timeout=1) as response:
+                    with urllib.request.urlopen(url + "/api/health", timeout=8) as response:
                         version = json.load(response).get("editor_version")
-                    with urllib.request.urlopen(url + "/", timeout=1) as response:
+                    if version != expected:
+                        raise RuntimeError(f"The new editor reported v{version}, expected v{expected}.")
+                    with urllib.request.urlopen(url + "/", timeout=8) as response:
                         page = response.read()
-                    with urllib.request.urlopen(url + "/app.js", timeout=1) as response:
+                    with urllib.request.urlopen(url + "/app.js", timeout=8) as response:
                         script = response.read()
-                    if (version == expected and b"Lekmod Localization Editor" in page
-                            and b"function renderTable" in script):
-                        ready.unlink(missing_ok=True)
-                        return signal
-            except (OSError, ValueError, KeyError, urllib.error.URLError):
-                pass
-        if process.poll() is not None:
-            break
-        time.sleep(.2)
-    raise RuntimeError("The updated editor did not open within 60 seconds.")
+                    if b"Lekmod Localization Editor" not in page or b"function renderTable" not in script:
+                        raise RuntimeError("The updated editor served an incomplete page or script.")
+                    ready.unlink(missing_ok=True)
+                    return signal
+                last_error = "the new editor's startup marker has an invalid ticket or PID"
+            except (OSError, ValueError, KeyError, urllib.error.URLError) as error:
+                last_error = f"the new editor's local server is still starting: {error}"
+        status = process.poll()
+        if status is not None:
+            raise RuntimeError(f"The updated editor exited with status {status}; "
+                               f"{last_error}. See editor-startup.log.")
+        elapsed = int(time.monotonic() - started)
+        if elapsed >= last_report + 30:
+            last_report = elapsed
+            _record(home, "waiting", f"Editor v{expected} is still opening after {elapsed}s; "
+                    + last_error)
+        time.sleep(.25)
+    raise RuntimeError(f"The updated editor did not open within {timeout_seconds} seconds; "
+                       f"{last_error}. See editor-startup.log.")
 
 
 def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
-                   no_browser: bool = False) -> None:
+                   no_browser: bool = False, repair: bool = False) -> None:
     """Backup, install, validate startup, and restore the old editor on failure."""
     home, stage = home.resolve(), stage.resolve()
     updates = home / "localization/workspace/editor-updates"
@@ -291,7 +352,14 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
         if stage.parent != updates or stage == home or not home.is_dir():
             raise ValueError("invalid editor update location")
         expected = editor_manifest(stage)["version"]
-        if tuple(map(int, expected.split("."))) <= tuple(map(int, editor_manifest(home)["version"].split("."))):
+        try:
+            installed = editor_manifest(home)["version"]
+        except (OSError, ValueError):
+            if not repair:
+                raise
+            installed = "0.0"  # A damaged manifest can be restored by explicit repair.
+        if (tuple(map(int, expected.split("."))) < tuple(map(int, installed.split(".")))
+                or (expected == installed and not repair)):
             raise ValueError("the staged editor is not newer than this installation")
         for name in UPDATE_FILES:
             if not (stage / name).is_file() or (stage / name).is_symlink():
@@ -307,6 +375,9 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
         started = True
         for name in UPDATE_FILES:
             _replace(stage / name, home / name)
+        if any((stage / name).read_bytes() != (home / name).read_bytes()
+               for name in UPDATE_FILES):
+            raise RuntimeError("Installed editor files differ from the verified release")
         ticket = uuid.uuid4().hex
         command = [str(home / "LekmodLocalizationEditor.exe"), "--update-ticket", ticket]
         if port:
@@ -372,6 +443,7 @@ def installer_main(argv: list[str]) -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--handoff-ticket", default="")
+    parser.add_argument("--repair", action="store_true")
     args = parser.parse_args(argv)
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         parser.error("the update helper must be the packaged Windows EXE")
@@ -384,7 +456,7 @@ def installer_main(argv: list[str]) -> int:
         marker.write_text("ready", encoding="utf-8")
     try:
         install_update(args.editor_root, args.stage, args.old_pid, port=args.port,
-                       no_browser=args.no_browser)
+                       no_browser=args.no_browser, repair=args.repair)
     except Exception as error:
         # The GUI EXE has no stdout. The helper already wrote update.log.
         try:

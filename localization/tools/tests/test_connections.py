@@ -108,9 +108,10 @@ class ConnectionTests(unittest.TestCase):
 
     def test_settings_survive_restart_without_touching_repo(self):
         """Connections, column widths, and prefilling use a private file."""
-        save_settings({"prefill": False, "column_widths": {"key": 420},
+        save_settings({"prefill": False, "panel_expanded": False, "column_widths": {"key": 420},
                        "game_path": str(self.game)}, self.home)
         self.assertFalse(settings(self.home)["prefill"])
+        self.assertFalse(settings(self.home)["panel_expanded"])
         self.assertEqual(settings(self.home)["column_widths"]["key"], 420)
         self.assertEqual(settings(self.home)["game_path"], str(self.game))
         self.assertEqual(settings(self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)

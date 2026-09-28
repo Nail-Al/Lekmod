@@ -57,20 +57,27 @@ jobs:
               --notes "Portable Windows localization editor. Extract the ZIP before launching."
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
-      - name: Verify upgrade from the previous released editor
+      - name: Verify upgrades from both previous released editors
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          New-Item -ItemType Directory -Force dist/previous, dist/published | Out-Null
-          gh release download editor-v0.11 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous
+          New-Item -ItemType Directory -Force dist/previous-011, dist/previous-012, dist/published | Out-Null
+          gh release download editor-v0.11 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous-011
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release download editor-v0.12 --pattern LekmodLocalizationEditor-Windows.zip --dir dist/previous-012
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python -B localization/tools/test_editor_upgrade_online.py `
-            --old-archive dist/previous/LekmodLocalizationEditor-Windows.zip `
+            --old-archive dist/previous-011/LekmodLocalizationEditor-Windows.zip `
             --new-archive dist/published/LekmodLocalizationEditor-Windows.zip
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -B localization/tools/test_editor_upgrade_online.py `
+            --old-archive dist/previous-012/LekmodLocalizationEditor-Windows.zip `
+            --new-archive dist/published/LekmodLocalizationEditor-Windows.zip --test-repair
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: LekmodLocalizationEditor-Windows
