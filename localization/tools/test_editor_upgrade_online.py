@@ -30,6 +30,9 @@ def main() -> int:
         with zipfile.ZipFile(args.new_archive) as archive:
             version = json.loads(archive.read("localization/editor/version.json"))["version"]
             expected_exe = archive.read("LekmodLocalizationEditor.exe")
+            expected_ui = {name: archive.read(name) for name in (
+                "localization/editor/index.html", "localization/editor/app.js",
+                "localization/editor/version.json")}
         preferences = {"project_path": "C:/Lekmod source", "mode": "translator",
                        "column_widths": {"key": 515}, "snapshot_url": "https://example.invalid"}
         workspace = root / "localization/workspace"
@@ -74,6 +77,8 @@ def main() -> int:
         assert metadata["preferences"]["project_path"] == "C:/Lekmod source"
         assert metadata["preferences"]["column_widths"] == {"key": 515}
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
+        for name, expected in expected_ui.items():
+            assert (root / name).read_bytes() == expected, f"editor kept an old {name}"
         assert (workspace / "vanilla-snapshot.json.gz").read_bytes() == b"private snapshot fixture"
         # The new server may answer /api/meta before the helper records success.
         log = workspace / "editor-updates/update.log"

@@ -39,8 +39,8 @@ from lekmod_localization.common import (
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
 )
 from lekmod_localization.connections import (
-    APP_HOME, apply_game, detect_game, installed_mods, release_version,
-    save_settings, settings, validate_game, validate_project,
+    APP_HOME, apply_game, detect_game, inspect_game, release_version,
+    save_settings, settings, validate_project,
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
 from lekmod_localization.editor_update import (
@@ -371,14 +371,10 @@ class Editor:
         manifest = self.manifest() if self.ready else {"locales": {}}
         prefs = settings()
         game_path = prefs["game_path"] or detect_game()
-        mods = []
-        game_error = ""
-        if game_path:
-            try:
-                mods = installed_mods(Path(game_path))
-            except ValueError as error:
-                game_error = str(error)
-        selected_mod = mods[0]["name"] if len(mods) == 1 else ""
+        game = (inspect_game(Path(game_path), REPO_ROOT if self.ready else None)
+                if game_path else {"path": "", "mods": [], "state": "missing_game", "error": ""})
+        game["selected_mod"] = (game["mods"][0]["name"]
+                                if game["state"] == "installed" else "")
         return {
             "locales": {locale: [name.removesuffix(".csv") for name in details["files"]]
                         for locale, details in manifest["locales"].items()},
@@ -391,11 +387,11 @@ class Editor:
             "editor_version": editor_manifest()["version"],
             "server_instance": self.instance_id,
             "update_notice": next((item for item in reversed(self.events)
-                                   if item.get("action") == "editor-update-install"), None),
+                                   if item.get("action") == "editor-update-install" and
+                                   item.get("result") in ("success", "failure")), None),
             "included_source": REPO_ROOT == APP_HOME,
             "release": release_version(REPO_ROOT) if self.ready else "",
-            "game": {"path": game_path, "mods": mods, "selected_mod": selected_mod,
-                     "error": game_error},
+            "game": game,
             "preferences": prefs,
             **self.history_state(),
         }
@@ -406,23 +402,16 @@ class Editor:
         game = str(data.get("game_path", "")).strip()
         source_root = Path(project) if project else APP_HOME
         try:
-            source_info = validate_project(source_root, full=True)
+            validate_project(source_root, full=True)
         except ValueError as error:
             raise CatalogError("Source: " + str(error)) from error
         mod = ""
         if game:
-            try:
-                mods = installed_mods(validate_game(Path(game)))
-            except ValueError as error:
-                raise CatalogError("Game: " + str(error)) from error
-            if len(mods) > 1:
-                raise CatalogError("Game: Multiple Lekmod DLC folders found. Keep only one installed version.")
-            if mods:
-                mod = mods[0]["name"]
-                selected = mods[0]
-                if (selected["version"].casefold() != source_info["version"].casefold()
-                    or selected["release"].casefold() != release_version(source_root).casefold()):
-                    raise CatalogError("Game: Installed Lekmod version differs from the connected source.")
+            inspected = inspect_game(Path(game), source_root)
+            if inspected["state"] not in ("installed", "vanilla"):
+                raise CatalogError("Game: " + inspected["error"])
+            if inspected["state"] == "installed":
+                mod = inspected["mods"][0]["name"]
         changed = (Path(project).resolve() if project else APP_HOME) != REPO_ROOT
         saved = save_settings({"project_path": project, "game_path": game,
                                "game_mod": mod, "onboarded": True})
@@ -488,10 +477,10 @@ class Editor:
         game = prefs["game_path"] or detect_game()
         if not game:
             raise CatalogError("connect a Civilization V installation in Settings")
-        mods = installed_mods(Path(game))
-        if len(mods) != 1:
-            raise CatalogError("install exactly one matching Lekmod DLC in this game")
-        name = mods[0]["name"]
+        inspected = inspect_game(Path(game), REPO_ROOT)
+        if inspected["state"] != "installed":
+            raise CatalogError(inspected["error"] or "Install exactly one matching Lekmod DLC in this game.")
+        name = inspected["mods"][0]["name"]
         candidate, _ = build_shipped_localization.build_candidate(self.snapshot)
         current = build_shipped_localization.DEFAULT_SOURCE.read_text(encoding="utf-8")
         if candidate != current:
@@ -1212,7 +1201,8 @@ def make_handler(editor: Editor, token: str, port: int):
                             threading.Thread(target=server.shutdown, daemon=True).start()
                         except Exception as error:
                             editor.update_state = {"state": "error", "error": str(error)}
-                            editor.record_event("editor-update", "error:" + type(error).__name__)
+                            editor.record_event("editor-update", "error:" + type(error).__name__ +
+                                                ": " + safe_ui_event_detail(str(error)))
                             LOG.exception("Editor update could not start")
 
                     threading.Thread(target=update_in_background, daemon=True).start()
@@ -1254,7 +1244,8 @@ def make_handler(editor: Editor, token: str, port: int):
                             title="Select Lekmod project" if data["kind"] == "project"
                             else "Select Civilization V installation", parent=dialog,
                             initialdir=str(APP_HOME.parent if data["kind"] == "project"
-                                           else APP_HOME))}
+                                           else (Path("C:/") if Path("C:/").is_dir()
+                                                 else APP_HOME)))}
                     finally:
                         dialog.destroy()
                 elif self.path == "/api/apply-game":
@@ -1267,11 +1258,8 @@ def make_handler(editor: Editor, token: str, port: int):
                         result = {"path": "", "mods": [], "state": "missing_game"}
                     else:
                         try:
-                            mods = installed_mods(Path(path))
-                            state = "installed" if len(mods) == 1 else (
-                                "multiple" if mods else "vanilla")
-                            result = {"path": path, "mods": mods, "state": state}
-                        except ValueError as error:
+                            result = inspect_game(Path(path), REPO_ROOT if editor.ready else None)
+                        except (OSError, ValueError) as error:
                             result = {"path": path, "mods": [], "state": "missing_game",
                                       "error": str(error)}
                 elif self.path == "/api/undo":
@@ -1287,7 +1275,9 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(404, {"error": "not found"})
                     return
                 self.respond(200, result)
-                if self.path != "/api/event":
+                if self.path == "/api/detect-game":
+                    editor.record_event("detect-game", result["state"])
+                elif self.path != "/api/event":
                     editor.record_event(self.path.removeprefix("/api/"), "success")
             except (CatalogError, OSError, ValueError, ET.ParseError, urllib.error.URLError,
                     subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:

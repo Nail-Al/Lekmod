@@ -24,6 +24,7 @@ let toastTimer;
 let inLogs = false;
 let downloadTimer;
 let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "";
+let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
 let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
 let pendingColumns = null;
 let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
@@ -163,11 +164,14 @@ function renderConnections() {
   el("source-badge").classList.toggle("missing", !project);
   const game = meta.game;
   const selected = game.mods.find(item => item.name === game.selected_mod);
-  const matches = selected && project && selected.version.toLowerCase() ===
+  const matches = game.state === "installed" && selected && project && selected.version.toLowerCase() ===
     project.version.toLowerCase() && selected.release.toLowerCase() === meta.release.toLowerCase();
-  el("game-badge").textContent = selected ? "Game: " + selected.name +
-    (matches ? " · matched" : " · version mismatch")
-    : game.path ? "Game: Lekmod not installed" : "Game: disconnected";
+  el("game-badge").textContent = matches ? "Game: " + selected.name + " · matched"
+    : game.state === "vanilla" ? "Game: Lekmod not installed"
+    : game.state === "damaged" ? "Game: Lekmod files invalid"
+    : game.state === "mismatch" ? "Game: version or rules mismatch"
+    : game.state === "multiple" ? "Game: multiple Lekmod copies"
+    : game.path ? "Game: invalid folder" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
   el("game-apply").disabled = !matches || !meta.ready;
   el("workspace").hidden = !meta.ready || inLogs;
@@ -191,8 +195,10 @@ function updateBaselineNotice() {
 }
 function changeMode() {
   el("mode-name").textContent = developer() ? "Developer" : "Translator";
-  el("translator-icon").hidden = developer();
-  el("developer-icon").hidden = !developer();
+  el("mode").dataset.mode = developer() ? "developer" : "translator";
+  el("mode-symbol").setAttribute("d", developer()
+    ? "m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"
+    : "M4 5h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3v-3H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm2 9 2.5-6 2.5 6m-4-2h3m3-4h4m-2 0c0 3-1 5-3 6m1-4c.5 2 1.5 3 3 4");
   el("mode").setAttribute("aria-pressed", developer() ? "true" : "false");
   el("locale-label").hidden = developer();
   el("category-label").hidden = developer();
@@ -260,25 +266,44 @@ function categories() {
 function renderColumnChoices() {
   const container = el("column-choices");
   container.replaceChildren();
-  for (const [field, title] of activeColumns()) {
-    const label = document.createElement("label");
-    label.className = "inline";
-    const check = document.createElement("input");
-    check.type = "checkbox"; check.checked = (pendingColumns || visible).has(field);
-    if (field === "vanilla_target" && !meta.vanilla_counts[el("locale").value]) {
-      check.disabled = true;
-      label.title = "No original vanilla text for this language in the shared snapshot.";
-    }
-    check.addEventListener("change", () => {
-      if (!pendingColumns) return;
-      check.checked ? pendingColumns.add(field) : pendingColumns.delete(field);
-      if (!pendingColumns.size) {
-        pendingColumns.add(field); check.checked = true;
-        message("Keep at least one visible column.", true);
+  const groups = developer()
+    ? [["English source", ["key", "kind", "text", "characters"]],
+       ["File and history", ["source_file", "source_line", "english_edited_at"]]]
+    : [["Identity", ["key", "classification"]],
+       ["Vanilla reference", ["vanilla_en_US", "vanilla_en_US_characters", "vanilla_target"]],
+       ["Lekmod source", ["lekmod_en_US", "lekmod_en_US_characters", "lekmod_target"]],
+       ["Translation and review", ["translation", "translation_status", "translation_characters",
+         "english_edited_at", "translation_updated_at", "translator_note"]]];
+  const fields = new Map(activeColumns());
+  for (const [heading, names] of groups) {
+    const group = document.createElement("div");
+    group.className = "column-group";
+    const title = document.createElement("h3");
+    title.textContent = heading;
+    const choices = document.createElement("div");
+    choices.className = "column-choices";
+    for (const field of names) {
+      const label = document.createElement("label");
+      label.className = "column-choice";
+      const check = document.createElement("input");
+      check.type = "checkbox"; check.checked = (pendingColumns || visible).has(field);
+      if (field === "vanilla_target" && !meta.vanilla_counts[el("locale").value]) {
+        check.disabled = true;
+        label.title = "No original vanilla text for this language in the shared snapshot.";
       }
-    });
-    label.append(check, document.createTextNode(columnTitle(field, title)));
-    container.append(label);
+      check.addEventListener("change", () => {
+        if (!pendingColumns) return;
+        check.checked ? pendingColumns.add(field) : pendingColumns.delete(field);
+        if (!pendingColumns.size) {
+          pendingColumns.add(field); check.checked = true;
+          message("Keep at least one visible column.", true);
+        }
+      });
+      label.append(check, document.createTextNode(columnTitle(field, fields.get(field))));
+      choices.append(label);
+    }
+    group.append(title, choices);
+    container.append(group);
   }
 }
 function colWidth(field) {
@@ -468,11 +493,13 @@ function fillSettings() {
   sectionMessage("source", meta.ready ? "Compatible source connected: " + meta.release :
     "Choose a complete Lekmod source, or download a compatible version.",
     meta.ready ? "success" : "warning");
-  sectionMessage("game", meta.game.error || (meta.game.mods.length === 1 ?
+  sectionMessage("game", meta.game.error || (meta.game.state === "installed" ?
     "Lekmod " + meta.game.mods[0].version + " is installed here." :
-    meta.game.path ? "Civilization V found; Lekmod is not installed." :
+    meta.game.state === "vanilla" ? "Civilization V found; Lekmod is not installed." :
       "No game is connected; editing the project still works."),
-    meta.game.error ? "error" : meta.game.mods.length === 1 ? "success" : "warning");
+    meta.game.state === "installed" ? "success" :
+      ["vanilla", "multiple", "mismatch"].includes(meta.game.state) ? "warning" :
+      meta.game.error ? "error" : "warning");
   const counts = Object.values(meta.vanilla_counts || {}).reduce((sum, value) => sum + value, 0);
   el("vanilla-summary").textContent = counts ?
     "Original vanilla text available for comparison." :
@@ -494,9 +521,10 @@ function fillSettings() {
 }
 function sizeText(bytes) { return (bytes / 1048576).toFixed(1) + " MiB"; }
 async function updateDownload() {
-  if (!el("settings-dialog").open) return;
+  if (!el("settings-dialog").open || editorUpdateLocked) return;
   try {
     const state = await api("/api/download-status");
+    if (editorUpdateLocked) return;
     const active = ["running", "canceling"].includes(state.state);
     el("project-download").disabled = active;
     el("project-progress-group").hidden = !active;
@@ -535,6 +563,11 @@ async function refresh() {
   el("page-size").value = pageSize();
   el("editor-version").textContent = "v" + (meta.editor_version || "unknown");
   const notice = meta.update_notice;
+  const failure = el("update-failure");
+  failure.hidden = !notice || notice.result !== "failure";
+  if (!failure.hidden) failure.textContent = "The previous editor was restored. " +
+    (notice.detail || "The update could not finish.") +
+    " See Logs or localization/workspace/editor-updates/update.log.";
   if (notice && notice.result === "failure" &&
       sessionStorage.getItem("last-update-alert") !== notice.at) {
     sessionStorage.setItem("last-update-alert", notice.at);
@@ -573,6 +606,9 @@ el("editor-quit").addEventListener("click", () => guardNavigation(async () => {
 el("settings-dialog").addEventListener("close", () => {
   clearInterval(downloadTimer); downloadTimer = undefined;
 });
+el("settings-dialog").addEventListener("cancel", event => {
+  if (editorUpdateLocked) event.preventDefault();
+});
 el("project-browse").addEventListener("click", async () => {
   sectionMessage("source", "Opening folder chooser…", "busy");
   try { const result = await api("/api/browse", {kind: "project"});
@@ -593,26 +629,35 @@ el("project-cancel").addEventListener("click", async () => {
   try { await api("/api/cancel-download", {}); await updateDownload(); }
   catch (error) { sectionMessage("source", error.message, "error"); }
 });
+async function verifyGame(path) {
+  sectionMessage("game", "Checking game files and installed Lekmod…", "busy");
+  const found = await api("/api/detect-game", {path});
+  if (found.path) el("game-path").value = found.path;
+  if (found.state === "installed") sectionMessage("game", meta.ready ?
+    "Civilization V and matching Lekmod " + found.mods[0].version +
+      " verified. Save connections to use it." :
+    "Civilization V and Lekmod found. Connect a project to compare their versions.",
+    meta.ready ? "success" : "warning");
+  else if (found.state === "vanilla") sectionMessage("game", "Civilization V found, but Lekmod is not installed. Install the matching release to test in game.", "warning");
+  else if (["multiple", "mismatch"].includes(found.state))
+    sectionMessage("game", found.error, "warning");
+  else sectionMessage("game", found.error || "Civilization V was not found. Select its installation folder with Browse…", "error");
+}
 el("game-browse").addEventListener("click", async () => {
   sectionMessage("game", "Opening folder chooser…", "busy");
   try { const result = await api("/api/browse", {kind: "game"});
-    if (result.path) { el("game-path").value = result.path;
-      sectionMessage("game", "Selected " + result.path + ". Verify this game folder."); }
+    if (result.path) { el("game-path").value = result.path; await verifyGame(result.path); }
     else sectionMessage("game", "No folder selected.", "warning"); }
   catch (error) { sectionMessage("game", error.message, "error"); }
 });
 el("detect-game").addEventListener("click", async () => {
+  el("game-path").value = "";
   try {
-    sectionMessage("game", "Checking game folder…", "busy");
-    const found = await api("/api/detect-game", {path: el("game-path").value});
-    if (found.path) el("game-path").value = found.path;
-    if (found.state === "installed") sectionMessage("game", "Civilization V and Lekmod " +
-      found.mods[0].version + " found. Save connections to use it.");
-    else if (found.state === "vanilla") sectionMessage("game", "Civilization V found, but Lekmod is not installed. Install the matching release to test in game.", "warning");
-    else if (found.state === "multiple") sectionMessage("game", "Several Lekmod DLC folders found. Keep one installed version.", "warning");
-    else sectionMessage("game", found.error || "Civilization V was not found. Select its installation folder and try again.", "error");
+    await verifyGame("");
   } catch (error) { sectionMessage("game", error.message, "error"); }
 });
+el("game-path").addEventListener("input", () =>
+  sectionMessage("game", "Path changed. Use Browse or save connections to verify it.", "warning"));
 el("settings-save").addEventListener("click", async () => {
   const button = el("settings-save"), instance = meta.server_instance;
   button.disabled = true; button.classList.add("busy-action");
@@ -832,7 +877,8 @@ async function openLogs() {
   try {
     const result = await api("/api/logs");
     el("logs-list").textContent = result.events.map(event =>
-      event.at + "  " + event.action + "  " + event.result).join("\n") || "No actions recorded yet.";
+      event.at + "  " + event.action + "  " + event.result +
+      (event.detail ? " · " + event.detail : "")).join("\n") || "No actions recorded yet.";
   } catch (error) { message(error.message, true); }
 }
 function closeLogs() {
@@ -1021,6 +1067,33 @@ el("gamexml").addEventListener("click", () => {
   location.href = "/api/game-xml";
   message("Generated XML download started. This is one file, not a complete mod.");
 });
+function setEditorUpdateLock(locked) {
+  if (locked === editorUpdateLocked) return;
+  const dialog = el("settings-dialog");
+  if (locked) {
+    settingsControlsBeforeUpdate = new Map(Array.from(dialog.querySelectorAll(
+      "button, input, select, textarea"), control => [control, control.disabled]));
+    for (const control of settingsControlsBeforeUpdate.keys()) control.disabled = true;
+    dialog.dataset.updating = "true";
+    dialog.setAttribute("aria-busy", "true");
+  } else {
+    for (const [control, disabled] of settingsControlsBeforeUpdate) control.disabled = disabled;
+    settingsControlsBeforeUpdate.clear();
+    delete dialog.dataset.updating;
+    dialog.removeAttribute("aria-busy");
+  }
+  editorUpdateLocked = locked;
+}
+function editorUpdateFailed(reason) {
+  setEditorUpdateLock(false);
+  el("update-status").classList.remove("busy-inline");
+  el("update-status").textContent = "Editor update failed. Check the details below.";
+  el("update-failure").textContent = reason +
+    " See Logs or localization/workspace/editor-updates/update.log.";
+  el("update-failure").hidden = false;
+  message("Editor update failed: " + reason, true);
+  editorUpdateStarted = 0;
+}
 async function checkLatest() {
   logUI("update-check");
   el("update-status").classList.add("busy-inline");
@@ -1032,7 +1105,7 @@ async function checkLatest() {
     el("update-status").textContent = info.available
       ? "Editor v" + info.latest + " is available (current v" + info.current + ")."
       : "Editor v" + info.current + " is up to date.";
-    el("update-install").disabled = !info.available || !info.can_auto_update;
+    el("update-install").disabled = editorUpdateLocked || !info.available || !info.can_auto_update;
     el("update-badge").hidden = !info.available;
     if (info.available && !info.can_auto_update)
       el("update-status").textContent += " Source checkouts update with Git.";
@@ -1052,10 +1125,7 @@ async function followEditorUpdate() {
     }
     const progress = await api("/api/editor-update-status");
     if (progress.state === "error") {
-      el("update-status").textContent = "Editor update failed: " + progress.error;
-      el("update-status").classList.remove("busy-inline");
-      el("update-install").disabled = false;
-      editorUpdateStarted = 0;
+      editorUpdateFailed(progress.error);
       return;
     }
     if (progress.state === "downloading") {
@@ -1072,16 +1142,14 @@ async function followEditorUpdate() {
     el("update-status").textContent = "The editor is restarting. This page will reconnect automatically…";
   }
   if (Date.now() - editorUpdateStarted > 180000) {
-    el("update-status").classList.remove("busy-inline");
-    el("update-status").textContent = "The editor did not reopen. Double-click the editor EXE to retry; " +
-      "details are in localization/workspace/editor-updates/update.log.";
-    editorUpdateStarted = 0;
+    editorUpdateFailed("The editor did not reopen. Double-click its EXE to retry.");
     return;
   }
   editorUpdateTimer = setTimeout(followEditorUpdate, 700);
 }
 async function startEditorUpdate() {
-  el("update-install").disabled = true;
+  setEditorUpdateLock(true);
+  el("update-failure").hidden = true;
   el("update-status").classList.add("busy-inline");
   el("update-status").textContent = "Checking editor release…";
   try {
@@ -1091,9 +1159,7 @@ async function startEditorUpdate() {
     clearTimeout(editorUpdateTimer);
     followEditorUpdate();
   } catch (error) {
-    el("update-install").disabled = false;
-    el("update-status").classList.remove("busy-inline");
-    el("update-status").textContent = "Editor update failed: " + error.message;
+    editorUpdateFailed(error.message);
   }
 }
 el("update-install").addEventListener("click", () => {

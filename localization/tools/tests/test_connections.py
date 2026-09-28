@@ -13,7 +13,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.connections import (
     DownloadCancelled, apply_game, download_compatible_source, extract_source_archive,
-    save_settings, settings, TEAM_SNAPSHOT_URL,
+    inspect_game, save_settings, settings, steam_game_candidates, TEAM_SNAPSHOT_URL,
 )
 
 
@@ -70,6 +70,41 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different gameplay data"):
             apply_game(self.project, self.game, self.installed.name, self.home)
         self.assertIn(b'Id="2"', self.target.read_bytes())
+
+    def test_game_folder_must_contain_game_and_matching_lekmod(self):
+        """A selected Downloads folder or broken DLC must never enable Apply."""
+        downloads = self.home / "Downloads"
+        downloads.mkdir()
+        self.assertEqual(inspect_game(downloads, self.project)["state"], "missing_game")
+        self.assertIn("CivilizationV.exe", inspect_game(downloads)["error"])
+        self.assertEqual(inspect_game(self.game, self.project)["state"], "installed")
+        self.target.write_text("<GameData><Rules>", encoding="utf-8")
+        self.assertEqual(inspect_game(self.game, self.project)["state"], "damaged")
+        self.target.unlink()
+        self.assertEqual(inspect_game(self.game, self.project)["state"], "damaged")
+        self.installed.rename(self.home / "temporarily-uninstalled")
+        self.assertEqual(inspect_game(self.game, self.project)["state"], "vanilla")
+
+    def test_changed_game_rules_are_not_approved_for_apply(self):
+        """Even a valid XML from another mod build is a mismatch."""
+        self.target.write_bytes(self.target.read_bytes().replace(b'Id="1"', b'Id="2"'))
+        result = inspect_game(self.game, self.project)
+        self.assertEqual(result["state"], "mismatch")
+        self.assertIn("gameplay XML differs", result["error"])
+
+    def test_steam_libraries_include_custom_game_directory(self):
+        """Automatic discovery follows libraryfolders and appmanifest names."""
+        root = self.home / "Steam"
+        library = self.home / "Other Games"
+        (root / "steamapps").mkdir(parents=True)
+        (root / "steamapps/libraryfolders.vdf").write_text(
+            f'"libraryfolders" {{\n"1" {{ "path" "{library}" }}\n'
+            f'"path" "{library}"\n}}', encoding="utf-8")
+        (library / "steamapps").mkdir(parents=True)
+        (library / "steamapps/appmanifest_8930.acf").write_text(
+            '"AppState"\n{\n"installdir" "Civ5 Custom"\n}', encoding="utf-8")
+        self.assertIn(library / "steamapps/common/Civ5 Custom",
+                      steam_game_candidates([root]))
 
     def test_settings_survive_restart_without_touching_repo(self):
         """Connections, column widths, and prefilling use a private file."""

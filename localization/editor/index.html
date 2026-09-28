@@ -9,7 +9,7 @@
   <style>
     :root { font: 15px/1.45 system-ui, sans-serif; color: #18283d; background: #f2f5fa;
       --control-height: 38px; --control-radius: 7px; --panel-radius: 10px;
-      --control-border: #b9c7d7; --control-padding: 8px 12px; }
+      --control-border: #b9c7d7; --control-padding: 8px 12px; --divider: #d9e2ed; }
     * { box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; }
     body { margin: 0; min-width: 280px; display: flex; flex-direction: column; }
@@ -21,6 +21,10 @@
     button.primary:hover:not(:disabled) { background: #164c7c; }
     button.icon { min-width: var(--control-height); padding: 6px; font-size: 1.25rem; line-height: 1; }
     input, textarea, select { padding: 8px; border: 1px solid #b6c4d4; border-radius: var(--control-radius); background: white; min-width: 0; }
+    input:disabled:not([type=checkbox]), textarea:disabled, select:disabled {
+      background: #edf1f5; border-color: #c5d0db; color: #647384;
+      opacity: 1; cursor: not-allowed;
+    }
     input:not([type=checkbox]):not([type=file]), select { min-height: var(--control-height); }
     input[type=checkbox] { width: 17px; height: 17px; padding: 0; }
     label { display: grid; gap: 4px; font-size: .88rem; }
@@ -40,7 +44,9 @@
     .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 12px; }
     .toolbar label { flex: 0 1 210px; }
     #search { flex: 1 1 240px; min-width: 130px; }
-    .toolbar .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .toolbar .actions { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; width: max-content;
+      margin-left: auto; align-items: center; gap: 7px; }
+    .toolbar .actions label { flex: none; width: max-content; white-space: nowrap; }
     .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
     .pager .page-choice { margin-left: auto; }
     #count { min-width: 100px; text-align: center; }
@@ -72,14 +78,35 @@
     #translation { width: 100%; min-height: 130px; resize: vertical; }
     .fields { display: flex; flex-wrap: wrap; gap: 10px; }
     .fields label { flex: 1 1 160px; }
+    .column-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .column-group { min-width: 0; border: 1px solid #d7e1eb; border-radius: var(--control-radius);
+      background: #f8fafc; padding: 11px; }
+    .column-group h3 { font-size: .92rem; margin: 0 0 6px; color: #315477; }
+    .column-choices { display: grid; gap: 2px; }
+    .column-choice { display: flex; align-items: flex-start; gap: 8px; padding: 5px 6px;
+      border-radius: 5px; font-size: .9rem; min-width: 0; overflow-wrap: anywhere; }
+    .column-choice input { flex: none; margin: 2px 0 0; }
+    .column-choice:hover { background: #eaf2fb; }
+    .column-choice:has(input:disabled) { color: #697788; }
     .quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .panel > .quick { border-top: 1px solid var(--divider); padding-top: 13px; margin-top: 4px; }
     #message { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .tokens { display: flex; flex-wrap: wrap; gap: 5px; }
     .tokens button { border-radius: 4px; background: #e6eef8; padding: 3px 6px; font: .86rem ui-monospace, monospace; }
     .select-custom { display: flex; gap: 5px; }
     .select-custom > * { flex: 1; max-width: 100%; }
-    .settings-group { border-top: 1px solid #d9e2ed; padding-top: 14px; display: grid; gap: 10px; }
+    .settings-group { border-top: 1px solid var(--divider); padding-top: 14px; display: grid; gap: 10px; }
     .settings-group:first-of-type { border: 0; padding-top: 0; }
+    #settings-dialog[data-updating="true"] .settings-group:not(.editor-update-group),
+    #settings-dialog[data-updating="true"] .foot { display: none; }
+    #settings-dialog[data-updating="true"] .editor-update-group { border-top: 0; padding-top: 0; }
+    #settings-dialog[data-updating="true"] .editor-update-group a { display: none; }
+    #settings-dialog:not([data-updating="true"]) .settings-group { animation: settings-appear .24s ease-out; }
+    @keyframes settings-appear { from { opacity: .35; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); } }
+    @media (prefers-reduced-motion: reduce) {
+      #settings-dialog:not([data-updating="true"]) .settings-group { animation: none; }
+    }
     .section-status:not(:empty) { padding: 9px 11px; border-radius: 7px; background: #e9f5eb; color: #246a39; }
     .section-status.warning:not(:empty) { background: #fff3d8; color: #78501d; }
     .section-status.busy:not(:empty) { background: #eef4fb; color: #204b73; }
@@ -96,10 +123,12 @@
     .mode-chip { border-radius: 50px; font-weight: 650; }
     .mode-chip { display: inline-flex; align-items: center; gap: 7px; }
     .mode-chip svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .mode-chip[data-mode="translator"] { background: #284e6d; border-color: #77a6bd; }
+    .mode-chip[data-mode="developer"] { background: #4e3a66; border-color: #b099ce; }
     .icon-control { width: var(--control-height); height: var(--control-height); display: inline-flex; align-items: center; justify-content: center; padding: 5px; }
     .icon-control svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .filters-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
-    .filter-dates { grid-column: 1 / -1; border-top: 1px solid #d9e2ed; padding-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .filter-dates { grid-column: 1 / -1; border-top: 1px solid var(--divider); padding-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
     .filter-dates .date-field { grid-column: 1 / -1; }
     .input-row { display: flex; align-items: center; gap: 6px; }
     .input-row input { flex: 1; min-width: 0; }
@@ -116,7 +145,8 @@
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
     .row > label { flex: 1 1 260px; }
     .row > button { flex: 0 0 auto; }
-    dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+    dialog .foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
+      border-top: 1px solid var(--divider); padding-top: 14px; margin-top: 3px; }
     dialog .foot .exit { margin-right: auto; }
     a { color: #205d98; }
     dialog a { overflow-wrap: anywhere; }
@@ -133,6 +163,7 @@
       .panel { max-height: 45vh; }
       .pager { justify-content: space-between; }
       .fields label { flex: 1 1 100%; }
+      .column-groups { grid-template-columns: 1fr; }
       .filters-grid { grid-template-columns: 1fr; }
       .filter-dates { grid-template-columns: 1fr; }
       button { min-height: 39px; }
@@ -144,7 +175,7 @@
   <div class="headline">
     <h1>Lekmod Localization Editor <small id="editor-version"></small></h1>
     <span id="update-badge" class="badge" hidden>Editor update available</span>
-    <button id="mode" class="mode-chip" title="Switch between Translator and Developer" aria-pressed="false"><svg id="translator-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h10M8 3v3m3 0c-.4 4-3 7-7 9m1-6c1.1 2.3 3.5 4.4 6 5.5M13 20l4-10 4 10m-6.5-3h5"/></svg><svg id="developer-icon" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-3-16-2 18"/></svg><span id="mode-name">Translator</span></button>
+    <button id="mode" class="mode-chip" data-mode="translator" title="Switch between Translator and Developer" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="mode-symbol" d="M4 5h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3v-3H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm2 9 2.5-6 2.5 6m-4-2h3m3-4h4m-2 0c0 3-1 5-3 6m1-4c.5 2 1.5 3 3 4"/></svg><span id="mode-name">Translator</span></button>
     <button id="logs-button" title="Open the local action log">Logs</button>
     <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
   </div>
@@ -237,7 +268,7 @@
       <p class="hint">A connected project can be edited without a game. To apply its XML in game, install one matching Lekmod DLC first.</p>
       <p id="game-status" class="section-status" role="status" aria-live="polite"></p>
       <div class="row"><label>Civilization V folder<input id="game-path" placeholder="Path to the game installation"></label><button id="game-browse">Browse…</button></div>
-      <button id="detect-game">Find / verify game</button>
+      <button id="detect-game">Find installed game automatically</button>
     </div>
     <div class="settings-group"><details id="vanilla-details"><summary>Vanilla reference <span id="vanilla-summary" class="hint">Optional comparison: original vanilla text is not loaded.</span></summary>
       <div class="accordion-body"><p id="snapshot-status" class="section-status" role="status" aria-live="polite"></p>
@@ -255,14 +286,15 @@
         <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
       </div></details>
     </div>
-    <div class="settings-group"><h2>Editor updates</h2>
+    <div class="settings-group editor-update-group"><h2>Editor updates</h2>
+      <p id="update-failure" class="section-status error" role="alert" hidden></p>
       <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
       <div class="row"><button id="update-check" class="icon-control" title="Check latest editor version" aria-label="Check latest editor version">⟳</button><button id="update-install" disabled>Download and update editor</button></div>
     </div>
     <div class="foot"><button id="editor-quit" class="exit" title="Stop the editor running in the background">Quit editor</button><button id="settings-close">Cancel</button><button id="settings-save" class="primary">Save connections</button></div>
   </section>
 </dialog>
-<dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="fields"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
+<dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="column-groups"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
 <dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
 <dialog id="create-key-dialog"><section><div class="dialog-heading"><h2>Create new English text key</h2><button id="create-x" type="button" class="icon-control" aria-label="Close without creating a key" title="Close without creating">×</button></div><p class="hint">Creates a new Row in the primary English source. The key appears in game only when gameplay XML, SQL or Lua refers to it.</p><label>Create TXT_KEY identifier<input id="create-identifier" placeholder="TXT_KEY_MY_NEW_DESCRIPTION" autocomplete="off"></label><label>English source text<textarea id="create-text"></textarea></label><div class="fields"><label>Source file<input id="create-source" disabled></label><label>Line<input id="create-line" disabled></label><label>Operation<select id="create-operation" disabled><option>Row</option></select></label></div><p id="create-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="create-cancel">Cancel</button><button id="create-confirm" class="primary">Create key</button></div></section></dialog>
 <dialog id="exports-dialog"><section><h2>Downloads</h2><p>Share a translation or English source ZIP with a maintainer. Downloads do not send data or install the mod.</p><button id="share">Download translation ZIP</button><button id="share-english" hidden>Download English source ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>

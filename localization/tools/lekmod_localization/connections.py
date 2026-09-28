@@ -159,26 +159,80 @@ def validate_game(root: Path) -> Path:
 
 
 def detect_game() -> str:
-    """Use the launcher's standard Steam locations and Windows registry."""
-    paths = [Path(f"{drive}:/Program Files (x86)/Steam/steamapps/common/Sid Meier's Civilization V")
-             for drive in "CDE"]
-    paths += [Path("C:/Program Files/Steam/steamapps/common/Sid Meier's Civilization V")]
+    """Find installed Civ V through Windows Steam roots and all configured libraries."""
+    drives = "CDE"
     if sys.platform == "win32":
+        import ctypes
         import winreg
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives = "".join(chr(65 + index) for index in range(2, 26)
+                         if mask & (1 << index))
+    steam_roots = [Path(f"{drive}:/{folder}") for drive in drives
+                   for folder in ("Program Files (x86)/Steam", "Program Files/Steam",
+                                  "Steam", "SteamLibrary")]
+    paths = []
+    if sys.platform == "win32":
         for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
             for key_name in (r"SOFTWARE\Valve\Steam", r"SOFTWARE\WOW6432Node\Valve\Steam"):
                 try:
                     with winreg.OpenKey(hive, key_name) as key:
                         steam, _ = winreg.QueryValueEx(key, "InstallPath")
-                    paths.append(Path(steam) / "steamapps/common/Sid Meier's Civilization V")
+                    steam_roots.append(Path(steam))
                 except OSError:
                     pass
+            for key_name in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 8930",
+                             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 8930"):
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        location, _ = winreg.QueryValueEx(key, "InstallLocation")
+                    paths.append(Path(location))
+                except OSError:
+                    pass
+    paths.extend(steam_game_candidates(steam_roots))
+    fallback = ""
+    seen = set()
     for path in paths:
-        try:
-            return str(validate_game(path))
-        except ValueError:
+        if str(path).casefold() in seen:
             continue
-    return ""
+        seen.add(str(path).casefold())
+        try:
+            valid = str(validate_game(path))
+            if installed_mods(path):
+                return valid
+            if not fallback:
+                fallback = valid
+        except (OSError, ValueError):
+            continue
+    return fallback
+
+
+def steam_game_candidates(roots: list[Path]) -> list[Path]:
+    """Follow Steam libraryfolders.vdf and the game's install manifest."""
+    libraries = list(roots)
+    for root in roots:
+        manifest = root / "steamapps/libraryfolders.vdf"
+        try:
+            if manifest.stat().st_size > 2 * 1024 * 1024:
+                continue
+            content = manifest.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        for directory in re.findall(r'^\s*"path"\s*"([^"]+)"', content, re.MULTILINE):
+            libraries.append(Path(directory.replace("\\\\", "\\")))
+    candidates = []
+    for library in libraries:
+        steamapps = library / "steamapps"
+        names = ["Sid Meier's Civilization V"]
+        manifest = steamapps / "appmanifest_8930.acf"
+        try:
+            if manifest.stat().st_size <= 1024 * 1024:
+                content = manifest.read_text(encoding="utf-8-sig")
+                names = re.findall(r'^\s*"installdir"\s*"([^"]+)"', content,
+                                   re.MULTILINE) + names
+        except (OSError, UnicodeError):
+            pass
+        candidates.extend(steamapps / "common" / name for name in names)
+    return candidates
 
 
 def installed_mods(game: Path) -> list[dict]:
@@ -195,6 +249,61 @@ def installed_mods(game: Path) -> list[dict]:
         internal = stamp.read_text(encoding="utf-8-sig").strip() if stamp.is_file() else ""
         result.append({"name": folder.name, "version": internal,
                        "release": folder.name[len("LEKMOD_"):]})
+    return result
+
+
+def inspect_game(root: Path, project: Path | None = None) -> dict:
+    """Report whether this folder can safely receive the project's localization."""
+    path = str(root)
+    result = {"path": path, "mods": [], "state": "missing_game", "error": ""}
+    try:
+        game = validate_game(root)
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+        return result
+    result["path"] = str(game)
+    try:
+        folders = [folder for folder in (game / "Assets/DLC").iterdir()
+                   if folder.is_dir() and folder.name.upper().startswith("LEKMOD_")]
+    except OSError as error:
+        result["error"] = "Cannot read the game's DLC folder: " + str(error)
+        return result
+    if not folders:
+        result["state"] = "vanilla"
+        return result
+    if len(folders) != 1:
+        result.update(state="multiple", error="Several Lekmod DLC folders found. Keep one installed version.")
+        return result
+    folder = folders[0]
+    xml = folder / "Override/CIV5Units_Mongol.xml"
+    stamp = folder / "VERSION"
+    if not xml.is_file() or not stamp.is_file():
+        result.update(state="damaged", error="This Lekmod DLC is missing VERSION or "
+                      "Override/CIV5Units_Mongol.xml. Reinstall the matching mod.")
+        return result
+    try:
+        mod = installed_mods(game)[0]
+        result["mods"] = [mod]
+        game_rules = _gameplay_digest(xml)
+        if not mod["version"] or not KEY.fullmatch(mod["version"]):
+            raise ValueError("This Lekmod DLC has an invalid VERSION file.")
+        if project is not None:
+            info = validate_project(project, full=False)
+            release = release_version(project)
+            if (mod["version"].casefold() != info["version"].casefold() or
+                    mod["release"].casefold() != release.casefold()):
+                result.update(state="mismatch", error="Installed Lekmod version differs "
+                              f"from this project ({info['version']}, {release}).")
+                return result
+            source = project / "LEKMOD/Override/CIV5Units_Mongol.xml"
+            if _gameplay_digest(source) != game_rules:
+                result.update(state="mismatch", error="Installed Lekmod gameplay XML differs "
+                              "from this project. Install its matching release before applying text.")
+                return result
+    except (OSError, ValueError, ET.ParseError, IndexError) as error:
+        result.update(state="damaged", error="Cannot verify Lekmod XML or version: " + str(error))
+        return result
+    result["state"] = "installed"
     return result
 
 

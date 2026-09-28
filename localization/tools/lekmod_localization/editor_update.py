@@ -232,13 +232,21 @@ def _replace(source: Path, target: Path) -> None:
 def _record(home: Path, state: str, detail: str) -> None:
     """Keep the helper's diagnostics on disk, since it has no console."""
     workspace = home / "localization/workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "editor-updates").mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).isoformat()
+    safe_detail = re.sub(r"(?i)\b(password|secret|token)\s*[:=]\s*\S+",
+                         r"\1=[redacted]", detail)
+    safe_detail = re.sub(r"https?://\S+", "[link]", safe_detail)
     with (workspace / "editor-updates/update.log").open("a", encoding="utf-8") as handle:
-        handle.write(f"{timestamp}  {state}  {detail}\n")
+        handle.write(f"{timestamp}  {state}  {safe_detail}\n")
+    event = {"at": timestamp, "action": "editor-update-install", "result": state}
+    if state == "failure":
+        # The GUI has no terminal. Keep the cause in its Logs after rollback.
+        event["detail"] = re.sub(
+            r"(?i)\b[A-Z]:[\\/]\S+|(?<!\w)/(?:[^\s/]+/)+[^\s]*",
+            "[path]", safe_detail)[:360]
     with (workspace / "editor-actions.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"at": timestamp, "action": "editor-update-install",
-                                 "result": state}) + "\n")
+        handle.write(json.dumps(event) + "\n")
 
 
 def _wait_ready(home: Path, ticket: str, expected: str, process: subprocess.Popen) -> dict:
@@ -335,7 +343,6 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
                 except OSError as rollback_error:
                     rollback_ok = False
                     failure += f"; restoring {name} failed: {rollback_error}"
-        _record(home, "failure", failure)
         if (rollback_ok and not _pid_alive(old_pid) and
                 (home / "LekmodLocalizationEditor.exe").is_file()):
             try:
@@ -349,9 +356,10 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, close_fds=True,
                                  creationflags=subprocess.CREATE_NO_WINDOW)
-                _record(home, "failure", "Previous editor reopened after failed update")
+                _record(home, "recovered", "Previous editor reopened after failed update")
             except OSError as restart_error:
-                _record(home, "failure", f"Could not reopen previous editor: {restart_error}")
+                failure += f"; could not reopen previous editor: {restart_error}"
+        _record(home, "failure", failure)
         raise RuntimeError(failure) from error
 
 

@@ -17,11 +17,26 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
-    UPDATE_FILES, latest_release, stage_release, installer_command, launch_update,
+    UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
 )
 
 
 class UpdateTests(unittest.TestCase):
+    def test_failed_installer_is_explained_in_local_action_log(self):
+        """A rollback preserves its cause in Logs without disclosing a password."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            _record(home, "failure", "EXE was locked at C:\\User\\Private\\editor.exe; password=private-value")
+            _record(home, "recovered", "Previous editor reopened after failed update")
+            path = home / "localization/workspace/editor-actions.jsonl"
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(events[0]["result"], "failure")
+            self.assertIn("EXE was locked", events[0]["detail"])
+            self.assertNotIn("Private", events[0]["detail"])
+            self.assertNotIn("private-value", path.read_text())
+            self.assertNotIn("private-value", (home / "localization/workspace/editor-updates/update.log").read_text())
+            self.assertEqual(events[-1]["result"], "recovered")
+
     def test_check_stage_and_reject_modified_archive(self):
         """A verified ZIP stages only editor files; private workspace remains."""
         with tempfile.TemporaryDirectory() as temporary:

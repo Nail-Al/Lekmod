@@ -50,14 +50,23 @@ The full snapshot copies official game text. Keep it out of this public Git hist
 
 ### Completing the team baseline (maintainers)
 
-The current reference already contains English and Russian. Keep the full `localization/workspace/vanilla-snapshot.json.gz` beside these tools; do not remake English from a different game build. Close the game, keep its DLC unmodded, and work in a current Git checkout. In PowerShell, find the cache database (select the correct path if several are shown):
+The current reference already contains English and Russian. Keep the full `localization/workspace/vanilla-snapshot.json.gz` beside these tools; do not remake English from a different game build. Close the game, keep its DLC unmodded, and work in a current Git checkout. In PowerShell, discover the most recently updated game cache after launching the selected language:
 
 ```powershell
 Set-Location C:\Projects\Lekmod
-Get-ChildItem "$env:USERPROFILE\Documents\My Games" -Recurse -File `
-  -Filter Localization-Merged.db -ErrorAction SilentlyContinue |
-  Select-Object -ExpandProperty FullName
-$mergedDatabase = 'C:\path\shown\above\Localization-Merged.db'
+$documents = [Environment]::GetFolderPath('MyDocuments')
+$myGamesFolders = @( (Join-Path $documents 'My Games'),
+  (Join-Path $env:USERPROFILE 'Documents\My Games') ) | Select-Object -Unique
+$databases = @( $myGamesFolders | Where-Object { Test-Path -LiteralPath $_ } |
+  ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File `
+    -Filter 'Localization-Merged.db' -ErrorAction SilentlyContinue } |
+  Sort-Object LastWriteTime -Descending )
+if ($databases.Count -eq 0) { throw 'Launch Civ V once, then find Localization-Merged.db in Documents\My Games.' }
+$mergedDatabase = $databases[0].FullName
+Write-Host "Using $mergedDatabase"
+if (-not (Test-Path -LiteralPath '.\localization\workspace\vanilla-snapshot.json.gz')) {
+  throw 'Import the existing encrypted team snapshot before capturing any new languages.'
+}
 py -3.13 -B .\localization\tools\collect_vanilla.py inspect --vanilla-db $mergedDatabase
 ```
 
@@ -74,7 +83,7 @@ Start with **English** in Steam and confirm `en_US` shows at least 1,000 rows an
 | Polish | `PL_PL` |
 | Traditional Chinese | `ZH_HANT_HK` |
 
-After each inspection, save **that one** language using `py -3.13 -B .\localization\tools\collect_vanilla.py capture --vanilla-db $mergedDatabase --locale DE_DE`, replacing `DE_DE` with its table code. The collector creates a separate ignored `localization/workspace/vanilla-captures/<locale>.json.gz` and refuses an existing filename, changed English, or an incomplete table. If it fails, resolve the reason; do not overwrite an earlier capture. Changing Steam language does not replace captures already saved in the workspace.
+After each inspection, save **that one** language using `py -3.13 -B .\localization\tools\collect_vanilla.py capture --vanilla-db $mergedDatabase --locale DE_DE`, replacing `DE_DE` with its table code. The collector creates a separate ignored `localization/workspace/vanilla-captures/<locale>.json.gz` and refuses an existing filename, changed English, or an incomplete table. If it fails, resolve the reason; do not overwrite an earlier capture. Changing Steam language does not replace captures already saved in the workspace. The terminal may keep `$mergedDatabase` across all eight captures; rerun the discovery block after opening a new PowerShell session.
 
 After all eight captures, run `py -3.13 -B .\localization\tools\collect_vanilla.py merge`. It creates **proposals** in `localization/workspace/`: a full `vanilla-snapshot-proposed.json.gz` and a text-free `vanilla-fingerprints-proposed.json.gz`. It refuses missing languages and never overwrites the current baseline. Review the counts for all ten languages, then encrypt the proposed full snapshot without changing the current reference yet:
 
@@ -89,10 +98,10 @@ Upload **only** the new `.enc` to Dropbox, copy its direct link (`dl=1`), and ve
 
 ## Updates and game test
 
-Use **Settings → Editor updates → Check latest version → Download and update**. The Windows editor displays download progress in the browser. The downloaded GUI `.exe` verifies the installed files, replaces only the EXE and listed UI files **in the same folder**, and restarts the editor on the **same browser address**, so this tab reloads automatically. No command window or PowerShell script is needed. Projects, preferences and `localization/workspace/` remain in place. If the new editor fails to serve its page, the updater restores the backup and restarts the previous version. Details are in **Logs** and `localization/workspace/editor-updates/update.log`; startup errors also go to `localization/workspace/editor-startup.log`. Use **Settings → Quit editor** to stop the background process when finished.
+Use **Settings → Editor updates → Check latest version → Download and update**. While updating, Settings shows only the progress section and locks its controls until an error or a restarted editor is ready. The downloaded GUI `.exe` verifies the installed files, replaces only the EXE and listed UI files **in the same folder**, and restarts the editor on the **same browser address**, so this tab reloads automatically. No command window or PowerShell script is needed. Projects, preferences and `localization/workspace/` remain in place. If the new editor fails to serve its page, the updater restores the backup and restarts the previous version. A failure remains visible in Settings and its cause is recorded in **Logs** and `localization/workspace/editor-updates/update.log`; startup errors also go to `localization/workspace/editor-startup.log`. Use **Settings → Quit editor** to stop the background process when finished.
 
 An already installed **legacy** EXE with broken updater code cannot repair itself retroactively. For that **one-time recovery**, close it, update your Git checkout, and run `python -B localization/tools/repair_editor.py --editor-root "C:\path\to\the\old\editor"`. This command downloads and verifies the release, installs it in the same folder, and starts it; no manual ZIP download or workspace move is needed. Normal updates thereafter use the button in Settings. If the old EXE has no complete folder, use the release ZIP once to establish one; do not delete a folder containing your downloaded project.
 
-For an in-game test, install one complete matching Lekmod DLC with its official launcher first. In Settings choose the Civilization V folder and **Find / verify game**. Green means one Lekmod DLC was found; yellow means the game has no Lekmod; red means the game folder is invalid. **Save connections** checks that its version matches the project. After saving a translation, click **Apply to installed game**: the editor compares versions and gameplay data, backs up the installed XML, copies the generated XML, and asks you to restart Civilization V. It does not install a full mod. The game is optional for editing or exporting.
+For an in-game test, install one complete matching Lekmod DLC with its official launcher first. In Settings, **Browse…** checks your selected folder immediately. **Find installed game automatically** clears that choice and searches Steam's configured libraries and Windows installation records. Red means the folder or Lekmod XML cannot be verified; yellow means vanilla Civ V, multiple DLC copies, or a version/rules mismatch; green means one matching Lekmod DLC. **Save connections** checks it again. **Apply to installed game** is available only for a matching installation, and checks again before changing anything. It backs up the installed XML, copies generated localization XML, and asks you to restart Civilization V. The editor checks these files and the mod's gameplay XML; it cannot certify the integrity of every game asset. Use Steam's file verification if other files may be damaged. The game is optional for editing or exporting.
 
 **Need help?** A missing source means select a complete compatible project, not the plain game folder. An empty vanilla cell can mean the snapshot lacks that language. A blank edit date means there is no reliable history for that row; English commit dates are indexed in the project, and new editor saves record their time. A rejected save after another contributor's edit protects their work: copy your draft, reload, and reconcile the changed row. A public Git ZIP download has no Git history, so developers who need full checks should clone the branch.
