@@ -719,9 +719,24 @@ def write_editor_workspace(
     backup: Path | None = None
 
     try:
+        primary = source.parents[2] / "localization/en_US/primary.xml"
+        canonical = (source.parent.name == "Override"
+                     and source.parent.parent.name == "LEKMOD" and primary.is_file())
+        if canonical:
+            from sync_primary_english import marked_block
+            english_section = marked_block(source.read_text(encoding="utf-8"))[2]
         manifest = {
             "schema_version": 1,
             "format": "utf-8-sig CSV",
+            "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "source_english_sha256": (
+                hashlib.sha256(english_section.encode("utf-8")).hexdigest()
+                if canonical else None
+            ),
+            "primary_sha256": (
+                hashlib.sha256(primary.read_bytes()).hexdigest()
+                if canonical else None
+            ),
             "fieldnames": list(EDITOR_FIELDNAMES),
             "editable_fields": list(EDITOR_EDITABLE_FIELDS),
             "locales": {

@@ -35,6 +35,7 @@ import audit_primary_localization
 import build_shipped_localization
 import manage
 import sync_primary_english
+from merge_translation_handoff import MAX_ARCHIVE, merge_handoff
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
@@ -271,6 +272,10 @@ class Editor:
         self.update_state: dict = {"state": "idle"}
         self.integrity_state: dict = {"state": "idle"}
         self.download_cancel = threading.Event()
+        self.save_state: dict = {"state": "idle"}
+        self.handoff_data: bytes | None = None
+        self.handoff_id = ""
+        self.handoff_preview: dict | None = None
         self.last_encrypted_archive: Path | None = None
         self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
         self.events: list[dict] = []
@@ -332,6 +337,30 @@ class Editor:
             self.download_cancel.set()
             self.download_state = {**self.download_state, "state": "canceling"}
         return self.download_state
+
+    def start_translation_save(self, data: dict) -> dict:
+        """Run the costly XML rebuild off the HTTP loop, one save at a time."""
+        if self.save_state.get("state") == "running":
+            raise CatalogError("wait for the previous row to finish saving")
+        job_id = secrets.token_urlsafe(12)
+        self.save_state = {"state": "running", "id": job_id,
+                           "locale": str(data.get("locale", "")),
+                           "key": str(data.get("key", ""))}
+
+        def work() -> None:
+            try:
+                result = self.save_translation(data)
+                self.save_state = {"state": "complete", "id": job_id, **result}
+                self.record_event("translate-background", "success")
+            except Exception as error:
+                self.save_state = {"state": "error", "id": job_id, "error": str(error)}
+                self.record_event("translate-background",
+                                  "error:" + type(error).__name__ + ": " +
+                                  safe_ui_event_detail(str(error)))
+                LOG.exception("Background translation save failed")
+
+        threading.Thread(target=work, daemon=True).start()
+        return self.save_state.copy()
 
     def history_state(self) -> dict[str, bool]:
         """Report whether saved edits can be undone or redone in this session."""
@@ -536,13 +565,21 @@ class Editor:
                  if skipped else ".")}
 
     def export_locale(self, locale: str) -> bytes:
-        """Package one approved CSV for a developer without private vanilla text."""
+        """Keep the single-language API for older editor callers."""
+        return self.export_locales([locale])
+
+    def export_locales(self, locales: list[str]) -> bytes:
+        """Export exactly the checked language CSVs, with no private vanilla text."""
         if not self.ready:
             raise CatalogError("connect a complete compatible Lekmod project first")
-        if locale not in self.manifest().get("locales", {}):
-            raise CatalogError("unknown language")
-        path = TRANSLATIONS / f"{locale}.csv"
+        available = self.manifest().get("locales", {})
+        if (not isinstance(locales, list) or not 1 <= len(locales) <= len(available)
+                or len(set(locales)) != len(locales)
+                or any(locale not in available for locale in locales)):
+            raise CatalogError("select at least one known language without duplicates")
         read_approvals(TRANSLATIONS)
+        payloads = {locale: (TRANSLATIONS / f"{locale}.csv").read_bytes()
+                    for locale in sorted(locales)}
         reference = manage.DEFAULT_REFERENCE.read_bytes()
         revision = None
         if (REPO_ROOT / ".git").exists():
@@ -551,23 +588,73 @@ class Editor:
                 capture_output=True, check=True,
             ).stdout.strip()
         metadata = {
-            "locale": locale,
+            "schema_version": 2,
             "repository_commit": revision,
             "vanilla_reference_sha256": hashlib.sha256(reference).hexdigest(),
+            "english_sha256": hashlib.sha256(
+                sync_primary_english.DEFAULT_ENGLISH.read_bytes()).hexdigest(),
+            "locales": {locale: hashlib.sha256(content).hexdigest()
+                        for locale, content in payloads.items()},
         }
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(f"translations/{locale}.csv", path.read_bytes())
+            for locale, content in payloads.items():
+                archive.writestr(f"translations/{locale}.csv", content)
             archive.writestr("manifest.json", json.dumps(metadata, indent=2) + "\n")
             archive.writestr("README.txt", (
                 "Lekmod localization handoff\n\n"
                 "Send this ZIP to a Lekmod developer or attach it to a review.\n"
-                "The developer should compare the manifest, copy the CSV into\n"
-                "localization/translations/, run localization/tools/manage.py prepare\n"
-                "and check, then review and commit the generated game XML.\n"
+                "Each selected language CSV contains all saved rows, not just recent\n"
+                "edits. Do not replace a developer's CSV with these files.\n"
+                "From the repository root, run localization/tools/manage.py prepare,\n"
+                "then localization/tools/merge_translation_handoff.py <this ZIP>\n"
+                "to preview additions, stale rows and conflicts by language and key.\n"
+                "Resolve conflicts with --use-incoming LOCALE:TXT_KEY or\n"
+                "--keep LOCALE:TXT_KEY, then run it again with --apply.\n"
+                "Or import and review this ZIP in another Localization Editor.\n"
+                "Then run localization/tools/manage.py prepare and check, review\n"
+                "the generated game XML, and commit the reviewed files.\n"
                 "This package contains no private vanilla snapshot.\n"
             ))
         return stream.getvalue()
+
+    def preview_handoff(self, data: bytes) -> dict:
+        """Hold an imported ZIP only in memory until this editor session ends."""
+        if not self.ready or not isinstance(data, bytes) or not 0 < len(data) <= MAX_ARCHIVE:
+            raise CatalogError("connect a project and choose a valid handoff ZIP")
+        report = merge_handoff(data, REPO_ROOT)
+        self.handoff_data = data
+        self.handoff_id = secrets.token_urlsafe(16)
+        self.handoff_preview = report
+        return {"handoff_id": self.handoff_id, **report}
+
+    def apply_handoff(self, data: dict) -> dict:
+        """Recheck the preview, merge selected rows, and rebuild the project XML."""
+        if (self.handoff_data is None or self.handoff_preview is None or
+                data.get("handoff_id") != self.handoff_id):
+            raise CatalogError("import a handoff ZIP before applying it")
+        choices = data.get("choices")
+        if not isinstance(choices, dict) or len(choices) > 20000:
+            raise CatalogError("invalid handoff decisions")
+        game = build_shipped_localization.DEFAULT_SOURCE
+        old_game = game.read_bytes()
+        report = merge_handoff(self.handoff_data, REPO_ROOT, apply=True, choices=choices,
+                               expected=self.handoff_preview["target_sha256"])
+        if report["applied"]:
+            try:
+                manage.prepare(manage.read_config(), self.snapshot)
+            except Exception:
+                for locale, path in report["backups"].items():
+                    atomic_bytes(TRANSLATIONS / f"{locale}.csv", Path(path).read_bytes())
+                atomic_bytes(game, old_game)
+                manage.prepare(manage.read_config(), self.snapshot)
+                raise
+            self.actions = []
+            self.cursor = 0
+        self.handoff_data = None
+        self.handoff_preview = None
+        self.handoff_id = ""
+        return {**report, **self.history_state()}
 
     def export_english(self) -> bytes:
         """Hand off a changed canonical English file without private vanilla text."""
@@ -608,11 +695,10 @@ class Editor:
                         if approval_path.is_file() else "")
         english_sha = hashlib.sha256(
             sync_primary_english.DEFAULT_ENGLISH.read_bytes()).hexdigest()
-        timestamps = {}
+        approved_details = {}
         if approval_path.is_file():
             with approval_path.open(encoding="utf-8-sig", newline="") as handle:
-                timestamps = {record["key"]: record.get("updated_at", "")
-                              for record in csv.DictReader(handle)}
+                approved_details = {record["key"]: record for record in csv.DictReader(handle)}
         query = query.casefold()
         filters = filters or {}
         selected = []
@@ -622,7 +708,7 @@ class Editor:
             item["approved_sha256"] = approved_sha
             item["english_source_sha256"] = english_sha
             item["english_edited_at"] = self.english_dates.get(row["key"], "")
-            item["translation_updated_at"] = timestamps.get(row["key"], "")
+            item["translation_updated_at"] = approved_details.get(row["key"], {}).get("updated_at", "")
             saved = approved.get(row["key"])
             if saved:
                 item["translation_status"] = (
@@ -632,6 +718,10 @@ class Editor:
                 )
                 item["translation"] = saved["text"]
                 item["translation_characters"] = str(character_count(saved["text"]))
+                item["translation_source_fingerprint"] = saved["source_fingerprint"]
+                item["translation_gender"] = saved.get("gender", "")
+                item["translation_plurality"] = saved.get("plurality", "")
+                item["translator_note"] = approved_details[row["key"]]["translator_note"]
             if (not query or any(query in item[field].casefold()
                                  for field in ("key", "lekmod_en_US", "vanilla_en_US",
                                                "vanilla_target", "translation"))) and matches_filters(
@@ -790,7 +880,10 @@ class Editor:
                 "before_game_hash": old_game_hash, "after_game_hash": new_game_hash,
                 "build": manage.read_config()["build"],
             })
-        return {"applied_to_game": apply_to_game, **self.history_state()}
+        return {"applied_to_game": apply_to_game,
+                "approved_sha256": hashlib.sha256(new_approved).hexdigest(),
+                "translation_updated_at": timestamps.get(key, ""),
+                **self.history_state()}
 
     def save_primary(self, data: dict, *, record: bool = True) -> dict:
         """Change one English text, then refresh generated XML and draft statuses."""
@@ -1102,6 +1195,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.download(archive.name, archive.read_bytes(), "application/octet-stream")
                 elif url.path == "/api/download-status":
                     self.respond(200, editor.download_state)
+                elif url.path == "/api/save-status":
+                    self.respond(200, editor.save_state.copy())
                 elif url.path == "/api/rows":
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
@@ -1124,15 +1219,13 @@ def make_handler(editor: Editor, token: str, port: int):
                         index=int(one("index")) if "index" in args else None,
                     ))
                 elif url.path == "/api/export":
-                    locale = one("locale")
-                    data = editor.export_locale(locale)
-                    self.download(f"lekmod-{locale}-translations.zip", data, "application/zip")
+                    locales = one("locales").split(",") if "locales" in args else [one("locale")]
+                    data = editor.export_locales(locales)
+                    label = locales[0] if len(locales) == 1 else "selected"
+                    self.download(f"lekmod-{label}-translations.zip", data, "application/zip")
                 elif url.path == "/api/export-english":
                     self.download("lekmod-english-source.zip", editor.export_english(),
                                   "application/zip")
-                elif url.path == "/api/game-xml":
-                    game = build_shipped_localization.DEFAULT_SOURCE
-                    self.download(game.name, game.read_bytes(), "application/xml")
                 else:
                     self.respond(404, {"error": "not found"})
             except (CatalogError, OSError, ValueError, urllib.error.URLError,
@@ -1148,17 +1241,39 @@ def make_handler(editor: Editor, token: str, port: int):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if self.path == "/api/snapshot":
+                    if editor.save_state.get("state") == "running":
+                        raise CatalogError("wait until the current row finishes saving")
                     if not 0 < length <= 16 * 1024 * 1024:
                         raise CatalogError("invalid snapshot upload size")
                     self.respond(200, editor.import_snapshot(self.rfile.read(length)))
                     editor.record_event("snapshot-import", "success")
+                    return
+                if self.path == "/api/handoff-preview":
+                    if editor.save_state.get("state") == "running":
+                        raise CatalogError("wait until the current row is saved")
+                    if not 0 < length <= MAX_ARCHIVE:
+                        raise CatalogError("invalid handoff ZIP size")
+                    self.respond(200, editor.preview_handoff(self.rfile.read(length)))
+                    editor.record_event("handoff-preview", "success")
                     return
                 if not 0 < length <= 512 * 1024:
                     raise CatalogError("invalid request size")
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
                     raise CatalogError("invalid request")
-                if self.path == "/api/translate":
+                if editor.save_state.get("state") == "running" and self.path in {
+                    "/api/translate", "/api/translate-async", "/api/primary",
+                    "/api/create-primary", "/api/rename-primary", "/api/connect",
+                    "/api/snapshot", "/api/snapshot-cloud", "/api/editor-update",
+                    "/api/apply-game", "/api/check", "/api/undo", "/api/redo",
+                    "/api/handoff-apply", "/api/stop",
+                }:
+                    raise CatalogError("wait until the current row finishes saving")
+                if self.path == "/api/translate-async":
+                    result = editor.start_translation_save(data)
+                elif self.path == "/api/handoff-apply":
+                    result = editor.apply_handoff(data)
+                elif self.path == "/api/translate":
                     result = editor.save_translation(data)
                 elif self.path == "/api/primary":
                     result = editor.save_primary(data)
@@ -1259,6 +1374,9 @@ def make_handler(editor: Editor, token: str, port: int):
                                "snapshot_url"}
                     if set(data) - allowed:
                         raise CatalogError("unknown editor preference")
+                    if editor.save_state.get("state") == "running" and (
+                            "mode" in data or "project_path" in data):
+                        raise CatalogError("wait until the current row finishes saving")
                     if data.get("mode") == "developer":
                         validate_project(REPO_ROOT, full=True)
                     result = {"preferences": save_settings(data)}
@@ -1267,7 +1385,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     if name not in {"row-selected", "mode-switch", "settings-open",
                                     "columns-changed", "page-changed", "prefill-changed",
                                     "logs-open", "logs-download", "copy", "wrap-changed",
-                                    "translation-export", "english-export", "xml-export", "update-check",
+                                    "translation-export", "english-export", "update-check",
                                     "update-verify",
                                     "filter-changed", "page-size-changed", "discard",
                                     "ui-error", "ui-warning", "project-reconnect", "key-dialog"}:
@@ -1328,8 +1446,9 @@ def make_handler(editor: Editor, token: str, port: int):
             except (CatalogError, OSError, ValueError, ET.ParseError, urllib.error.URLError,
                     subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 self.respond(400, {"error": str(error)})
-                detail = (": " + str(error)[:400]) if self.path in (
-                    "/api/check", "/api/preferences") else ""
+                detail = (": " + safe_ui_event_detail(str(error)[:500])) if self.path in (
+                    "/api/check", "/api/preferences", "/api/handoff-preview",
+                    "/api/handoff-apply", "/api/translate-async") else ""
                 editor.record_event(self.path.removeprefix("/api/"),
                                     "error:" + type(error).__name__ + detail)
 

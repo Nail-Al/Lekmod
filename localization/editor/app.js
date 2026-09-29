@@ -28,6 +28,18 @@ let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
 let editorUpdateInstance = "", editorIntegrity = null, latestEditorInfo = null;
 let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
 let pendingColumns = null;
+let savePending = null, failedSaves = [];
+try { failedSaves = JSON.parse(sessionStorage.getItem("failed-translation-drafts") || "[]"); }
+catch (error) { failedSaves = []; }
+if (!Array.isArray(failedSaves)) failedSaves = [];
+function rememberFailedSaves() {
+  try { sessionStorage.setItem("failed-translation-drafts", JSON.stringify(failedSaves)); }
+  catch (error) { message("Could not preserve failed drafts in browser storage.", true); }
+  el("restore-failed").hidden = !failedSaves.length;
+}
+let saveCompletion = null, resolveSaveCompletion = null;
+let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
+let mergeApplying = false;
 let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
 function logUI(name, detail = "") { api("/api/event", {name, detail}).catch(() => {}); }
 
@@ -94,7 +106,10 @@ function captureDraft() {
     note: el("note").value, identifier: developer() ? el("identifier").value : ""});
 }
 function hasUnsaved() { return !!chosen && savedDraft !== null && captureDraft() !== savedDraft; }
-function markDraft() { el("discard").disabled = !hasUnsaved(); el("save").disabled = !hasUnsaved(); }
+function markDraft() {
+  el("discard").disabled = !hasUnsaved();
+  el("save").disabled = !hasUnsaved() || !!savePending;
+}
 function restoreDraft() {
   if (!savedDraft) return;
   const draft = JSON.parse(savedDraft);
@@ -118,7 +133,13 @@ async function continueNavigation(save) {
     for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = true;
     el("unsaved-save").classList.add("busy-action");
     let saved;
-    try { saved = await saveCurrent(); }
+    try {
+      if (saveCompletion) {
+        message("Waiting for the previous row to finish saving…");
+        await saveCompletion;
+      }
+      saved = await saveCurrent();
+    }
     finally {
       guardSaving = false;
       for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = false;
@@ -154,8 +175,8 @@ async function copyText(value) {
   catch (error) { message("Clipboard access was denied by the browser.", true); }
 }
 function updateHistory(state) {
-  el("undo").disabled = !state.undo_available;
-  el("redo").disabled = !state.redo_available;
+  el("undo").disabled = !!savePending || !state.undo_available;
+  el("redo").disabled = !!savePending || !state.redo_available;
 }
 function renderConnections() {
   const project = meta.project;
@@ -174,9 +195,10 @@ function renderConnections() {
     : game.state === "multiple" ? "Game: multiple Lekmod copies"
     : game.path ? "Game: invalid folder" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
-  el("game-apply").disabled = !matches || !meta.ready;
-  el("workspace").hidden = !meta.ready || inLogs;
-  el("no-source").hidden = meta.ready || inLogs;
+  el("game-apply").disabled = !!savePending || !matches || !meta.ready;
+  el("workspace").hidden = !meta.ready || inLogs || inMerge;
+  el("merge-view").hidden = !meta.ready || inLogs || !inMerge;
+  el("no-source").hidden = meta.ready || inLogs || inMerge;
   el("connection-error").textContent = meta.connection_error || "";
 }
 function updateBaselineNotice() {
@@ -353,6 +375,11 @@ function renderTable(rows) {
   head.append(header);
   for (const row of rows) {
     const tr = document.createElement("tr");
+    if (savePending && savePending.key === row.key &&
+        savePending.locale === el("locale").value && !developer()) {
+      tr.classList.add("saving"); tr.setAttribute("aria-busy", "true");
+      tr.title = "This row is saving; you can edit other rows.";
+    }
     for (const [field] of cols) {
       const td = document.createElement("td");
       const value = String(row[field] ?? "");
@@ -378,6 +405,7 @@ function renderTable(rows) {
       tr.append(td);
     }
     tr.addEventListener("click", () => {
+      if (tr.classList.contains("saving")) return;
       if (!hasUnsaved()) { selectRow(row, tr); return; }
       guardNavigation(async () => {
         await load();
@@ -395,6 +423,8 @@ function tableWidth(cols) {
   el("table").style.width = cols.reduce((sum, [field]) => sum + colWidth(field), 0) + "px";
 }
 function selectRow(row, tr) {
+  if (savePending && !developer() && row.key === savePending.key &&
+      el("locale").value === savePending.locale) return;
   logUI("row-selected");
   chosen = row;
   document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
@@ -569,6 +599,7 @@ async function refresh() {
   meta = await api("/api/meta");
   el("app-loading").hidden = true;
   prefs = meta.preferences;
+  el("restore-failed").hidden = !failedSaves.length;
   el("row-panel").open = prefs.panel_expanded !== false;
   locales = meta.locales;
   widths = {...prefs.column_widths};
@@ -799,6 +830,7 @@ el("snapshot-cloud").addEventListener("click", async () => {
 el("mode").addEventListener("click", async () => {
   guardNavigation(async () => {
     try {
+      inMerge = false; el("merge-view").hidden = true;
       await preference({mode: developer() ? "translator" : "developer"});
       filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
       if (inLogs) closeLogs();
@@ -892,6 +924,7 @@ async function openLogs() {
   inLogs = true;
   logUI("logs-open");
   el("workspace").hidden = true;
+  el("merge-view").hidden = true;
   el("no-source").hidden = true;
   el("logs-view").hidden = false;
   try {
@@ -959,8 +992,156 @@ el("discard-confirm").addEventListener("click", () => {
   }
   el("discard-dialog").close();
 });
-el("exports-button").addEventListener("click", () => el("exports-dialog").showModal());
-el("exports-close").addEventListener("click", () => el("exports-dialog").close());
+function fillExchange() {
+  const choices = el("exchange-locales");
+  choices.replaceChildren();
+  const active = el("locale").value;
+  for (const locale of Object.keys(locales)) {
+    const label = document.createElement("label");
+    const check = document.createElement("input");
+    check.type = "checkbox"; check.value = locale; check.checked = locale === active;
+    label.append(check, document.createTextNode(locale));
+    choices.append(label);
+  }
+  el("handoff-file").value = "";
+  sectionMessage("exchange", "");
+}
+el("exports-button").addEventListener("click", () => {
+  fillExchange(); el("exports-dialog").showModal();
+});
+for (const id of ["exports-close", "exports-x"])
+  el(id).addEventListener("click", () => el("exports-dialog").close());
+function mergeDecisions() {
+  return Object.fromEntries((mergeReview?.items || []).map(item =>
+    [item.id, mergeChoices[item.id] || item.choice]));
+}
+function renderMerge() {
+  if (!mergeReview) return;
+  const items = mergeReview.items;
+  const body = el("merge-table").querySelector("tbody");
+  body.replaceChildren();
+  for (const item of items.slice(mergePage * 100, (mergePage + 1) * 100)) {
+    const row = document.createElement("tr");
+    const columns = [
+      item.locale + " · " + item.status + "\n" + item.key,
+      item.english || "(English source unavailable)",
+      (item.team || "(none)") + (item.team_gender ? "\nGender: " + item.team_gender : "") +
+        (item.team_plurality ? "\nPlurality: " + item.team_plurality : "") +
+        (item.team_note ? "\nNote: " + item.team_note : ""),
+      item.incoming + (item.incoming_gender ? "\nGender: " + item.incoming_gender : "") +
+        (item.incoming_plurality ? "\nPlurality: " + item.incoming_plurality : "") +
+        (item.incoming_note ? "\nNote: " + item.incoming_note : ""),
+    ];
+    for (const value of columns) {
+      const cell = document.createElement("td"); cell.textContent = value;
+      row.append(cell);
+    }
+    const cell = document.createElement("td");
+    const select = document.createElement("select");
+    const options = item.status === "new"
+      ? [["incoming", "Add incoming"], ["keep", "Skip"]]
+      : item.status === "stale"
+        ? [["review", "Review required"], ["keep", "Skip stale row"]]
+        : [["review", "Review required"], ["incoming", "Use incoming"], ["keep", "Keep current"]];
+    for (const [value, label] of options) select.append(new Option(label, value));
+    select.value = mergeChoices[item.id] || item.choice;
+    select.addEventListener("change", () => {
+      mergeChoices[item.id] = select.value; updateMergeSummary();
+    });
+    cell.append(select);
+    const dates = document.createElement("small");
+    dates.className = "hint";
+    dates.textContent = "\nCurrent: " + (item.team_updated_at || "unknown") +
+      " · Incoming: " + (item.incoming_updated_at || "unknown");
+    cell.append(dates); row.append(cell);
+    body.append(row);
+  }
+  el("merge-prev").disabled = mergePage === 0;
+  el("merge-next").disabled = (mergePage + 1) * 100 >= items.length;
+  el("merge-count").textContent = items.length ?
+    (mergePage * 100 + 1) + "–" + Math.min((mergePage + 1) * 100, items.length) +
+      " of " + items.length : "No changes";
+  updateMergeSummary();
+}
+function updateMergeSummary() {
+  if (!mergeReview) return;
+  const decisions = mergeDecisions();
+  const pending = Object.values(decisions).filter(value => value === "review").length;
+  const selected = Object.values(decisions).filter(value => value === "incoming").length;
+  el("merge-summary").textContent = "Languages: " + mergeReview.locales.join(", ") +
+    " · " + mergeReview.items.length + " rows to review · " + selected +
+    " selected · " + pending + " unresolved · " + mergeReview.identical_count +
+    " identical rows ignored." +
+    (mergeReview.source_commit && mergeReview.current_commit &&
+     mergeReview.source_commit !== mergeReview.current_commit ?
+      " Source revisions differ; each English row was checked." : "");
+  el("merge-apply").disabled = !!pending || !!savePending || mergeApplying;
+}
+function openMerge() {
+  if (!mergeReview?.items.length) return;
+  inMerge = true; mergePage = 0;
+  renderConnections(); renderMerge();
+}
+function closeMerge() {
+  inMerge = false; renderConnections();
+}
+el("merge-button").addEventListener("click", () => guardNavigation(openMerge));
+el("merge-back").addEventListener("click", closeMerge);
+el("merge-prev").addEventListener("click", () => { mergePage--; renderMerge(); });
+el("merge-next").addEventListener("click", () => { mergePage++; renderMerge(); });
+el("handoff-preview").addEventListener("click", async () => {
+  const file = el("handoff-file").files[0];
+  if (!file || !file.name.toLowerCase().endsWith(".zip")) {
+    sectionMessage("exchange", "Choose a translation ZIP first.", "error"); return;
+  }
+  const button = el("handoff-preview");
+  button.disabled = true; button.classList.add("busy-action");
+  sectionMessage("exchange", "Reading and comparing the selected ZIP…", "busy");
+  try {
+    const response = await fetch("/api/handoff-preview", {method: "POST",
+      headers: {"X-Editor-Token": token, "Content-Type": "application/zip"}, body: file});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not preview this ZIP.");
+    mergeReview = result; mergeChoices = {};
+    el("merge-button").disabled = !result.items.length;
+    sectionMessage("exchange", "Reviewed " + result.locales.join(", ") +
+      ": " + result.items.length + " changed rows.");
+    el("exports-dialog").close();
+    if (result.items.length) guardNavigation(openMerge);
+    else message("This ZIP has no changes to merge.");
+  } catch (error) { sectionMessage("exchange", error.message, "error"); message(error.message, true); }
+  finally { button.disabled = false; button.classList.remove("busy-action"); }
+});
+el("merge-apply").addEventListener("click", async () => {
+  const button = el("merge-apply");
+  mergeApplying = true;
+  for (const id of ["mode", "settings-button", "logs-button", "merge-back",
+                    "merge-prev", "merge-next", "merge-button"])
+    el(id).disabled = true;
+  for (const select of el("merge-table").querySelectorAll("select")) select.disabled = true;
+  button.disabled = true; button.classList.add("busy-action");
+  sectionMessage("merge", "Merging reviewed rows and rebuilding game XML…", "busy");
+  try {
+    const result = await api("/api/handoff-apply", {
+      handoff_id: mergeReview.handoff_id, choices: mergeDecisions()});
+    mergeReview = null; mergeChoices = {};
+    el("merge-button").disabled = true;
+    inMerge = false;
+    meta = await api("/api/meta"); updateHistory(meta); renderConnections();
+    await load();
+    message(result.applied ? "Translations merged and project XML rebuilt. Review the project diff." :
+      "Review complete. No rows needed changing.");
+  } catch (error) { sectionMessage("merge", error.message, "error"); message(error.message, true);
+    button.disabled = false;
+  } finally {
+    mergeApplying = false;
+    for (const id of ["mode", "settings-button", "logs-button", "merge-back"])
+      el(id).disabled = false;
+    el("merge-button").disabled = !mergeReview?.items.length;
+    if (mergeReview) renderMerge();
+    button.classList.remove("busy-action");
+  }
+});
 el("unsaved-keep").addEventListener("click", () => {
   pendingNavigation = null; el("unsaved-dialog").close();
 });
@@ -971,43 +1152,151 @@ el("unsaved-dialog").addEventListener("cancel", event => {
 el("unsaved-discard").addEventListener("click", () => continueNavigation(false));
 el("unsaved-save").addEventListener("click", () => continueNavigation(true));
 window.addEventListener("beforeunload", event => {
-  if (hasUnsaved()) { event.preventDefault(); event.returnValue = ""; }
+  if (hasUnsaved() || failedSaves.length || savePending) {
+    event.preventDefault(); event.returnValue = "";
+  }
 });
+function setSaveLock(active) {
+  for (const id of ["mode", "settings-button", "exports-button", "merge-button",
+                    "game-apply", "run-checks", "create-key", "locale", "category",
+                    "undo", "redo"]) {
+    el(id).disabled = active || (id === "merge-button" && !mergeReview?.items.length);
+  }
+  const status = el("save-state");
+  status.hidden = !active;
+  status.className = "section-status busy";
+  status.textContent = active ? "Saving " + savePending.key +
+    " and rebuilding the project. You may edit other rows while this finishes." : "";
+  if (!active) {
+    updateHistory(meta);
+    renderConnections();
+    markDraft();
+  } else {
+    el("save").disabled = true;
+  }
+}
+function updateSavedRow(pending, result) {
+  const rows = window.currentRows || [];
+  if (el("locale").value === pending.locale) {
+    for (const row of rows) {
+      row.approved_sha256 = result.approved_sha256;
+      if (row.key === pending.key && el("category").value === pending.category) {
+        row.translation = pending.translation;
+        row.translation_gender = pending.translation_gender;
+        row.translation_plurality = pending.translation_plurality;
+        row.translator_note = pending.translator_note;
+        row.translation_updated_at = result.translation_updated_at;
+        row.translation_characters = String(Array.from(pending.translation).length);
+        row.translation_status = pending.translation ?
+          (result.applied_to_game ? "applied" : "saved") : "missing";
+      }
+    }
+    if (chosen) chosen.approved_sha256 = result.approved_sha256;
+    renderTable(rows);
+    if (chosen) {
+      const index = rows.findIndex(row => row === chosen);
+      if (index >= 0) el("table").querySelectorAll("tbody tr")[index].classList.add("selected");
+    }
+  }
+}
 async function saveCurrent() {
-  if (!chosen || !hasUnsaved()) return false;
-  el("save").disabled = true; el("save").classList.add("busy-action");
-  message("Saving and validating…");
-  try {
-    let result;
-    if (developer()) {
+  if (!chosen || !hasUnsaved() || savePending) return false;
+  if (developer()) {
+    savePending = {key: chosen.key, locale: "", developer: true};
+    setSaveLock(true);
+    el("table-loading").hidden = false;
+    message("Saving English and rebuilding…");
+    try {
       const newKey = el("identifier").value;
-      result = await api(newKey === chosen.key ? "/api/primary" : "/api/rename-primary",
+      const result = await api(newKey === chosen.key ? "/api/primary" : "/api/rename-primary",
         {index: chosen.index, key: chosen.key, old_text: chosen.text,
           text: el("translation").value, ...(newKey === chosen.key ? {} : {new_key: newKey})});
-    } else {
-      result = await api("/api/translate", {locale: el("locale").value,
-          category: el("category").value, key: chosen.key,
-          source_fingerprint: chosen.source_fingerprint,
-          english_source_sha256: chosen.english_source_sha256,
-          approved_sha256: chosen.approved_sha256,
-          translation: el("translation").value, translation_gender: grammarValue("gender"),
-          translation_plurality: grammarValue("plurality"), translator_note: el("note").value});
-    }
-    updateHistory(result); await load();
-    if (developer()) {
+      meta.undo_available = result.undo_available;
+      meta.redo_available = result.redo_available;
+      updateHistory(result); await load();
+      el("table-loading").hidden = false;
       try {
         const checked = await api("/api/check", {});
         message("English source saved and rebuilt. " + checked.summary);
-      } catch (error) { message("English source saved and rebuilt; checks failed: " + error.message, true); }
-    } else {
-      message(result.applied_to_game === false ? "Saved. XML generation is Off in config.json." :
-        "Saved to project CSV and generated game XML. Use Apply to installed game for a local test.");
+      } catch (error) { message("English saved; checks failed: " + error.message, true); }
+      return true;
+    } catch (error) { message(error.message, true); markDraft(); return false; }
+    finally {
+      savePending = null; setSaveLock(false);
+      el("table-loading").hidden = true;
     }
+  }
+  const pending = {locale: el("locale").value, category: el("category").value,
+    key: chosen.key, source_fingerprint: chosen.source_fingerprint,
+    english_source_sha256: chosen.english_source_sha256,
+    approved_sha256: chosen.approved_sha256, translation: el("translation").value,
+    translation_gender: grammarValue("gender"), translation_plurality: grammarValue("plurality"),
+    translator_note: el("note").value};
+  savePending = pending;
+  saveCompletion = new Promise(resolve => { resolveSaveCompletion = resolve; });
+  setSaveLock(true);
+  let completed = false;
+  try {
+    const started = await api("/api/translate-async", pending);
+    const jobId = started.id;
+    clearSelection();
+    renderTable(window.currentRows || []);
+    let status = started;
+    while (status.state === "running") {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      status = await api("/api/save-status");
+      if (status.id !== jobId) throw new Error("Another save replaced this row's result.");
+    }
+    if (status.state !== "complete") throw new Error(status.error || "Translation save failed.");
+    savePending = null;
+    updateSavedRow(pending, status);
+    meta.undo_available = status.undo_available;
+    meta.redo_available = status.redo_available;
+    setSaveLock(false);
+    failedSaves = failedSaves.filter(draft => draft.locale !== pending.locale ||
+      draft.category !== pending.category || draft.key !== pending.key);
+    rememberFailedSaves();
+    message(status.applied_to_game === false ? "Saved. XML generation is Off in config.json." :
+      "Saved to the project CSV and generated game XML.");
+    completed = true;
     return true;
-  } catch (error) { message(error.message, true); markDraft(); return false; }
-  finally { el("save").classList.remove("busy-action"); }
+  } catch (error) {
+    savePending = null;
+    failedSaves = failedSaves.filter(draft => draft.locale !== pending.locale ||
+      draft.category !== pending.category || draft.key !== pending.key);
+    failedSaves.push(pending);
+    rememberFailedSaves();
+    setSaveLock(false);
+    renderTable(window.currentRows || []);
+    message("Save failed: " + error.message + " Your text is available through Restore translation.", true);
+    return false;
+  } finally {
+    resolveSaveCompletion(completed);
+    saveCompletion = null;
+    resolveSaveCompletion = null;
+  }
 }
 el("save").addEventListener("click", saveCurrent);
+el("restore-failed").addEventListener("click", () => guardNavigation(async () => {
+  if (!failedSaves.length) return;
+  const draft = failedSaves[0];
+  if (el("locale").value !== draft.locale || el("category").value !== draft.category) {
+    el("locale").value = draft.locale; categories();
+    el("category").value = draft.category;
+    await preference({locale: draft.locale, category: draft.category});
+  }
+  el("search-input").value = draft.key; offset = 0; await load();
+  const index = (window.currentRows || []).findIndex(row => row.key === draft.key);
+  if (index < 0) { message("The saved draft's key is no longer in the source.", true); return; }
+  selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
+  el("translation").value = draft.translation;
+  setGrammar("gender", draft.translation_gender);
+  setGrammar("plurality", draft.translation_plurality);
+  el("note").value = draft.translator_note;
+  countText(); markDraft();
+  failedSaves.shift(); rememberFailedSaves();
+  message("Your text was restored. Review and save it again.");
+}));
 for (const name of ["undo", "redo"]) el(name).addEventListener("click", async () => {
   guardNavigation(async () => {
     try { const result = await api("/api/" + name, {}); updateHistory(result); await load();
@@ -1073,20 +1362,22 @@ el("run-checks").addEventListener("click", async () => {
   });
 });
 el("share").addEventListener("click", () => guardNavigation(() => {
+  const selected = Array.from(el("exchange-locales").querySelectorAll("input:checked"),
+    input => input.value);
+  if (!selected.length) {
+    sectionMessage("exchange", "Select at least one language to export.", "error");
+    return;
+  }
   logUI("translation-export");
-  location.href = "/api/export?locale=" + encodeURIComponent(el("locale").value);
-  message("Translation ZIP download started. Send it to a developer for review.");
+  location.href = "/api/export?locales=" + encodeURIComponent(selected.join(","));
+  message("ZIP download started for " + selected.join(", ") +
+    ". A recipient can import it using Exchange → Preview merge.");
 }));
 el("share-english").addEventListener("click", () => guardNavigation(() => {
   logUI("english-export");
   location.href = "/api/export-english";
   message("English source ZIP download started. Send it to a developer for review.");
 }));
-el("gamexml").addEventListener("click", () => {
-  logUI("xml-export");
-  location.href = "/api/game-xml";
-  message("Generated XML download started. This is one file, not a complete mod.");
-});
 function setEditorUpdateLock(locked) {
   if (locked === editorUpdateLocked) return;
   const dialog = el("settings-dialog");
@@ -1250,6 +1541,10 @@ async function startEditorUpdate() {
   }
 }
 el("update-install").addEventListener("click", () => {
+  if (failedSaves.length) {
+    message("Restore or resolve failed translation drafts before updating the editor.", true);
+    return;
+  }
   guardNavigation(startEditorUpdate);
 });
 refresh().then(checkLatest).catch(error => {

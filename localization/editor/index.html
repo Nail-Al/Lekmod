@@ -62,6 +62,16 @@
     td { max-height: 250px; }
     tr.selected { background: #e0efff; }
     tbody tr:hover { background: #edf5ff; cursor: pointer; }
+    tbody tr.saving { background: #edf3fa; opacity: .65; pointer-events: none; }
+    tbody tr.saving td:first-child::before { content: ""; display: inline-block; width: 13px; height: 13px; margin-right: 6px; border: 2px solid #aac3dc; border-top-color: #17598e; border-radius: 50%; animation: spin .7s linear infinite; }
+    #merge-view { min-height: 0; flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    #merge-view .merge-scroll { flex: 1; min-height: 120px; overflow: auto; border: 1px solid var(--divider); border-radius: 7px; }
+    #merge-table { width: 100%; min-width: 980px; }
+    #merge-table td { max-width: 340px; white-space: pre-wrap; }
+    #merge-table select { width: 100%; }
+    #merge-view .foot { border-top: 1px solid var(--divider); padding-top: 12px; display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+    .exchange-locales { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: 6px; }
+    .exchange-locales label { display: flex; gap: 6px; align-items: center; }
     .resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
     .resizer:hover { background: #79a3cf66; }
     .nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -184,6 +194,7 @@
     <h1>Lekmod Localization Editor <small id="editor-version"></small></h1>
     <span id="update-badge" class="badge" hidden>Editor update available</span>
     <button id="mode" class="mode-chip" data-mode="translator" title="Switch between Translator and Developer" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="mode-symbol" d="M4 5h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3v-3H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm2 9 2.5-6 2.5 6m-4-2h3m3-4h4m-2 0c0 3-1 5-3 6m1-4c.5 2 1.5 3 3 4"/></svg><span id="mode-name">Translator</span></button>
+    <button id="merge-button" disabled title="Review an imported translation ZIP">Merge</button>
     <button id="logs-button" title="Open the local action log">Logs</button>
     <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
   </div>
@@ -218,6 +229,7 @@
         <button id="next" aria-label="Next page">Next ›</button>
         <label class="inline page-choice">Rows<select id="page-size"><option>25</option><option>50</option><option selected>100</option><option>250</option><option>500</option><option>1000</option><option value="all">All</option></select></label>
       </nav>
+      <p id="save-state" class="section-status" role="status" aria-live="polite" hidden></p>
       <div class="table-frame">
         <div class="table-scroll" id="table-scroll">
           <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
@@ -251,12 +263,21 @@
         <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
         <button id="game-apply" disabled>Apply to installed game</button>
         <button id="run-checks" hidden>Run checks</button>
-        <button id="exports-button">Exports…</button>
+        <button id="exports-button">Exchange…</button>
       </div>
+      <button id="restore-failed" hidden>Restore translation after failed save</button>
       <p id="message" role="status"></p>
       </div>
     </details>
   </div>
+  <section id="merge-view" class="card" hidden>
+    <div class="quick"><h2>Merge translation review</h2><button id="merge-back">Back to editor</button></div>
+    <p id="merge-summary" class="hint"></p>
+    <nav class="pager" aria-label="Merge review pages"><button id="merge-prev">‹ Previous</button><span id="merge-count"></span><button id="merge-next">Next ›</button></nav>
+    <div class="merge-scroll"><table id="merge-table"><thead><tr><th>Language / key</th><th>Lekmod EN</th><th>Current translation</th><th>Incoming translation</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <p id="merge-status" class="section-status" role="status" aria-live="polite"></p>
+    <div class="foot"><button id="merge-apply" class="primary" disabled>Apply reviewed changes</button></div>
+  </section>
   <section id="logs-view" class="card" hidden><div class="quick"><h2>Action log</h2><button id="logs-back">Back to editor</button><button id="logs-download">Download log</button></div><p class="hint">Actions and errors are recorded locally. Text, passwords, and snapshot contents are excluded.</p><pre id="logs-list"></pre></section>
 </main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -307,7 +328,7 @@
 <dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="column-groups"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
 <dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
 <dialog id="create-key-dialog"><section><div class="dialog-heading"><h2>Create new English text key</h2><button id="create-x" type="button" class="icon-control" aria-label="Close without creating a key" title="Close without creating">×</button></div><p class="hint">Creates a new Row in the primary English source. The key appears in game only when gameplay XML, SQL or Lua refers to it.</p><label>Create TXT_KEY identifier<input id="create-identifier" placeholder="TXT_KEY_MY_NEW_DESCRIPTION" autocomplete="off"></label><label>English source text<textarea id="create-text"></textarea></label><div class="fields"><label>Source file<input id="create-source" disabled></label><label>Line<input id="create-line" disabled></label><label>Operation<select id="create-operation" disabled><option>Row</option></select></label></div><p id="create-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="create-cancel">Cancel</button><button id="create-confirm" class="primary">Create key</button></div></section></dialog>
-<dialog id="exports-dialog"><section><h2>Downloads</h2><p>Share a translation or English source ZIP with a maintainer. Downloads do not send data or install the mod.</p><button id="share">Download translation ZIP</button><button id="share-english" hidden>Download English source ZIP</button><button id="gamexml">Download test game XML</button><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
+<dialog id="exports-dialog"><section><div class="dialog-heading"><h2>Exchange translations</h2><button id="exports-x" type="button" class="icon-control" aria-label="Close exchange" title="Close">×</button></div><p>Export only the checked languages. Each CSV contains all saved rows for that language, so the recipient must review and merge keys rather than replace a shared file.</p><div id="exchange-locales" class="exchange-locales"></div><button id="share">Download selected translations ZIP</button><button id="share-english" hidden>Download English source ZIP</button><hr><label>Import a translation ZIP to review<input id="handoff-file" type="file" accept=".zip,application/zip"></label><button id="handoff-preview">Preview merge</button><p id="exchange-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
 <script src="/app.js" defer></script>
 </body>
 </html>

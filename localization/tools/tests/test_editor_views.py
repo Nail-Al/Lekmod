@@ -4,13 +4,18 @@ import sys
 from pathlib import Path
 import io
 import json
+from hashlib import sha256
+from http.server import HTTPServer
+import threading
+import time
+from urllib.request import Request, urlopen
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from editor_server import (Editor, formatted_primary_text, matches_filters,
+from editor_server import (Editor, make_handler, formatted_primary_text, matches_filters,
                            page_slice, primary_text, primary_creation_info,
                            require_fresh_translation_files, safe_ui_event_detail)
 from lekmod_localization.common import CatalogError
@@ -161,6 +166,216 @@ class EditorViewTests(unittest.TestCase):
                                  source.read_bytes())
                 self.assertIsNone(json.loads(archive.read("manifest.json"))["repository_commit"])
                 self.assertNotIn("vanilla-snapshot.json.gz", archive.namelist())
+
+    def test_translation_handoff_contains_full_csv_and_merge_instructions(self):
+        """Exports pin the exact CSV, but tell maintainers to merge its rows."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "translations"
+            approved.mkdir()
+            row = ("key,source_fingerprint,text,gender,plurality,translator_note,updated_at\n"
+                   "TXT_KEY_ONE," + "a" * 64 + ",Перевод,,,,2026-09-28T13:48:15Z\n")
+            (approved / "RU_RU.csv").write_text(row, encoding="utf-8-sig")
+            source = root / "primary.xml"
+            source.write_text("English source", encoding="utf-8")
+            reference = root / "reference.json.gz"
+            reference.write_bytes(b"reference fingerprints")
+            editor = object.__new__(Editor)
+            editor.ready = True
+            with patch("editor_server.REPO_ROOT", root), \
+                 patch("editor_server.TRANSLATIONS", approved), \
+                 patch("editor_server.sync_primary_english.DEFAULT_ENGLISH", source), \
+                 patch("editor_server.manage.DEFAULT_REFERENCE", reference), \
+                 patch.object(Editor, "manifest", return_value={"locales": {"RU_RU": {}}}):
+                content = editor.export_locale("RU_RU")
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                packaged = archive.read("translations/RU_RU.csv")
+                manifest = json.loads(archive.read("manifest.json"))
+                instructions = archive.read("README.txt").decode("utf-8")
+                self.assertEqual(packaged, (approved / "RU_RU.csv").read_bytes())
+                self.assertEqual(manifest["locales"]["RU_RU"], sha256(packaged).hexdigest())
+                self.assertEqual(manifest["english_sha256"], sha256(source.read_bytes()).hexdigest())
+                self.assertIn("merge_translation_handoff.py", instructions)
+                self.assertIn("Do not replace", instructions)
+                self.assertNotIn("vanilla-snapshot.json.gz", archive.namelist())
+
+    def test_export_selects_only_named_languages(self):
+        """A multi-language handoff has an exact manifest and no unselected CSV."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "translations"
+            approved.mkdir()
+            for locale in ("RU_RU", "DE_DE", "FR_FR"):
+                (approved / f"{locale}.csv").write_text(
+                    "key,source_fingerprint,text,gender,plurality,translator_note\n",
+                    encoding="utf-8-sig")
+            source, reference = root / "primary.xml", root / "reference.json.gz"
+            source.write_text("English", encoding="utf-8")
+            reference.write_bytes(b"reference")
+            editor = object.__new__(Editor)
+            editor.ready = True
+            with patch("editor_server.REPO_ROOT", root), \
+                 patch("editor_server.TRANSLATIONS", approved), \
+                 patch("editor_server.sync_primary_english.DEFAULT_ENGLISH", source), \
+                 patch("editor_server.manage.DEFAULT_REFERENCE", reference), \
+                 patch.object(Editor, "manifest", return_value={
+                     "locales": {locale: {} for locale in ("RU_RU", "DE_DE", "FR_FR")}}):
+                content = editor.export_locales(["RU_RU", "DE_DE"])
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                self.assertEqual(set(archive.namelist()), {
+                    "translations/RU_RU.csv", "translations/DE_DE.csv",
+                    "manifest.json", "README.txt"})
+                metadata = json.loads(archive.read("manifest.json"))
+                self.assertEqual(set(metadata["locales"]), {"RU_RU", "DE_DE"})
+                with self.assertRaisesRegex(CatalogError, "select at least one"):
+                    with patch.object(Editor, "manifest", return_value={"locales": {}}):
+                        editor.export_locales([])
+
+    def test_background_save_serializes_jobs_and_reports_result(self):
+        """A slow rebuild leaves the HTTP loop free and rejects a second save."""
+        editor = object.__new__(Editor)
+        editor.save_state = {"state": "idle"}
+        started, release = threading.Event(), threading.Event()
+
+        def slow_save(data):
+            started.set()
+            self.assertTrue(release.wait(2))
+            return {"approved_sha256": "b" * 64, "undo_available": True,
+                    "redo_available": False}
+
+        with patch.object(Editor, "save_translation", side_effect=slow_save), \
+             patch.object(Editor, "record_event"):
+            first = editor.start_translation_save({"locale": "RU_RU", "key": "TXT_KEY_ONE"})
+            self.assertTrue(started.wait(1))
+            with self.assertRaisesRegex(CatalogError, "previous row"):
+                editor.start_translation_save({"locale": "RU_RU", "key": "TXT_KEY_TWO"})
+            release.set()
+            for _ in range(100):
+                if editor.save_state["state"] != "running":
+                    break
+                time.sleep(.01)
+        self.assertEqual(editor.save_state["id"], first["id"])
+        self.assertEqual(editor.save_state["approved_sha256"], "b" * 64)
+
+    def test_binary_handoff_preview_and_reviewed_apply_use_same_package(self):
+        """The localhost API carries the ZIP as bytes, then checks its review ID."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            game = project / "game.xml"
+            game.write_text("<GameData />", encoding="utf-8")
+            editor = object.__new__(Editor)
+            editor.ready = True
+            editor.save_state = {"state": "idle"}
+            editor.handoff_data = None
+            editor.handoff_preview = None
+            editor.handoff_id = ""
+            editor.snapshot = None
+            editor.actions = []
+            editor.cursor = 0
+            preview = {"locales": ["RU_RU"], "items": [{
+                "id": "RU_RU:TXT_KEY_A", "status": "conflict", "choice": "review"}],
+                "pending": ["RU_RU:TXT_KEY_A"], "target_sha256": {"RU_RU": "a" * 64},
+                "applied": False}
+            applied = {**preview, "pending": [], "items": [], "backups": {}}
+            server = HTTPServer(("127.0.0.1", 0), make_handler(editor, "test-token", 0))
+            server.RequestHandlerClass = make_handler(editor, "test-token", server.server_port)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            headers = {"Origin": base, "X-Editor-Token": "test-token"}
+            try:
+                with patch("editor_server.merge_handoff", side_effect=[preview, applied]) as merge, \
+                     patch("editor_server.build_shipped_localization.DEFAULT_SOURCE", game), \
+                     patch.object(Editor, "record_event"):
+                    with urlopen(base + "/api/save-status", timeout=5) as response:
+                        self.assertEqual(json.load(response)["state"], "idle")
+                    with urlopen(Request(base + "/api/handoff-preview", data=b"ZIP bytes",
+                                         headers=headers), timeout=5) as response:
+                        review = json.load(response)
+                    self.assertEqual(review["locales"], ["RU_RU"])
+                    self.assertTrue(review["handoff_id"])
+                    self.assertEqual(editor.handoff_data, b"ZIP bytes")
+                    payload = json.dumps({"handoff_id": review["handoff_id"],
+                                          "choices": {"RU_RU:TXT_KEY_A": "keep"}}).encode()
+                    with urlopen(Request(base + "/api/handoff-apply", data=payload,
+                                         headers={**headers, "Content-Type": "application/json"}),
+                                 timeout=5) as response:
+                        result = json.load(response)
+                    self.assertFalse(result["applied"])
+                    self.assertEqual(merge.call_args.kwargs["expected"], {"RU_RU": "a" * 64})
+                    self.assertIsNone(editor.handoff_data)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_imported_approval_metadata_overrides_old_editor_draft(self):
+        """A merged CSV immediately supplies the new note and grammar in the table."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "translations"
+            approved.mkdir()
+            (approved / "RU_RU.csv").write_text(
+                "key,source_fingerprint,text,gender,plurality,translator_note,updated_at\n"
+                "TXT_KEY_ONE," + "a" * 64 +
+                ",Новый перевод,feminine,2,Imported note,2026-09-29T10:00:00Z\n",
+                encoding="utf-8-sig")
+            primary = root / "primary.xml"
+            primary.write_text("English source", encoding="utf-8")
+            row = {"key": "TXT_KEY_ONE", "source_fingerprint": "a" * 64,
+                   "lekmod_en_US": "English", "vanilla_en_US": "", "vanilla_target": "",
+                   "translation": "Старый черновик", "translator_note": "Old note",
+                   "translation_gender": "", "translation_plurality": ""}
+            editor = object.__new__(Editor)
+            editor.english_dates = {}
+            with patch.object(Editor, "path", return_value=root / "generated.csv"), \
+                 patch("editor_server.csv_rows", return_value=[row]), \
+                 patch("editor_server.TRANSLATIONS", approved), \
+                 patch("editor_server.sync_primary_english.DEFAULT_ENGLISH", primary), \
+                 patch("editor_server.manage.read_config",
+                       return_value={"build": {"shipped": True}}):
+                loaded = editor.rows("RU_RU", "buildings", "", 0)["rows"][0]
+            self.assertEqual(loaded["translation"], "Новый перевод")
+            self.assertEqual(loaded["translation_gender"], "feminine")
+            self.assertEqual(loaded["translation_plurality"], "2")
+            self.assertEqual(loaded["translator_note"], "Imported note")
+
+    def test_failed_rebuild_after_merge_restores_csv_and_xml(self):
+        """A failed generated-XML rebuild cannot leave imported CSVs half applied."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            translations = root / "translations"
+            translations.mkdir()
+            target = translations / "RU_RU.csv"
+            target.write_bytes(b"team rows")
+            backup = root / "backup.csv"
+            backup.write_bytes(target.read_bytes())
+            game = root / "game.xml"
+            game.write_bytes(b"old game XML")
+            editor = object.__new__(Editor)
+            editor.handoff_data = b"archive"
+            editor.handoff_preview = {"target_sha256": {"RU_RU": "a" * 64}}
+            editor.handoff_id = "session-1"
+            editor.snapshot = None
+            editor.actions = []
+            editor.cursor = 0
+
+            def merged(*args, **kwargs):
+                target.write_bytes(b"incoming rows")
+                game.write_bytes(b"new game XML")
+                return {"applied": True, "backups": {"RU_RU": str(backup)}}
+
+            with patch("editor_server.merge_handoff", side_effect=merged), \
+                 patch("editor_server.TRANSLATIONS", translations), \
+                 patch("editor_server.build_shipped_localization.DEFAULT_SOURCE", game), \
+                 patch("editor_server.manage.read_config", return_value={}), \
+                 patch("editor_server.manage.prepare",
+                       side_effect=[CatalogError("broken rebuild"), None]) as prepare:
+                with self.assertRaisesRegex(CatalogError, "broken rebuild"):
+                    editor.apply_handoff({"handoff_id": "session-1", "choices": {}})
+            self.assertEqual(prepare.call_count, 2)
+            self.assertEqual(target.read_bytes(), b"team rows")
+            self.assertEqual(game.read_bytes(), b"old game XML")
 
 
 if __name__ == "__main__":

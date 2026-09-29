@@ -21,6 +21,7 @@ from lekmod_localization.editor_update import (
     UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
     _wait_ready, verify_installation,
 )
+from lekmod_localization.connections import editor_manifest
 
 
 class UpdateTests(unittest.TestCase):
@@ -246,7 +247,8 @@ class UpdateTests(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_port}"
         headers = {"Origin": base, "X-Editor-Token": "test-token",
                    "Content-Type": "application/json"}
-        report = {"current": "0.13", "latest": "0.13", "available": False,
+        current = editor_manifest()["version"]
+        report = {"current": current, "latest": current, "available": False,
                   "can_auto_update": True, "damaged_files": ["README-START.txt"],
                   "verified": False}
         try:
