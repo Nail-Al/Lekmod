@@ -42,3 +42,15 @@ jobs:
 
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci
+
+  snapshot-collector:
+    name: Verify snapshot collection on Windows
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Capture and combine language tables with closed database handles
+        run: python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_collect_vanilla.py -q

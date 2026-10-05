@@ -7,6 +7,7 @@ at every capture, so a changed game build cannot silently mix translations.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import gzip
 import hashlib
 import json
@@ -57,7 +58,7 @@ def read_consistent_database(database: Path) -> tuple[dict, dict, str]:
         copy = Path(temporary) / "Localization-Merged.db"
         source = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
         try:
-            with sqlite3.connect(copy) as target:
+            with closing(sqlite3.connect(copy)) as target:
                 source.backup(target)
         finally:
             source.close()
