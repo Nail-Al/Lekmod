@@ -75,6 +75,9 @@
     #merge-view .foot { border-top: 1px solid var(--divider); padding-top: 12px; display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
     .exchange-locales { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: 6px; }
     .exchange-locales label { display: flex; gap: 6px; align-items: center; }
+    .exchange-section { display: grid; gap: 10px; }
+    .exchange-section + .exchange-section { border-top: 1px solid var(--divider); padding-top: 18px; margin-top: 8px; }
+    .exchange-section h3 { margin: 0; font-size: .95rem; color: #315477; }
     .resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
     .resizer:hover { background: #79a3cf66; }
     .nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -295,14 +298,17 @@
       <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Choose a compatible project folder"></label><button id="project-browse">Browse…</button></div>
       <label class="inline"><input id="carry-translations" type="checkbox" checked> Carry saved translations when switching projects</label>
       <p class="hint">The earlier project is kept. Matching translations continue working; changed English falls back until translated again. Unsaved edits must be saved or discarded before switching.</p>
-      <div class="row"><label>Get a compatible Lekmod version<select id="project-version"><option>Loading available versions…</option></select></label><button id="project-download">Download</button></div>
+      <div class="row"><label>Get a compatible Lekmod version<select id="project-version"><option value="" disabled selected>Loading available versions…</option></select></label><button id="source-check" type="button" class="icon-control" title="Check latest Lekmod version" aria-label="Check latest Lekmod version">⟳</button><button id="project-download">Download/Update</button></div>
+      <p id="source-version-status" class="section-status" role="status" aria-live="polite"></p>
       <div id="project-progress-group" class="progress-group" hidden><progress id="project-progress"></progress><p id="project-progress-text" class="hint"></p><button id="project-cancel" type="button">Cancel download</button></div>
-      <p class="hint">Downloads into this editor's <code>localization/workspace/projects/&lt;version&gt;</code> folder. Existing projects are reused after validation and are never overwritten. Earlier releases need a reviewed localization migration.</p>
+      <p class="hint">Downloads into this editor's <code>localization/workspace/projects/&lt;version&gt;</code> folder. Save connections switches to the selected project. Existing projects are reused and never overwritten. Checks run automatically; downloading and switching always require your action. Releases before v35.0 need a reviewed migration.</p>
       <p class="hint"><a href="https://github.com/Nail-Al/Lekmod/tree/localization-infrastructure" target="_blank" rel="noopener">Compatible localization project</a> · <a href="https://github.com/EnormousApplePie/Lekmod" target="_blank" rel="noopener">Official Lekmod source</a>.</p>
+      <details id="release-details"><summary>Release comparisons</summary><div class="accordion-body"><p class="hint">Updates include every intermediate release. Add an older comparison here without downloading its full mod.</p><label>Compare another Lekmod version<select id="history-version"></select></label><button id="history-sync">Synchronize comparison</button><p id="history-status" class="section-status" role="status"></p></div></details>
     </div>
     <div class="settings-group"><h2>Optional in-game testing</h2>
       <p class="hint">A connected project can be edited without a game. To apply its XML in game, install one matching Lekmod DLC first.</p>
       <p id="game-status" class="section-status" role="status" aria-live="polite"></p>
+      <p id="game-launcher-link" class="hint" hidden><a href="https://docs.google.com/document/d/18tsjg2C1wKA7I41GktDRr6R83eUrhn4FHi9EUEtpKvI/edit?tab=t.0#heading=h.sgkkio8aa458" target="_blank" rel="noopener">Install/update the matching Lekmod version: official launcher and instructions</a></p>
       <div class="row"><label>Civilization V folder<input id="game-path" placeholder="Path to the game installation"></label><button id="game-browse">Browse…</button></div>
       <button id="detect-game">Find installed game automatically</button>
     </div>
@@ -323,7 +329,6 @@
         <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
       </div></details>
     </div>
-    <div class="settings-group"><h2>Release comparisons</h2><p class="hint">Updates include every intermediate release. Add an older comparison here without downloading its full mod.</p><label>Compare another Lekmod version<select id="history-version"></select></label><button id="history-sync">Synchronize comparison</button><p id="history-status" class="section-status" role="status"></p></div>
     <div class="settings-group editor-update-group"><h2>Editor updates</h2>
       <p id="update-failure" class="section-status error" role="alert" hidden></p>
       <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
@@ -338,12 +343,13 @@
 <dialog id="exports-dialog"><section>
   <div class="dialog-heading"><h2 id="exchange-title">Import/Export translations</h2><button id="exports-x" type="button" class="icon-control" aria-label="Close import/export" title="Close">×</button></div>
   <p id="exchange-help">Export the selected languages, then review incoming rows in Merge.</p>
+  <div class="exchange-section"><h3>Export</h3>
   <div id="exchange-locales" class="exchange-locales"></div>
-  <div class="row"><button id="share">Download selected translations ZIP</button><button id="share-english" hidden>Download English source ZIP</button></div>
-  <hr>
+  <div class="row"><button id="share">Download selected translations ZIP</button><button id="share-english" hidden>Download English source ZIP</button></div></div>
+  <div class="exchange-section"><h3>Import</h3>
   <label><span id="handoff-label">Import a translation ZIP to review</span><input id="handoff-file" type="file" accept=".zip,application/zip"></label>
   <p class="hint">Imports join the pending review. English is applied before matching translations. No files change until Apply.</p>
-  <button id="handoff-preview">Preview merge</button><p id="exchange-status" class="section-status" role="status" aria-live="polite"></p>
+  <button id="handoff-preview">Preview merge</button><p id="exchange-status" class="section-status" role="status" aria-live="polite"></p></div>
   <div class="foot"><button id="exports-close">Done</button></div>
 </section></dialog>
 <script src="/app.js" defer></script>

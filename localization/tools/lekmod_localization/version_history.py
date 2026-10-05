@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 
@@ -32,6 +33,26 @@ def read_history(project: Path) -> dict:
     with gzip.open(path, 'rt', encoding='utf-8') as handle: value = json.load(handle)
     if value.get('schema_version') != 1 or not isinstance(value.get('releases'), dict):
         raise CatalogError('Invalid Lekmod release history')
+    from .connections import APP_HOME
+    caches = [project / 'localization/workspace/online-release-history.json',
+              APP_HOME / 'localization/workspace/online-release-history.json']
+    for cached in dict.fromkeys(caches):
+        if not cached.is_file(): continue
+        try:
+            online = json.loads(cached.read_text(encoding='utf-8'))
+            if online.get('schema_version') != 1 or not isinstance(online.get('releases'), dict):
+                raise ValueError('Invalid online release history')
+            for version, record in online['releases'].items():
+                if (not re.fullmatch(r'v\d+\.\d+', version) or not isinstance(record, dict)
+                    or not re.fullmatch(r'[0-9a-f]{40}', str(record.get('commit', '')))
+                    or not isinstance(record.get('changes'), dict)
+                    or any(not re.fullmatch(r'TXT_KEY_[A-Za-z0-9_]+', key) or state not in
+                           ('new', 'updated', 'removed') for key, state in record['changes'].items())):
+                    raise ValueError('Invalid online release record')
+            for version, record in online['releases'].items():
+                value['releases'].setdefault(version, {**record, 'online': True})
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise CatalogError('Invalid cached online release history; the shared baseline is unchanged')
     return value
 
 

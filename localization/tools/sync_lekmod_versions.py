@@ -54,10 +54,18 @@ def main() -> int:
     parser.add_argument('--project', type=Path, default=Path.cwd())
     parser.add_argument('--version', action='append', default=[])
     parser.add_argument('--since', default='')
+    parser.add_argument('--online', action='store_true',
+                        help='check official releases and cache missing English comparisons')
     parser.add_argument('--carry-from', type=Path,
                         help='copy saved translations from this older complete project; keep its files unchanged')
     parser.add_argument('--build', action='append', default=[], metavar='VERSION=COMMIT')
     args = parser.parse_args()
+    if args.online:
+        from lekmod_localization.release_feed import catalog, ensure_history
+        from lekmod_localization.connections import release_version
+        catalog(args.project, refresh=True)
+        for version in args.version or [release_version(args.project)]:
+            ensure_history(version, args.project)
     if args.carry_from:
         command = [sys.executable, '-B', str(args.project.resolve() / 'localization/tools/manage.py'), 'prepare']
         subprocess.run(command, cwd=args.project, check=True)

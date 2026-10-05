@@ -49,6 +49,7 @@ from lekmod_localization.connections import (
 from lekmod_localization.editor_update import (
     latest_release, stage_release, launch_update, verify_installation,
 )
+from lekmod_localization.release_feed import catalog as source_catalog
 from lekmod_localization.english_dates import read_dates
 from lekmod_localization.shipped import read_approvals
 from lekmod_localization.vanilla_snapshot import read_snapshot
@@ -1379,7 +1380,13 @@ def make_handler(editor: Editor, token: str, port: int):
                                   editor.log_path.read_bytes() if editor.log_path.exists() else b"",
                                   "application/x-ndjson")
                 elif url.path == "/api/versions":
-                    self.respond(200, {"versions": release_catalog()})
+                    self.respond(200, source_catalog(APP_HOME, refresh=args.get('refresh') == ['1']))
+                elif url.path == "/api/game-status":
+                    path = settings()['game_path'] or detect_game()
+                    game = (inspect_game(Path(path), REPO_ROOT if editor.ready else None)
+                            if path else {'path': '', 'mods': [], 'state': 'missing_game', 'error': ''})
+                    game['selected_mod'] = game['mods'][0]['name'] if game['state'] == 'installed' else ''
+                    self.respond(200, game)
                 elif url.path == "/api/editor-latest":
                     self.respond(200, latest_release())
                 elif url.path == "/api/editor-update-status":

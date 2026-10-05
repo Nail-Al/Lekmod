@@ -92,6 +92,19 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(result["state"], "mismatch")
         self.assertIn("gameplay XML differs", result["error"])
 
+    def test_version_warning_names_installed_and_required_builds(self):
+        """A source upgrade or launcher update disables applying unrelated game text."""
+        original = self.target.read_bytes()
+        (self.installed / 'VERSION').write_text('v35.4003', encoding='utf-8')
+        result = inspect_game(self.game, self.project)
+        self.assertEqual(result['state'], 'mismatch')
+        self.assertIn('v35.4003', result['error'])
+        self.assertIn('v35.3000', result['error'])
+        self.assertIn('official Lekmod launcher', result['error'])
+        with self.assertRaisesRegex(ValueError, 'Version mismatch'):
+            apply_game(self.project, self.game, self.installed.name, self.home)
+        self.assertEqual(self.target.read_bytes(), original)
+
     def test_steam_libraries_include_custom_game_directory(self):
         """Automatic discovery follows libraryfolders and appmanifest names."""
         root = self.home / "Steam"

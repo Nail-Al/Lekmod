@@ -23,6 +23,8 @@ let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
 let inLogs = false;
 let downloadTimer;
+let sourceVersions = null, sourceVersionRequest = null;
+let gameStatusRequest = false;
 let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "";
 let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
 let editorUpdateInstance = "", editorIntegrity = null, latestEditorInfo = null;
@@ -195,7 +197,9 @@ function renderConnections() {
     : game.state === "multiple" ? "Game: multiple Lekmod copies"
     : game.path ? "Game: invalid folder" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
-  el("game-apply").disabled = !!savePending || !matches || !meta.ready;
+  const changedGameFolder = el("settings-dialog").open &&
+    el("game-path").value !== (prefs.game_path || game.path);
+  el("game-apply").disabled = !!savePending || !matches || !meta.ready || changedGameFolder;
   el("workspace").hidden = !meta.ready || inLogs || inMerge;
   el("merge-view").hidden = !meta.ready || inLogs || !inMerge;
   el("no-source").hidden = meta.ready || inLogs || inMerge;
@@ -561,6 +565,8 @@ function fillSettings() {
     meta.game.state === "installed" ? "success" :
       ["vanilla", "multiple", "mismatch"].includes(meta.game.state) ? "warning" :
       meta.game.error ? "error" : "warning");
+  el("game-launcher-link").hidden = !["vanilla", "mismatch", "damaged", "multiple"].includes(meta.game.state);
+  refreshGameConnection();
   const counts = Object.values(meta.vanilla_counts || {}).reduce((sum, value) => sum + value, 0);
   el("vanilla-summary").textContent = counts ?
     "Original vanilla text available for comparison." :
@@ -568,18 +574,92 @@ function fillSettings() {
   sectionMessage("snapshot", "");
   updateDownload();
   if (!downloadTimer) downloadTimer = setInterval(updateDownload, 1000);
-  api("/api/versions").then(result => {
-    const select = el("project-version");
-    select.replaceChildren();
-    for (const item of result.versions) {
-      const label = item.version + (item.date ? " · " + item.date : "") +
-        (item.supported ? " · compatible" : " · needs migration");
-      const option = new Option(label, item.version);
-      option.disabled = !item.supported;
-      select.append(option);
-    }
-  }).catch(error => sectionMessage("source", error.message, "error"));
+  if (sourceVersions) showSourceVersions(sourceVersions);
+  refreshSourceVersions();
 }
+function showSourceVersions(result) {
+  const select = el("project-version"), chosenVersion = select.value || meta?.release;
+  select.replaceChildren();
+  for (const item of result.versions) {
+    const option = new Option(item.version + (item.date ? " · " + item.date : "") +
+      (item.supported ? "" : " · needs migration"), item.version);
+    option.disabled = !item.supported;
+    select.append(option);
+  }
+  if (result.versions.some(item => item.version === chosenVersion && item.supported))
+    select.value = chosenVersion;
+  const current = meta?.ready ? meta.release : "not connected";
+  const latest = result.versions.find(item => item.supported)?.version;
+  const parts = version => version.replace(/^v/, "").split(".").map(Number);
+  const newer = (left, right) => {
+    const a = parts(left), b = parts(right);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+    }
+    return false;
+  };
+  const available = meta?.ready && latest && newer(latest, current);
+  const text = "Connected Lekmod: " + current + ". " + (available ?
+    "Lekmod " + latest + " is available. Select it, Download/Update, then Save connections to switch. You can keep working on " + current + "." :
+    latest ? "Latest available: " + latest + "." : "No release list is available.") +
+    (result.warning ? " " + result.warning : "");
+  const status = el("source-version-status");
+  status.className = "section-status " + (available || result.warning ? "warning" : "success");
+  status.textContent = (available || result.warning ? "⚠ " : "✓ ") + text;
+}
+async function refreshSourceVersions(force = false) {
+  if (editorUpdateLocked) return;
+  if (sourceVersionRequest) return sourceVersionRequest;
+  const button = el("source-check"), status = el("source-version-status");
+  button.disabled = true;
+  status.className = "section-status busy-inline";
+  status.textContent = "Checking available Lekmod versions…";
+  sourceVersionRequest = (async () => {
+    try {
+      const result = await api("/api/versions" + (force ? "?refresh=1" : ""));
+      sourceVersions = result;
+      if (!editorUpdateLocked) showSourceVersions(result);
+    } catch (error) {
+      if (!editorUpdateLocked) {
+        status.className = "section-status warning";
+        status.textContent = "⚠ Lekmod version check failed: " + error.message;
+      }
+      logUI("source-version-error", error.message);
+    } finally {
+      if (editorUpdateLocked) settingsControlsBeforeUpdate.set(button, false);
+      else button.disabled = false;
+      sourceVersionRequest = null;
+    }
+  })();
+  return sourceVersionRequest;
+}
+el("source-check").addEventListener("click", () => {
+  logUI("source-version-check"); refreshSourceVersions(true);
+});
+setInterval(() => refreshSourceVersions(), 600000);
+async function refreshGameConnection() {
+  if (!meta?.ready || gameStatusRequest || editorUpdateLocked || savePending || mergeApplying) return;
+  gameStatusRequest = true;
+  try {
+    const game = await api("/api/game-status");
+    if (editorUpdateLocked) return;
+    meta.game = game;
+    renderConnections();
+    // Do not replace feedback about a newly browsed, not-yet-saved folder.
+    if (el("settings-dialog").open && el("game-path").value === (prefs.game_path || game.path)) {
+      sectionMessage("game", game.error || (game.state === "installed" ?
+        "Civilization V and matching Lekmod " + game.mods[0].release + " verified." :
+        game.state === "vanilla" ? "Civilization V found; Lekmod is not installed." :
+          "No game is connected."), game.state === "installed" ? "success" :
+          ["vanilla", "mismatch", "multiple"].includes(game.state) ? "warning" : "error");
+      el("game-launcher-link").hidden = !["vanilla", "mismatch", "damaged", "multiple"].includes(game.state);
+    }
+  } catch (error) {
+    el("game-apply").disabled = true;
+    logUI("game-version-error", error.message);
+  } finally { gameStatusRequest = false; }
+}
+window.addEventListener("focus", () => refreshGameConnection());
 function sizeText(bytes) { return (bytes / 1048576).toFixed(1) + " MiB"; }
 async function updateDownload() {
   if (!el("settings-dialog").open || editorUpdateLocked) return;
@@ -712,6 +792,8 @@ el("project-cancel").addEventListener("click", async () => {
 async function verifyGame(path) {
   sectionMessage("game", "Checking game files and installed Lekmod…", "busy");
   const found = await api("/api/detect-game", {path});
+  el("game-launcher-link").hidden = !["vanilla", "mismatch", "damaged", "multiple"].includes(found.state);
+  if (found.state !== "installed") el("game-apply").disabled = true;
   if (found.path) el("game-path").value = found.path;
   if (found.state === "installed") sectionMessage("game", meta.ready ?
     "Civilization V and matching Lekmod " + found.mods[0].version +
@@ -736,8 +818,10 @@ el("detect-game").addEventListener("click", async () => {
     await verifyGame("");
   } catch (error) { sectionMessage("game", error.message, "error"); }
 });
-el("game-path").addEventListener("input", () =>
-  sectionMessage("game", "Path changed. Use Browse or save connections to verify it.", "warning"));
+el("game-path").addEventListener("input", () => {
+  el("game-apply").disabled = true;
+  sectionMessage("game", "Path changed. Use Browse or save connections to verify it.", "warning");
+});
 el("settings-save").addEventListener("click", async () => {
   const button = el("settings-save"), instance = meta.server_instance;
   button.disabled = true; button.classList.add("busy-action");
@@ -1479,6 +1563,7 @@ function setEditorUpdateLock(locked) {
     settingsControlsBeforeUpdate.clear();
     delete dialog.dataset.updating;
     dialog.removeAttribute("aria-busy");
+    if (sourceVersions) showSourceVersions(sourceVersions);
   }
   editorUpdateLocked = locked;
 }
@@ -1634,7 +1719,7 @@ el("update-install").addEventListener("click", () => {
   }
   guardNavigation(startEditorUpdate);
 });
-refresh().then(checkLatest).catch(error => {
+refresh().then(() => Promise.all([checkLatest(), refreshSourceVersions()])).catch(error => {
   el("app-loading").textContent = "The editor could not load: " + error.message +
     ". Reload the page to try again.";
   message(error.message, true);

@@ -294,13 +294,16 @@ def inspect_game(root: Path, project: Path | None = None) -> dict:
             release = release_version(project)
             if (mod["version"].casefold() != info["version"].casefold() or
                     mod["release"].casefold() != release.casefold()):
-                result.update(state="mismatch", error="Installed Lekmod version differs "
-                              f"from this project ({info['version']}, {release}).")
+                result.update(state="mismatch", error=
+                              f"Installed Lekmod: {mod['release']} (build {mod['version']}). "
+                              f"This project requires {release} (build {info['version']}). "
+                              "Install the matching version using the official Lekmod launcher.")
                 return result
             source = project / "LEKMOD/Override/CIV5Units_Mongol.xml"
             if _gameplay_digest(source) != game_rules:
                 result.update(state="mismatch", error="Installed Lekmod gameplay XML differs "
-                              "from this project. Install its matching release before applying text.")
+                              f"from this project ({release}, build {info['version']}). "
+                              "Reinstall its matching release before applying text.")
                 return result
     except (OSError, ValueError, ET.ParseError, IndexError) as error:
         result.update(state="damaged", error="Cannot verify Lekmod XML or version: " + str(error))
@@ -364,13 +367,9 @@ def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME) 
 
 
 def release_catalog(home: Path = APP_HOME) -> list[dict]:
-    """Show official installer releases, marking only this branch's match usable."""
-    path = home / "LekmodInstaller/github_setup/versions.json"
-    versions = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    supported = set(editor_manifest(home)["compatible_releases"])
-    return [{"version": version, "supported": version in supported,
-             "date": info.get("release_date", "")}
-            for version, info in versions.items()]
+    """Check the official list independently of this editor's release number."""
+    from .release_feed import catalog
+    return catalog(home)['versions']
 
 
 def editor_manifest(home: Path = APP_HOME) -> dict:
@@ -428,16 +427,19 @@ def extract_source_archive(archive: Path, destination: Path, *,
 def download_compatible_source(version: str, home: Path = APP_HOME, *,
                                progress: Callable[[str, int, int | None], None] | None = None,
                                cancelled: Callable[[], bool] | None = None) -> Path:
-    """Build a separate reviewed release project; never overwrite earlier work."""
-    if version not in editor_manifest(home)["compatible_releases"]:
-        raise ValueError("This version has no compatible localization baseline. "
-                         "A maintainer must migrate it before it can be edited.")
+    """Build a separate verified release project; never overwrite earlier work."""
+    if not re.fullmatch(r'v\d+\.\d+', version):
+        raise ValueError('Invalid Lekmod release')
     destination = home / "localization/workspace/projects" / version
     if destination.exists():
         validate_project(destination, full=True)
         if release_version(destination) != version:
             raise ValueError(f"Existing project has a different release: {destination}")
         return destination  # Reuse; never replace a translator's files.
+    reviewed = version in editor_manifest(home)['compatible_releases']
+    if not reviewed and version not in {item['version'] for item in release_catalog(home)
+                                       if item['supported']}:
+        raise ValueError('This release needs a reviewed localization migration')
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".download-") as temporary:
         temporary_path = Path(temporary)
@@ -463,8 +465,14 @@ def download_compatible_source(version: str, home: Path = APP_HOME, *,
         content = temporary_path / "project"
         content.mkdir()
         extract_source_archive(archive, content, progress=progress, cancelled=cancelled)
+        from .release_feed import ensure_history
+        revision = None
+        if not reviewed:
+            revision = ensure_history(version, home, progress=progress, cancelled=cancelled)
         if release_version(content) != version:
-            revision = editor_manifest(home).get('release_sources', {}).get(version)
+            revision = revision or editor_manifest(home).get('release_sources', {}).get(version)
+            if not revision:
+                revision = ensure_history(version, home, progress=progress, cancelled=cancelled)
             if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
                 raise ValueError('Selected release has no reviewed source revision')
             upstream_archive = temporary_path / 'official.zip'
@@ -493,6 +501,9 @@ def download_compatible_source(version: str, home: Path = APP_HOME, *,
         info = validate_project(content, full=True)
         if release_version(content) != version:
             raise ValueError("downloaded project release differs from the selected version")
+        if not reviewed:
+            from .release_feed import verify_source
+            verify_source(content)
         if cancelled and cancelled():
             raise DownloadCancelled("download canceled; temporary files removed")
         content.rename(destination)
