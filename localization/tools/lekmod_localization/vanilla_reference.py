@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import tempfile
 
 from .common import CatalogError, REPO_ROOT, normalize_metadata, normalize_text
 from .vanilla_snapshot import read_snapshot
@@ -14,6 +15,52 @@ from .vanilla_snapshot import read_snapshot
 
 DEFAULT_REFERENCE = REPO_ROOT / "localization" / "reference" / "vanilla-fingerprints.json.gz"
 HEX = re.compile(r"^[0-9a-f]{64}$")
+# This reviewed extension keeps all English field hashes and the Russian
+# digest; it fills only the eight formerly empty locales. Unknown baselines
+# remain incompatible, including references with changed game text.
+COMPATIBLE_REFERENCE_EXTENSIONS = {
+    ("5b10d7361ea52b8c6613d6679a54c9d1174c3a30abad86c1485cbdf908a0bd17",
+     "c886466d7d6c75eb4011e9575c64375e8acb17b7843bf4e0a359106fc298d2e2"),
+}
+
+
+def compatible_reference_digest(previous: object, current: bytes) -> bool:
+    """Accept exact reference bytes or a specifically reviewed forward extension."""
+    if not isinstance(previous, str):
+        return False
+    digest = hashlib.sha256(current).hexdigest()
+    return previous == digest or (previous, digest) in COMPATIBLE_REFERENCE_EXTENSIONS
+
+
+def adopt_reference_extension(project: Path, bundled: Path) -> bool:
+    """Upgrade only the known old project index, keeping its exact private backup."""
+    target = project / "localization/reference/vanilla-fingerprints.json.gz"
+    if not bundled.is_file() or not target.is_file():
+        return False
+    previous, current = target.read_bytes(), bundled.read_bytes()
+    digest = hashlib.sha256(previous).hexdigest()
+    if previous == current or not compatible_reference_digest(digest, current):
+        return False
+    read_reference(bundled)
+    backup = project / "localization/workspace/reference-backups" / (digest + ".json.gz")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists():
+        if backup.read_bytes() != previous:
+            raise CatalogError("the previous vanilla reference backup differs; stop and review it")
+    else:
+        with backup.open("xb") as handle:
+            handle.write(previous)
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".reference.",
+                                     delete=False) as handle:
+        temporary = Path(handle.name)
+        handle.write(current)
+    try:
+        if target.read_bytes() != previous:
+            raise CatalogError("the vanilla reference changed during migration; retry after reviewing it")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def value_hash(value: object, *, metadata: bool = False) -> str | None:

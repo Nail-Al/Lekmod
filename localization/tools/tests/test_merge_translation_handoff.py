@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
@@ -103,6 +104,22 @@ class HandoffMergeTests(unittest.TestCase):
         self.assertEqual(again["identical_count"], 1)
         self.assertEqual(again["items"], [])
         self.assertFalse(again["applied"])
+
+    def test_reviewed_reference_extension_accepts_an_old_handoff_without_overwrite(self):
+        """Adding vanilla language tables must not discard an earlier translator ZIP."""
+        old = b"previous reviewed baseline"
+        archive = self.package([self.new], reference=old)
+        original = self.target.read_bytes()
+        migration = {(sha256(old).hexdigest(), sha256(self.reference.read_bytes()).hexdigest())}
+        with patch("lekmod_localization.vanilla_reference.COMPATIBLE_REFERENCE_EXTENSIONS", migration):
+            preview = merge_handoff(archive, self.project)
+            self.assertEqual(preview["items"][0]["status"], "new")
+            self.assertEqual(self.target.read_bytes(), original)
+            merged = merge_handoff(archive, self.project, apply=True)
+        self.assertTrue(merged["applied"])
+        records = csv_records(self.target.read_bytes(), "RU_RU")
+        self.assertEqual(records[self.existing["key"]], {**self.existing, "updated_at": ""})
+        self.assertEqual(records[self.new["key"]], self.new)
 
     def test_conflicting_key_blocks_entire_merge_and_keeps_every_byte(self):
         """Another translator's revision must not overwrite a teammate's text."""

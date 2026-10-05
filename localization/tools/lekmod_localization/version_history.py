@@ -99,8 +99,11 @@ def change_map(project: Path, current: str) -> tuple[dict[str, list[str]], dict]
 def carry_translations(old: Path, new: Path) -> dict:
     """Keep old files intact and prefer any existing work in the new project."""
     from merge_translation_handoff import csv_records, encoded_records
+    from .vanilla_reference import compatible_reference_digest
     reference = 'localization/reference/vanilla-fingerprints.json.gz'
-    if (old / reference).read_bytes() != (new / reference).read_bytes():
+    import hashlib
+    if not compatible_reference_digest(hashlib.sha256((old / reference).read_bytes()).hexdigest(),
+                                       (new / reference).read_bytes()):
         raise CatalogError('Projects use different vanilla references; review a ZIP instead of automatic transfer')
     from .connections import release_version
     old_version, new_version = release_version(old), release_version(new)

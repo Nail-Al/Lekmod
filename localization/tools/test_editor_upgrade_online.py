@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from urllib.request import Request, urlopen
 import zipfile
 
 from test_windows_updater import start, stop, token_at, wait_for
-from test_portable_editor import source_fixture
+from test_portable_editor import source_fixture, REPOSITORY, get
 from merge_localization import candidate_sources
 from merge_translation_handoff import encoded_records
 
@@ -25,6 +26,7 @@ def main() -> int:
     parser.add_argument("--new-archive", type=Path, required=True)
     parser.add_argument("--test-repair", action="store_true")
     parser.add_argument('--connected-project', action='store_true')
+    parser.add_argument('--test-reference-migration', action='store_true')
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("run the online upgrade test on Windows")
@@ -41,6 +43,7 @@ def main() -> int:
         preferences = {"project_path": "C:/Lekmod source", "mode": "translator",
                        "column_widths": {"key": 515}, "snapshot_url": "https://example.invalid"}
         connected_files = {}
+        previous_reference = None
         if args.connected_project:
             project = root / 'Connected project with spaces'
             source_fixture(project)
@@ -54,6 +57,15 @@ def main() -> int:
                 'translator_note': 'Keep this work', 'updated_at': '2026-10-05T00:00:00Z'}}))
             connected_files = {path: path.read_bytes() for path in (primary, approved)}
             preferences['project_path'] = str(project)
+            if args.test_reference_migration:
+                # Use the immutable reference from the user's prior editor release,
+                # not a new fixture that accidentally skips the upgrade scenario.
+                with urlopen('https://raw.githubusercontent.com/Nail-Al/Lekmod/editor-v0.17/'
+                             'localization/reference/vanilla-fingerprints.json.gz', timeout=45) as response:
+                    previous_reference = response.read(2 * 1024 * 1024)
+                assert hashlib.sha256(previous_reference).hexdigest() == (
+                    '5b10d7361ea52b8c6613d6679a54c9d1174c3a30abad86c1485cbdf908a0bd17')
+                (project / 'localization/reference/vanilla-fingerprints.json.gz').write_bytes(previous_reference)
         workspace = root / "localization/workspace"
         workspace.mkdir(parents=True)
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
@@ -104,6 +116,15 @@ def main() -> int:
             assert metadata['ready'], metadata.get('connection_error')
             for path, content in connected_files.items():
                 assert path.read_bytes() == content, f'updater modified {path}'
+            if previous_reference is not None:
+                reference = project / 'localization/reference/vanilla-fingerprints.json.gz'
+                assert reference.read_bytes() == (REPOSITORY /
+                    'localization/reference/vanilla-fingerprints.json.gz').read_bytes()
+                backup = project / 'localization/workspace/reference-backups' / (
+                    hashlib.sha256(previous_reference).hexdigest() + '.json.gz')
+                assert backup.read_bytes() == previous_reference
+                assert any(event['action'] == 'vanilla-reference-migration'
+                           for event in json.loads(get(base + '/api/logs'))['events'])
         assert metadata["preferences"]["column_widths"] == {"key": 515}
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
         for name, expected in expected_ui.items():

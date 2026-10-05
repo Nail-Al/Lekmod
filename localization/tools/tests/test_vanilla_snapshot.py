@@ -2,12 +2,14 @@
 
 from contextlib import closing
 import gzip
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,6 +20,7 @@ from lekmod_localization.vanilla_snapshot import (
     write_snapshot,
 )
 from lekmod_localization.vanilla_reference import (
+    adopt_reference_extension, compatible_reference_digest,
     read_reference, verify_snapshot_reference, write_reference,
 )
 
@@ -88,6 +91,46 @@ class VanillaSnapshotTests(unittest.TestCase):
         write_snapshot(self.database, changed)
         with self.assertRaisesRegex(CatalogError, "pinned team reference"):
             verify_snapshot_reference(changed, reference)
+
+    def test_reviewed_reference_extension_preserves_work_and_private_snapshot(self):
+        """Known reference migration changes only its index and backs up the old bytes."""
+        write_snapshot(self.database, self.snapshot)
+        project = self.snapshot.parent
+        reference = project / "localization/reference/vanilla-fingerprints.json.gz"
+        write_reference(self.snapshot, reference)
+        previous = reference.read_bytes()
+        with closing(sqlite3.connect(self.database)) as database:
+            database.execute('CREATE TABLE Language_DE_DE (Tag TEXT, Text TEXT)')
+            database.execute('INSERT INTO Language_DE_DE VALUES (?, ?)',
+                             ('TXT_KEY_BUILDING_MARKET', 'Markt'))
+            database.commit()
+        full = project / "complete-snapshot.json.gz"
+        bundled = project / "bundled-reference.json.gz"
+        write_snapshot(self.database, full)
+        write_reference(full, bundled)
+        old_digest = hashlib.sha256(previous).hexdigest()
+        new_digest = hashlib.sha256(bundled.read_bytes()).hexdigest()
+        work = project / "localization/translations/RU_RU.csv"
+        work.parent.mkdir(parents=True)
+        work.write_bytes(b"saved contributor work")
+        originals = {path: path.read_bytes() for path in (work, self.snapshot, full)}
+        self.assertFalse(adopt_reference_extension(project, bundled))
+        with patch("lekmod_localization.vanilla_reference.COMPATIBLE_REFERENCE_EXTENSIONS",
+                   {(old_digest, new_digest)}):
+            self.assertTrue(adopt_reference_extension(project, bundled))
+            self.assertFalse(adopt_reference_extension(project, bundled))
+            self.assertTrue(compatible_reference_digest(old_digest, bundled.read_bytes()))
+            self.assertFalse(compatible_reference_digest(new_digest, previous))
+            self.assertFalse(compatible_reference_digest(None, bundled.read_bytes()))
+            self.assertFalse(compatible_reference_digest("f" * 64, bundled.read_bytes()))
+        backup = project / "localization/workspace/reference-backups" / (old_digest + ".json.gz")
+        self.assertEqual(backup.read_bytes(), previous)
+        self.assertEqual(reference.read_bytes(), bundled.read_bytes())
+        for path, data in originals.items():
+            self.assertEqual(path.read_bytes(), data)
+        verify_snapshot_reference(full, reference)
+        with self.assertRaisesRegex(CatalogError, "pinned team reference"):
+            verify_snapshot_reference(self.snapshot, reference)
 
     def test_tampered_snapshot_or_lekmod_sentinel_is_rejected(self):
         """Loaders reject changed rows and databases containing Lekmod text."""

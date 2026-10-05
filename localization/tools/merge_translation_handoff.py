@@ -16,6 +16,7 @@ import uuid
 import zipfile
 
 from lekmod_localization.common import CatalogError, KEY_RE, PLACEHOLDER_RE, token_counts
+from lekmod_localization.vanilla_reference import compatible_reference_digest
 from sync_primary_english import marked_block
 
 
@@ -106,7 +107,7 @@ def handoff_rows(archive: Path | bytes, reference: bytes) -> tuple[dict, dict]:
                 raise CatalogError("handoff ZIP member is too large")
             metadata = json.loads(package.read("manifest.json"))
             if (not isinstance(metadata, dict) or
-                    metadata.get("vanilla_reference_sha256") != hashlib.sha256(reference).hexdigest()):
+                    not compatible_reference_digest(metadata.get("vanilla_reference_sha256"), reference)):
                 raise CatalogError("handoff team vanilla reference differs from this project")
             locales = [name.removeprefix("translations/").removesuffix(".csv") for name in members]
             if any(not LOCALE.fullmatch(locale) for locale in locales):

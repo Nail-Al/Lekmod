@@ -54,7 +54,7 @@ from lekmod_localization.english_dates import read_dates
 from lekmod_localization.shipped import read_approvals
 from lekmod_localization.vanilla_snapshot import read_snapshot
 from lekmod_localization.vanilla_reference import verify_snapshot_reference
-from lekmod_localization.vanilla_reference import read_reference
+from lekmod_localization.vanilla_reference import read_reference, adopt_reference_extension
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
 from lekmod_localization.version_history import (
     change_map, synchronize as sync_history, carry_translations, read_history, between,
@@ -278,6 +278,12 @@ class Editor:
         except ValueError as error:
             self.project_info = None
             self.connection_error = str(error)
+        if self.ready:
+            bundled_reference = (Path(sys._MEIPASS) / "vanilla-fingerprints.json.gz"
+                if getattr(sys, "frozen", False) else
+                APP_HOME / "localization/reference/vanilla-fingerprints.json.gz")
+            if adopt_reference_extension(REPO_ROOT, bundled_reference):
+                self.record_event("vanilla-reference-migration", "success")
         home_snapshot = APP_HOME / "localization/workspace/vanilla-snapshot.json.gz"
         self.snapshot = next((path for path in (snapshot, home_snapshot) if path.is_file()), None)
         self.snapshot_error = ""

@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 import zipfile
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -21,8 +22,8 @@ APP_HOME = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", Fals
             else Path(__file__).resolve().parents[3])
 SETTINGS_FILE = APP_HOME / "localization" / "workspace" / "editor-settings.json"
 TEAM_SNAPSHOT_URL = (
-    "https://www.dropbox.com/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc"
-    "?rlkey=fwcgddzwanyaljhe9tja6ytk1&dl=1"
+    "https://www.dropbox.com/scl/fi/998d6o71w2og8x9facylu/vanilla-snapshot-complete.enc"
+    "?rlkey=ex0bn7c9hjecmu6ayy7qpxaip&dl=1"
 )
 DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
@@ -34,6 +35,19 @@ DEFAULTS = {
 }
 KEY = re.compile(r"^v?\d+(?:\.\d+)+$", re.IGNORECASE)
 GAME_EXES = ("CivilizationV.exe", "CivilizationV_DX11.exe")
+
+
+def migrate_snapshot_link(url: str) -> str:
+    """Replace the superseded team link while retaining custom and cleared links."""
+    try:
+        parsed = urlsplit(url)
+        if (parsed.scheme == "https" and parsed.netloc == "www.dropbox.com" and
+                parsed.path == "/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc" and
+                parse_qs(parsed.query).get("rlkey") == ["fwcgddzwanyaljhe9tja6ytk1"]):
+            return TEAM_SNAPSHOT_URL
+    except ValueError:
+        pass
+    return url
 
 
 def settings(home: Path = APP_HOME) -> dict:
@@ -69,6 +83,7 @@ def settings(home: Path = APP_HOME) -> dict:
     if not result["snapshot_url"] and not result["snapshot_url_cleared"]:
         # Older editor releases persisted an empty link before the team URL existed.
         result["snapshot_url"] = TEAM_SNAPSHOT_URL
+    result["snapshot_url"] = migrate_snapshot_link(result["snapshot_url"])
     return result
 
 
@@ -99,6 +114,7 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
         any(not isinstance(k, str) or type(v) is not int or not 100 <= v <= 1500
             for k, v in candidate["column_widths"].items())):
         raise ValueError("invalid table preferences")
+    candidate["snapshot_url"] = migrate_snapshot_link(candidate["snapshot_url"])
     path = home / "localization" / "workspace" / "editor-settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,

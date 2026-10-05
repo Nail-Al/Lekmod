@@ -125,7 +125,17 @@ function savedColumns() {
   return prefs.visible_columns.some(field => specific.includes(field)) ? prefs.visible_columns : [];
 }
 function columnTitle(field, title) {
-  return field === "vanilla_target" ? "Vanilla " + (el("locale").value.split("_")[0] || "language") : title;
+  if (field === "vanilla_target") return "Vanilla " + selectedLanguage();
+  if (field === "translation") return "My translation · " + selectedLanguage();
+  return title;
+}
+function selectedLanguage() {
+  const locale = el("locale").value;
+  return locale === "ZH_HANT_HK" ? "ZH-Hant-HK" : locale.split("_")[0] || "language";
+}
+function translationHeading() {
+  el("text-heading").textContent = developer() ? "English source text"
+    : "My translation text · " + selectedLanguage();
 }
 function captureDraft() {
   return JSON.stringify({text: el("translation").value,
@@ -259,7 +269,7 @@ function changeMode() {
   el("grammar").hidden = developer();
   el("note-help").hidden = developer();
   el("run-checks").hidden = !developer();
-  el("text-heading").textContent = developer() ? "English source text" : "My translation text";
+  translationHeading();
   el("text-help").textContent = developer()
     ? "Saved in primary.xml; changes make previous translations stale."
     : "Saved in the language CSV; the project's game XML is rebuilt.";
@@ -995,6 +1005,7 @@ el("locale").addEventListener("change", async () => {
   el("locale").value = previous;
   guardNavigation(async () => {
     el("locale").value = next;
+    translationHeading();
     categories(); offset = 0;
     try {
       await preference({locale: next, category: el("category").value});

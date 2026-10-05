@@ -23,7 +23,7 @@ from lekmod_localization.vanilla_snapshot import read_snapshot, write_snapshot
 from lekmod_localization.vanilla_reference import reference_from_snapshot, write_reference
 from lekmod_localization.fallback import fallback_entries, preview_files, write_preview
 from lekmod_localization.shipped import approved_entries, install_candidate, read_approvals
-from lekmod_localization.workspace import editor_source_fingerprint
+from lekmod_localization.workspace import build_editor_rows, editor_source_fingerprint
 import xml.etree.ElementTree as ET
 
 
@@ -317,6 +317,40 @@ class LocalizationCatalogTests(unittest.TestCase):
         self.assertTrue(entries)
         self.assertTrue(all(entry["official_game"]["status"] == "unavailable"
                             for entry in entries))
+
+    def test_every_target_language_reads_its_own_vanilla_reference_column(self):
+        """All nine translator tables use the chosen locale, including Traditional Chinese."""
+        database, source, _, localizations, references, _ = self.build()
+        samples = {"DE_DE": "German reference", "ES_ES": "Spanish reference",
+                   "FR_FR": "French reference", "IT_IT": "Italian reference",
+                   "JA_JP": "Japanese reference", "KO_KR": "Korean reference",
+                   "PL_PL": "Polish reference", "RU_RU": "Russian reference",
+                   "ZH_HANT_HK": "Traditional Chinese reference"}
+        with closing(sqlite3.connect(database)) as connection:
+            for locale, text in samples.items():
+                if locale not in ("DE_DE", "RU_RU"):
+                    connection.execute(f'CREATE TABLE "Language_{locale}" '
+                                       '(Tag TEXT PRIMARY KEY, Text TEXT, Gender TEXT, Plurality TEXT)')
+                table = f'LocalizedText_{locale}' if locale in ("DE_DE", "RU_RU") else f'Language_{locale}'
+                connection.execute(f'INSERT OR REPLACE INTO "{table}" VALUES (?, ?, ?, ?)',
+                                   ("TXT_KEY_BUILDING_CHANGED", text, None, None))
+            connection.commit()
+        snapshot = self.root / "all-languages.json.gz"
+        write_snapshot(database, snapshot)
+        vanilla, hashes = read_snapshot(snapshot)
+        catalog = catalog_builder.build_catalog(
+            primary_audit.parse_source(source, "en_US"), vanilla["en_US"],
+            sorted(vanilla), snapshot.name, hashes["en_US"], localizations, references)
+        for locale, text in samples.items():
+            with self.subTest(locale=locale):
+                review = catalog_builder.build_locale_review(
+                    catalog, locale, vanilla["en_US"], vanilla[locale], localizations)
+                workspace = build_editor_rows({locale: review})
+                rows = [row for group in workspace[locale].values() for row in group]
+                row = next(row for row in rows if row["key"] == "TXT_KEY_BUILDING_CHANGED")
+                self.assertEqual(row["vanilla_target"], text)
+                self.assertEqual(row["vanilla_en_US"], "Old building")
+                self.assertEqual(row["lekmod_en_US"], "New building")
 
     def test_frozen_snapshot_matches_direct_database_input(self):
         """The catalog receives identical rows and hashes from either input."""

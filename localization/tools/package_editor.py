@@ -23,11 +23,11 @@ START = """Lekmod Localization Editor for Windows
    Settings and click Find / verify game, then Apply to installed game after
    saving. One matching Lekmod DLC must be installed; the XML is backed up.
    Install the matching complete Lekmod release separately first.
-5. To compare original vanilla sentences, import the matching local
-   vanilla-snapshot.json.gz or use an encrypted link and password from
-   your team in Settings. The app verifies the shared fingerprints. To
-   share a verified snapshot, use Vanilla reference > Encrypt and download
-   .enc; the EXE needs no Python installation for this operation.
+5. To compare original vanilla sentences in all ten languages, expand
+   Settings > Vanilla reference. Keep the prefilled encrypted link, enter
+   the team's password and click Download, decrypt and verify. The app
+   keeps the verified local copy for future launches, without saving the
+   password. An older EN/RU-only snapshot needs this download once.
 6. For future editor versions, use Settings > Editor updates > Check latest
    version > Download and update. The wrench button checks app files against
    the published release; Fix version repairs missing or changed app files.

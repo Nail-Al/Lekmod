@@ -22,7 +22,7 @@ from merge_translation_handoff import (MAX_ARCHIVE, MAX_CSV, csv_records,
 from lekmod_localization.common import CatalogError, KEY_RE, normalize_text
 from lekmod_localization.catalog import build_catalog
 from lekmod_localization.sources import load_repository_localizations
-from lekmod_localization.vanilla_reference import read_reference
+from lekmod_localization.vanilla_reference import read_reference, compatible_reference_digest
 from lekmod_localization.workspace import editor_source_fingerprint
 
 PRIMARY = "localization/en_US/primary.xml"
@@ -140,7 +140,8 @@ def read_packages(archives: list[bytes | Path], reference: bytes) -> tuple[dict,
                         any(item.file_size > 12 * 1024 * 1024 for item in package.infolist())):
                     raise CatalogError('unexpected or oversized handoff ZIP member')
                 meta = json.loads(package.read('manifest.json'))
-                if not isinstance(meta, dict) or meta.get('vanilla_reference_sha256') != digest(reference):
+                if not isinstance(meta, dict) or not compatible_reference_digest(
+                        meta.get('vanilla_reference_sha256'), reference):
                     raise CatalogError('handoff team vanilla reference differs from this project')
                 if PRIMARY in names:
                     raw = package.read(PRIMARY)

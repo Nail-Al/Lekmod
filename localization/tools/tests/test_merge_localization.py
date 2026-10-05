@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,6 +37,30 @@ def document(one='Mod one', two='Mod two'):
 
 
 class OrderedMergeTests(unittest.TestCase):
+    def test_reviewed_reference_extension_keeps_english_and_translation_imports(self):
+        """Earlier packages retain English-first ordering after the baseline extension."""
+        incoming = document(one="Updated mod one")
+        sources = candidate_sources(self.project, incoming)
+        package = self.package(english=incoming,
+            translations={KEY: self.row(KEY, sources, "Updated translation")})
+        stream = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(package)) as source, zipfile.ZipFile(stream, "w") as target:
+            for name in source.namelist():
+                content = source.read(name)
+                if name == "manifest.json":
+                    manifest = json.loads(content)
+                    manifest["vanilla_reference_sha256"] = "a" * 64
+                    content = json.dumps(manifest).encode()
+                target.writestr(name, content)
+        content = stream.getvalue()
+        with self.assertRaisesRegex(CatalogError, "vanilla reference differs"):
+            review_merge([content], self.project)
+        with patch("lekmod_localization.vanilla_reference.COMPATIBLE_REFERENCE_EXTENSIONS",
+                   {("a" * 64, digest(self.reference.read_bytes()))}):
+            preview = review_merge([content], self.project)
+        self.assertEqual([row["locale"] for row in preview["items"]], ["en_US", "RU_RU"])
+        self.assertEqual(preview["items"][1]["status_label"], "English first")
+
     def test_inline_operations_do_not_consume_the_next_multiline_row(self):
         """Upstream XML mixes one-line rows with multiline operations."""
         mixed = document().replace(

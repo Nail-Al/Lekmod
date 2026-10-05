@@ -135,6 +135,25 @@ class ConnectionTests(unittest.TestCase):
         old.write_text(json.dumps({"snapshot_url": ""}), encoding="utf-8")
         self.assertEqual(settings(self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)
 
+    def test_snapshot_default_migration_keeps_custom_links_and_all_preferences(self):
+        """Only the old team file changes; cleared links and contributor settings stay."""
+        path = self.home / "localization/workspace/editor-settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        previous = "https://www.dropbox.com/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc"
+        original = {"project_path": str(self.project), "locale": "DE_DE", "prefill": False,
+                    "column_widths": {"translation": 720}, "onboarded": True,
+                    "snapshot_url": previous + "?st=zfeaj3dx&dl=0&rlkey=fwcgddzwanyaljhe9tja6ytk1"}
+        path.write_text(json.dumps(original), encoding="utf-8")
+        migrated = settings(self.home)
+        self.assertEqual(migrated["snapshot_url"], TEAM_SNAPSHOT_URL)
+        for name in ("project_path", "locale", "prefill", "column_widths", "onboarded"):
+            self.assertEqual(migrated[name], original[name])
+        self.assertEqual(save_settings({"wrap": False}, self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)
+        for custom in ("https://example.invalid/team.enc", "",
+                       previous + "?rlkey=a-different-access-key&dl=1"):
+            save_settings({"snapshot_url": custom}, self.home)
+            self.assertEqual(settings(self.home)["snapshot_url"], custom)
+
     def test_downloaded_archive_cannot_escape_destination(self):
         """Reject ZIP traversal before opening a project file for writing."""
         archive = self.home / "archive.zip"

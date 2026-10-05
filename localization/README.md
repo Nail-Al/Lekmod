@@ -17,7 +17,7 @@ Keep the complete extracted editor folder. **Settings → Editor updates → Dow
 
 Choose a language and category, or **All categories**. Select a row, edit **My translation text**, then **Save and apply**. The editor writes that row to the connected project's `localization/translations/<LANGUAGE>.csv` and rebuilds its game XML according to `config.json`. It does not replace the whole language with just your row, commit to Git, or update the installed game automatically.
 
-**Vanilla EN** and **Vanilla <selected language>** show official reference sentences when that language exists in the imported snapshot. Enable the optional translation column in **Visible columns**. The current team reference contains EN and RU sentences; the other eight tables are empty until a maintainer completes the baseline. Empty reference cells do not prove the game has no translation.
+**My translation · RU**, **DE**, etc. names the language you are editing; the form shows the same language. **Vanilla EN** and **Vanilla <selected language>** show official reference sentences from the imported snapshot. Enable the optional translation column in **Visible columns**. The shared baseline contains English and all nine supported translation languages: DE, ES, FR, IT, JA, KO, PL, RU and Traditional Chinese (ZH-Hant-HK). A new Lekmod key may have no vanilla counterpart.
 
 | Status | Meaning |
 | --- | --- |
@@ -39,7 +39,7 @@ For a game test, first install the **same Lekmod release** using the [official l
 
 In **Settings → Get a compatible Lekmod version**, choose the new release and download it. Keep **Carry saved translations when switching projects** checked, then **Save connections**. Unsaved text must be saved, discarded, or kept in the old project before switching. Existing destination translations take priority; conflicting and removed old rows remain available in the old project and private `workspace/carried-translations/` archives. Developer English changes and unfinished Merge reviews stay with their original project; export them for review rather than replacing a new release's English wholesale.
 
-The new project copies eligible saved rows with their original English fingerprints. Unchanged rows keep their translations; changed rows become `stale` and use new English in the generated XML. A different vanilla reference stops automatic transfer. The previous project is not deleted or overwritten.
+The new project copies eligible saved rows with their original English fingerprints. Unchanged rows keep their translations; changed rows become `stale` and use new English in the generated XML. A different vanilla reference stops automatic transfer, except the reviewed EN/RU-to-ten-language extension, which preserves all existing English and Russian data. The previous project is not deleted or overwritten.
 
 Use **All categories → Filter rows → Changed in Lekmod version → Since last project update** to see changed keys across every intermediate release. Add **Needs localization only** to show missing/stale translations. **Changed in Lekmod** lists the release labels for each row. **Settings → Release comparisons → Synchronize** enables additional reviewed versions in the filter. These comparisons use a small bundled XML/SQL change index; they do not download older mod archives or run a full build per version. An intermediate edit followed by a later revert is still listed, although a translation matching the final English may already be valid.
 
@@ -105,106 +105,33 @@ For a prepared new release checkout, `python -B localization/tools/sync_lekmod_v
 
 ## Vanilla reference: team setup
 
-Ordinary contributors only use the prefilled encrypted link and the separately supplied password. The editor downloads, decrypts and compares the file against the tracked `reference/vanilla-fingerprints.json.gz`. A wrong password or different reference cannot replace a valid local snapshot. The verified local copy is reused on restart/update; no game-language switching is needed for translators.
+Expand **Settings → Vanilla reference**, keep the prefilled encrypted Dropbox link, enter the team's password, then click **Download, decrypt and verify**. LLE verifies all ten languages against `reference/vanilla-fingerprints.json.gz` and reuses the local copy on future launches. No Steam language switching or Python installation is needed for ordinary translators.
 
-**Why two files?** Git contains a common text-free fingerprint reference; the full official sentences stay in an ignored local snapshot. Keep official text out of public Git unless the team has redistribution permission. Anyone with both encrypted link and password can decrypt it; share the password separately with intended collaborators. Deleting a tracked file later does not remove it from Git history.
+**Upgrading from the old EN/RU reference:** v0.18 replaces only the recognized old default link and known old project fingerprint file. Custom links, deliberately cleared links, translations and English work stay intact. The previous project index is backed up under `workspace/reference-backups/`. The old snapshot is kept, but needs one download of the complete reference using its new password; importing it backs up the previous snapshot. Existing handoffs and project transfers remain compatible with this specifically reviewed extension. Other baseline changes still require separate review.
 
-**What changes when the baseline is completed?** A maintainer reviews every added language, publishes a new fingerprint reference and encrypted snapshot together, and updates the team link. Existing local snapshots are backed up when replaced. A different baseline is a separate team migration, not an ordinary editor update.
+### FAQ
 
-<details>
-<summary>Maintainers: capture missing vanilla languages, combine and encrypt them</summary>
+**Do I need to send my password to a developer?** No. Ask the maintainer for the password and enter it locally. LLE does not save it or include it in logs or exports. The downloaded, verified snapshot stays on your computer, so the password is needed again only if that copy is missing or the team changes its baseline.
 
+**Why are the vanilla columns empty?** Import the shared snapshot and enable **Vanilla <language>** in **Visible columns**. A new Lekmod key has no vanilla text. Switching language changes the reference column and My translation heading together; it never writes another language's translation into your selected CSV.
 
-The current reference already contains English and Russian. Close LLE while collecting the baseline. In the same VS Code PowerShell terminal, update the tools and check the Python 3.13 installation used for encryption:
+**Why keep fingerprints in Git and full text elsewhere?** The fingerprints give every developer one common reference without publishing the game's official sentences. The encrypted file provides those sentences to intended collaborators. Keep official text out of public Git unless the team has redistribution permission; anyone with both the link and password can decrypt it. Deleting a tracked file later does not remove it from Git history.
 
-```powershell
-Set-Location C:\Projects\Lekmod
-git status --short
-git switch localization-infrastructure
-if ($LASTEXITCODE -ne 0) { throw 'Git switch failed; stop here.' }
-git pull --ff-only origin localization-infrastructure
-if ($LASTEXITCODE -ne 0) { throw 'Git pull failed; stop here.' }
-py -3.13 -c "import cryptography; print('Encryption ready:', cryptography.__version__)"
-if ($LASTEXITCODE -ne 0) { throw 'Use the Python 3.13 installation with cryptography.' }
-if (-not (Test-Path -LiteralPath '.\localization\workspace\vanilla-snapshot.json.gz')) {
-  $snapshotUrl = 'https://www.dropbox.com/scl/fi/dquiyoh5k77v8qhip4u70/vanilla-snapshot.enc?rlkey=fwcgddzwanyaljhe9tja6ytk1&dl=1'
-  py -3.13 -B .\localization\tools\snapshot_cloud.py fetch --url $snapshotUrl `
-    --output .\localization\workspace\vanilla-snapshot.json.gz
-  if ($LASTEXITCODE -ne 0) { throw 'The existing team snapshot could not be verified.' }
-}
-```
+**What if my password, file or reference is wrong?** Verification stops before replacing the local snapshot. Check the link and password with the maintainer, update the project checkout, and retry. Unknown or modified baselines are never adopted automatically. A missing reference does not delete your saved translations.
 
-Select **English** in **Steam Library → Civilization V → Properties → General → Language**. Wait for downloads, launch the unmodded game to its main menu, then exit it. Keep its DLC unmodded throughout capture. Define these two helpers once; they rediscover the cache after each game launch:
+**Does the reference replace my translations or the installed game?** No. It supplies comparison sentences. English fingerprints decide whether each saved Lekmod translation is current. The installed game changes only after **Apply to installed game**, with a matching Lekmod version and a backup.
+
+**How do IDE users obtain the same reference?** Update the `localization-infrastructure` checkout, then run these commands in its PowerShell terminal. Use the Python 3.13 installation with `cryptography` already installed. The first command asks for the password; the second refreshes the comparison workspace:
 
 ```powershell
 Set-Location C:\Projects\Lekmod
-function Get-VanillaDatabase {
-  $documents = [Environment]::GetFolderPath('MyDocuments')
-  $folders = @((Join-Path $documents 'My Games'),
-    (Join-Path $env:USERPROFILE 'Documents\My Games')) | Select-Object -Unique
-  $databases = @($folders | Where-Object { Test-Path -LiteralPath $_ } |
-    ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File `
-      -Filter 'Localization-Merged.db' -ErrorAction SilentlyContinue } |
-    Sort-Object LastWriteTime -Descending)
-  if ($databases.Count -eq 0) { throw 'Launch unmodded Civ V once, then close it.' }
-  Write-Host "Using $($databases[0].FullName), updated $($databases[0].LastWriteTime)"
-  return $databases[0].FullName
-}
-function Save-VanillaLocale([string]$Locale) {
-  $database = Get-VanillaDatabase
-  py -3.13 -B .\localization\tools\collect_vanilla.py inspect --vanilla-db $database
-  if ($LASTEXITCODE -ne 0) { throw 'Cache inspection failed; no capture was saved.' }
-  py -3.13 -B .\localization\tools\collect_vanilla.py capture `
-    --vanilla-db $database --locale $Locale
-  if ($LASTEXITCODE -ne 0) { throw "Capture failed for $Locale; stop and review the message." }
-}
-$mergedDatabase = Get-VanillaDatabase
-py -3.13 -B .\localization\tools\collect_vanilla.py inspect --vanilla-db $mergedDatabase
-if ($LASTEXITCODE -ne 0) { throw 'English cache inspection failed.' }
+$snapshotUrl = 'https://www.dropbox.com/scl/fi/998d6o71w2og8x9facylu/vanilla-snapshot-complete.enc?rlkey=ex0bn7c9hjecmu6ayy7qpxaip&dl=1'
+py -3.13 -B .\localization\tools\snapshot_cloud.py fetch --url $snapshotUrl
+if ($LASTEXITCODE -ne 0) { throw 'Snapshot verification failed; stop here.' }
+py -3.13 -B .\localization\tools\manage.py prepare
+if ($LASTEXITCODE -ne 0) { throw 'Project preparation failed; review the message.' }
 ```
 
-Confirm `en_US` has at least 1,000 rows and says `matches baseline`. Russian is already pinned too; there is no new EN or RU capture to make. Optionally switch to Russian, launch/exit, and repeat the last two inspection commands: `RU_RU` must match too. For each missing locale below, select that language in Steam, wait for the download to finish, launch the unmodded game to its main menu, exit, then run **only its table command**. If a locale was already populated in the clean cache, capture it without changing Steam language.
-
-| Steam language | Command after launch and exit |
-| --- | --- |
-| German | `Save-VanillaLocale 'DE_DE'` |
-| Spanish - Spain | `Save-VanillaLocale 'ES_ES'` |
-| French | `Save-VanillaLocale 'FR_FR'` |
-| Italian | `Save-VanillaLocale 'IT_IT'` |
-| Japanese | `Save-VanillaLocale 'JA_JP'` |
-| Korean | `Save-VanillaLocale 'KO_KR'` |
-| Polish | `Save-VanillaLocale 'PL_PL'` |
-| Traditional Chinese | `Save-VanillaLocale 'ZH_HANT_HK'` |
-
-Each command creates an ignored `localization/workspace/vanilla-captures/<locale>.json.gz` and rejects changed English, an incomplete table, or an existing capture. Stop on errors; do not delete earlier captures to bypass validation. Steam language changes cannot replace your saved captures. Keep this terminal open, or redefine the helpers when opening a new session.
-
-After all eight captures, merge and confirm that all ten languages contain rows. These are **proposals**: the current baseline stays unchanged. Enter a password of at least 16 characters twice when encrypting; it is not displayed or stored:
-
-```powershell
-py -3.13 -B .\localization\tools\collect_vanilla.py merge
-if ($LASTEXITCODE -ne 0) { throw 'Snapshot merge failed; do not encrypt or upload it.' }
-py -3.13 -B .\localization\tools\snapshot_cloud.py encrypt `
-  --input .\localization\workspace\vanilla-snapshot-proposed.json.gz `
-  --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz `
-  --output .\localization\workspace\vanilla-snapshot-complete.enc
-if ($LASTEXITCODE -ne 0) { throw 'Encryption failed; do not upload a partial file.' }
-```
-
-Upload **only** `C:\Projects\Lekmod\localization\workspace\vanilla-snapshot-complete.enc` to Dropbox as a new file. Keep the old encrypted archive until migration. Copy the new shared link, change `dl=0` to `dl=1`, and paste the plain URL (no Markdown brackets) at the prompt:
-
-```powershell
-$newSnapshotUrl = Read-Host 'Paste the new Dropbox URL ending in dl=1'
-py -3.13 -B .\localization\tools\snapshot_cloud.py fetch `
-  --url $newSnapshotUrl `
-  --reference .\localization\workspace\vanilla-fingerprints-proposed.json.gz `
-  --output .\localization\workspace\verified-proposal.json.gz
-if ($LASTEXITCODE -ne 0) { throw 'Dropbox copy did not verify; keep the existing team link.' }
-```
-
-After team review, publish the proposed text-free fingerprint file and new encrypted link together, install the proposed full snapshot locally, and release those changes together. The existing reference rejects a completed snapshot until its matching fingerprint file is adopted. Do not replace just the old Dropbox file or commit the full snapshot/password. Ordinary translators only enter the updated team's link and password; they never need to switch game languages.
-
-</details>
-
-For terminal downloads use `py -3.13 -B localization/tools/snapshot_cloud.py fetch --url "<direct encrypted link>"`. Enter the password at its prompt. The Windows editor includes its encryption dependency; terminal users need a matching prebuilt `cryptography` package for their Python interpreter. The snapshot encryption/share form is hidden in the editor; maintainers use the CLI when preparing a new baseline.
+**Should we make a fresh snapshot on each computer?** No. All contributors use this one shared reference. `collect_vanilla.py inspect`, `capture` and `merge` are optional maintainer tools for a future reviewed baseline. Capture from one clean game build, verify English at every step, and review all locale data before publishing a proposal. `snapshot_cloud.py encrypt --input <proposal> --reference <proposed-fingerprints> --output <new.enc>` prompts for a password of at least 16 characters. Upload the encrypted file, verify its direct-download link using `fetch --reference <proposed-fingerprints>`, and release the new hashes and default link together. Do not commit the full snapshot or password.
 
 **Recovery:** If an older editor's page/updater is broken, update the Git checkout and run `python -B localization/tools/repair_editor.py --editor-root "C:\path\to\editor"`. It verifies/repairs app files without deleting the workspace. Normal updates use Settings. Do not delete a folder containing your translations to recover the executable.
