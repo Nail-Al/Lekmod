@@ -39,6 +39,10 @@ jobs:
         shell: pwsh
         run: |
           python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip
+      - name: Regression test locked EXE, partial rollback, and bounded recovery
+        shell: pwsh
+        run: |
+          python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip --locks-only
       - name: Verify snapshot encryption on Windows
         shell: pwsh
         run: |
@@ -66,7 +70,7 @@ jobs:
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          foreach ($previous in @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18')) {
+          foreach ($previous in @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19')) {
             $folder = "dist/previous-$previous"
             New-Item -ItemType Directory -Force $folder | Out-Null
             gh release download $previous --pattern LekmodLocalizationEditor-Windows.zip --dir $folder
@@ -77,6 +81,7 @@ jobs:
             )
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

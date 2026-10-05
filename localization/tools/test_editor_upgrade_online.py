@@ -27,6 +27,7 @@ def main() -> int:
     parser.add_argument("--test-repair", action="store_true")
     parser.add_argument('--connected-project', action='store_true')
     parser.add_argument('--test-reference-migration', action='store_true')
+    parser.add_argument('--test-extra-instance', action='store_true')
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("run the online upgrade test on Windows")
@@ -87,6 +88,44 @@ def main() -> int:
             time.sleep(1)
         else:
             raise RuntimeError(f"GitHub did not publish editor v{version} in time: {latest}")
+        ignored_failure_at = None
+        if args.test_extra_instance:
+            # Old released editors allowed multiple EXE copies from one folder.
+            # The downloaded helper must detect these before shutting either down.
+            extra, extra_base, _ = start(root)
+            assert extra_base != base, 'Fixture needs the released multi-instance editor'
+            wait_for(extra_base, previous)
+            rejected = Request(base + '/api/editor-update', data=b'{}', headers={
+                'Origin': base, 'X-Editor-Token': token_at(base), 'Content-Type': 'application/json'})
+            with urlopen(rejected, timeout=15) as response:
+                assert response.status == 202
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                with urlopen(base + '/api/editor-update-status', timeout=5) as response:
+                    status = json.load(response)
+                if status['state'] == 'error':
+                    break
+                time.sleep(.2)
+            else:
+                raise RuntimeError('Extra running editor was not rejected before shutdown')
+            assert wait_for(base, previous)['editor_version'] == previous
+            assert wait_for(extra_base, previous)['editor_version'] == previous
+            events = json.loads(get(base + '/api/logs'))['events']
+            failure = next(e for e in reversed(events) if e.get('action') == 'editor-update-install'
+                           and e.get('result') == 'failure')
+            assert 'Another editor instance' in failure['detail'], failure
+            assert failure['recovery'] == 'unchanged'
+            ignored_failure_at = failure['at']
+            with zipfile.ZipFile(args.old_archive) as archive:
+                assert (root / 'LekmodLocalizationEditor.exe').read_bytes() == archive.read(
+                    'LekmodLocalizationEditor.exe')
+            assert translation.read_text(encoding='utf-8') == 'saved translation from the old editor'
+            assert english.read_text(encoding='utf-8') == 'saved English source'
+            for path, content in connected_files.items():
+                assert path.read_bytes() == content
+            stop(extra_base, token_at(extra_base))
+            extra.wait(timeout=30)
+            print('Legacy extra-instance preflight preserved both servers and all contributor work.')
         request = Request(base + "/api/editor-update", data=b"{}", headers={
             "Origin": base, "X-Editor-Token": token_at(base),
             "Content-Type": "application/json"})
@@ -99,7 +138,7 @@ def main() -> int:
                 if metadata["editor_version"] == version and not metadata.get('initializing'):
                     break
                 notice = metadata.get("update_notice")
-                if notice and notice["result"] == "failure":
+                if notice and notice["result"] == "failure" and notice.get('at') != ignored_failure_at:
                     raise RuntimeError("The old editor reopened after a failed update: " +
                                        (workspace / "editor-updates/update.log").read_text()[-2000:])
                 with urlopen(base + "/api/editor-update-status", timeout=2) as response:

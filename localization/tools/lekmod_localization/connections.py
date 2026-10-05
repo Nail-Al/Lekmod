@@ -32,9 +32,41 @@ DEFAULTS = {
     "developer_visible_columns": [], "column_widths": {},
     "snapshot_url": TEAM_SNAPSHOT_URL, "snapshot_url_cleared": False,
     "page_size": "100",
+    "translator_filters": {}, "developer_filters": {},
 }
+FILTER_DEFAULTS = {"kind": "", "status": "", "date_field": "english_edited_at",
+                   "date_from": "", "date_to": "", "version": "", "needs_translation": ""}
 KEY = re.compile(r"^v?\d+(?:\.\d+)+$", re.IGNORECASE)
 GAME_EXES = ("CivilizationV.exe", "CivilizationV_DX11.exe")
+
+
+def table_filters(values: dict, *, developer: bool = False) -> dict:
+    """Validate persistent filters independently for the two editing modes."""
+    if not isinstance(values, dict) or set(values) - set(FILTER_DEFAULTS):
+        raise ValueError("invalid table filter settings")
+    result = {**FILTER_DEFAULTS, **values}
+    kinds = ("", "Row", "Replace") if developer else (
+        "", "lekmod_new", "vanilla_modified", "source_conflict")
+    if (any(not isinstance(value, str) or len(value) > 64 for value in result.values()) or
+            result['kind'] not in kinds or result['status'] not in (
+                "", "missing", "stale", "applied", "saved", "needs_source_review") or
+            result['date_field'] not in ("english_edited_at", "translation_updated_at") or
+            result['needs_translation'] not in ("", "true")):
+        raise ValueError("invalid table filter selection")
+    for name in ('date_from', 'date_to'):
+        if result[name]:
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', result[name]):
+                raise ValueError("invalid table filter date")
+            datetime.strptime(result[name], '%Y-%m-%d')
+    if result['date_from'] and result['date_to'] and result['date_from'] > result['date_to']:
+        raise ValueError("table filter date range is reversed")
+    if result['version'] and result['version'] != 'upgrade' and not re.fullmatch(
+            r'v\d+(?:\.\d+)+', result['version']):
+        raise ValueError("invalid table filter version")
+    if developer and (result['status'] or result['needs_translation'] or
+                      result['date_field'] != 'english_edited_at'):
+        raise ValueError("translation-only filters cannot be applied in Developer mode")
+    return result
 
 
 def migrate_snapshot_link(url: str) -> str:
@@ -80,6 +112,11 @@ def settings(home: Path = APP_HOME) -> dict:
         result["column_widths"] = {k: v for k, v in raw["column_widths"].items()
                                    if isinstance(k, str) and type(v) is int
                                    and 100 <= v <= 1500}
+    for name in ('translator_filters', 'developer_filters'):
+        try:
+            result[name] = table_filters(raw.get(name, {}), developer=name == 'developer_filters')
+        except ValueError:
+            result[name] = FILTER_DEFAULTS.copy()
     if not result["snapshot_url"] and not result["snapshot_url_cleared"]:
         # Older editor releases persisted an empty link before the team URL existed.
         result["snapshot_url"] = TEAM_SNAPSHOT_URL
@@ -115,6 +152,8 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
             for k, v in candidate["column_widths"].items())):
         raise ValueError("invalid table preferences")
     candidate["snapshot_url"] = migrate_snapshot_link(candidate["snapshot_url"])
+    for name in ('translator_filters', 'developer_filters'):
+        candidate[name] = table_filters(candidate[name], developer=name == 'developer_filters')
     path = home / "localization" / "workspace" / "editor-settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,

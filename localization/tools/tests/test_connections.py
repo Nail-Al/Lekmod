@@ -135,6 +135,31 @@ class ConnectionTests(unittest.TestCase):
         old.write_text(json.dumps({"snapshot_url": ""}), encoding="utf-8")
         self.assertEqual(settings(self.home)["snapshot_url"], TEAM_SNAPSHOT_URL)
 
+    def test_filters_persist_independently_until_the_active_mode_is_cleared(self):
+        """Switching mode, saving another preference, and restart preserve both views."""
+        translator = {'kind': 'vanilla_modified', 'status': 'stale',
+                      'date_field': 'translation_updated_at', 'date_from': '2026-10-01',
+                      'date_to': '2026-10-05', 'version': 'upgrade', 'needs_translation': 'true'}
+        developer = {'kind': 'Replace', 'date_field': 'english_edited_at', 'version': 'v35.4'}
+        save_settings({'translator_filters': translator, 'developer_filters': developer}, self.home)
+        save_settings({'mode': 'developer', 'wrap': False}, self.home)
+        self.assertEqual(settings(self.home)['translator_filters'], translator)
+        self.assertEqual(settings(self.home)['developer_filters']['kind'], 'Replace')
+        save_settings({'mode': 'translator', 'translator_filters': {}}, self.home)
+        self.assertEqual(settings(self.home)['translator_filters']['status'], '')
+        self.assertEqual(settings(self.home)['developer_filters']['version'], 'v35.4')
+
+    def test_invalid_filter_save_preserves_valid_preferences(self):
+        """Bad dates and translation-only Developer filters never overwrite settings."""
+        original = save_settings({'translator_filters': {'status': 'missing'}}, self.home)
+        for field, invalid in (
+                ('translator_filters', {'date_from': '2026-02-30'}),
+                ('translator_filters', {'date_from': '2026-10-05', 'date_to': '2026-10-01'}),
+                ('developer_filters', {'status': 'missing'})):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                save_settings({field: invalid}, self.home)
+            self.assertEqual(settings(self.home)['translator_filters'], original['translator_filters'])
+
     def test_snapshot_default_migration_keeps_custom_links_and_all_preferences(self):
         """Only the old team file changes; cleared links and contributor settings stay."""
         path = self.home / "localization/workspace/editor-settings.json"

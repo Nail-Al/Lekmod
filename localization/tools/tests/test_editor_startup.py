@@ -1,6 +1,7 @@
 """Slow project preparation must not look like a broken editor update."""
 
 import json
+from contextlib import nullcontext
 from http.server import HTTPServer
 from pathlib import Path
 import sys
@@ -17,6 +18,30 @@ from lekmod_localization.editor_update import _record
 
 
 class StartupTests(unittest.TestCase):
+    def test_duplicate_launch_reuses_the_current_server(self):
+        """Double-clicking the GUI cannot create a second server that locks updates."""
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('editor_server.APP_HOME', Path(directory)), \
+             patch('editor_server.editor_instance', return_value=nullcontext(False)), \
+             patch('editor_server.running_editor_session', return_value={
+                 'pid': 123, 'port': 8123, 'server_instance': 'existing'}), \
+             patch('editor_server.serve_editor') as serve, \
+             patch.object(sys, 'argv', ['editor_server.py', '--no-browser', '--update-ticket', 'a' * 32]):
+            self.assertEqual(editor_server.main(), 0)
+            serve.assert_not_called()
+            marker = Path(directory) / ('localization/workspace/editor-updates/ready-' + 'a' * 32 + '.json')
+            self.assertEqual(json.loads(marker.read_text())['pid'], 123)
+
+    def test_relaunch_during_update_does_not_start_a_rival_server(self):
+        """A live helper takes priority when an impatient user retries the EXE."""
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('editor_server.APP_HOME', Path(directory)), \
+             patch('editor_server.active_update_address', return_value='http://127.0.0.1:8123/'), \
+             patch('editor_server.serve_editor') as serve, \
+             patch.object(sys, 'argv', ['editor_server.py', '--no-browser']):
+            self.assertEqual(editor_server.main(), 0)
+            serve.assert_not_called()
+
     def test_failed_project_initialization_keeps_settings_and_logs_available(self):
         """A broken local comparison record can be repaired without a dead browser page."""
         servers = []

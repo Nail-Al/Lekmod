@@ -47,7 +47,7 @@ from lekmod_localization.connections import (
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
 from lekmod_localization.editor_update import (
-    latest_release, stage_release, launch_update, verify_installation,
+    latest_release, stage_release, launch_update, verify_installation, editor_instance, _pid_alive,
 )
 from lekmod_localization.release_feed import catalog as source_catalog
 from lekmod_localization.english_dates import read_dates
@@ -1617,7 +1617,7 @@ def make_handler(editor: Editor, token: str, port: int):
                     allowed = {"mode", "prefill", "wrap", "panel_expanded", "locale", "category",
                                "visible_columns", "translator_visible_columns",
                                "developer_visible_columns", "column_widths", "onboarded", "page_size",
-                               "snapshot_url"}
+                               "snapshot_url", "translator_filters", "developer_filters"}
                     if set(data) - allowed:
                         raise CatalogError("unknown editor preference")
                     if editor.save_state.get("state") == "running" and (
@@ -1725,6 +1725,91 @@ def main() -> int:
         parser.error("invalid update ticket")
     if not 0 <= args.port <= 65535 or 0 < args.port < 1024:
         parser.error("choose port 0 or a port from 1024 to 65535")
+    if not args.update_ticket:
+        address = active_update_address()
+        if address:
+            if not args.no_browser:
+                webbrowser.open(address)
+            LOG.info('Reopened the active update at %s', address)
+            return 0
+    try:
+        with editor_instance(APP_HOME) as owner:
+            if not owner:
+                session = running_editor_session()
+                if session is None:
+                    raise RuntimeError("Another editor is still starting. Wait a moment and retry.")
+                publish_startup_marker(args.update_ticket, session)
+                if not args.no_browser:
+                    webbrowser.open(f"http://127.0.0.1:{session['port']}/")
+                LOG.info("Reopened existing editor process %s", session['pid'])
+                return 0
+            restart_port = serve_editor(args)
+    except (CatalogError, OSError, RuntimeError) as error:
+        LOG.error("Editor could not start: %s", error)
+        parser.exit(1, f"Editor failed: {error}\n")
+    if restart_port is not None:
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--port", str(restart_port), "--no-browser"]
+            environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        else:
+            command = [sys.executable, "-B", str(APP_HOME / "localization/tools/editor_server.py"),
+                       "--port", str(restart_port), "--no-browser"]
+            environment = os.environ.copy()
+            flags = 0
+        subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    return 0
+
+
+def active_update_address() -> str:
+    """A double-click during installation reopens progress without starting a rival server."""
+    path = APP_HOME / 'localization/workspace/editor-updates/helper-active.json'
+    try:
+        if path.stat().st_size > 4096:
+            return ''
+        session = json.loads(path.read_text(encoding='utf-8'))
+        if (type(session.get('pid')) is int and type(session.get('port')) is int and
+                1024 <= session['port'] <= 65535 and _pid_alive(session['pid'])):
+            return f"http://127.0.0.1:{session['port']}/"
+    except (OSError, ValueError, TypeError):
+        pass
+    return ''
+
+
+def running_editor_session() -> dict | None:
+    """Reuse only a live localhost server matching this installation's marker."""
+    path = APP_HOME / 'localization/workspace/editor-session.json'
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if path.stat().st_size > 4096:
+                return None
+            session = json.loads(path.read_text(encoding='utf-8'))
+            if (type(session['port']) is int and 1024 <= session['port'] <= 65535 and
+                    type(session['pid']) is int and _pid_alive(session['pid'])):
+                base = f"http://127.0.0.1:{session['port']}"
+                with urllib.request.urlopen(base + '/api/health', timeout=.5) as response:
+                    health = json.load(response)
+                if health.get('server_instance') == session.get('server_instance'):
+                    return session
+        except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+            pass
+        time.sleep(.1)
+    return None
+
+
+def publish_startup_marker(ticket: str, session: dict) -> None:
+    """Let update helpers find a server started now or reused by a second launch."""
+    if ticket:
+        ready = APP_HOME / "localization/workspace/editor-updates" / ("ready-" + ticket + ".json")
+        atomic_bytes(ready, json.dumps({'ticket': ticket, 'pid': session['pid'],
+                                       'port': session['port']}).encode('utf-8'))
+
+
+def serve_editor(args: argparse.Namespace) -> int | None:
+    """Serve one process and release its session before a requested reconnect."""
     started_at = time.monotonic()
     LOG.info("Initializing editor process %s", os.getpid())
     try:
@@ -1738,17 +1823,19 @@ def main() -> int:
         server.RequestHandlerClass = make_handler(editor, token, server.server_port)
     except (CatalogError, OSError) as error:
         LOG.error("Editor could not start: %s", error)
-        parser.exit(1, f"Editor failed: {error}\n")
+        raise
     url = f"http://127.0.0.1:{server.server_port}/"
     if sys.stdout is not None:
         print(f"Open {url} on this computer; stop with Ctrl+C.", flush=True)
     LOG.info("Editor started at %s; version %s; elapsed %.1fs", url,
              editor_manifest()["version"], time.monotonic() - started_at)
-    if args.update_ticket:
-        ready = APP_HOME / "localization/workspace/editor-updates" / (
-            "ready-" + args.update_ticket + ".json")
-        atomic_bytes(ready, json.dumps({"ticket": args.update_ticket, "pid": os.getpid(),
-                                       "port": server.server_port}).encode("utf-8"))
+    session = {'pid': os.getpid(), 'port': server.server_port,
+               'server_instance': editor.instance_id}
+    session_path = APP_HOME / 'localization/workspace/editor-session.json'
+    packaged = os.name == 'nt' and getattr(sys, 'frozen', False)
+    if packaged:
+        atomic_bytes(session_path, json.dumps(session).encode('utf-8'))
+    publish_startup_marker(args.update_ticket, session)
     if not args.no_browser:
         webbrowser.open(url)
     def initialize_project() -> None:
@@ -1771,20 +1858,12 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-    if getattr(server, "restart_requested", False):
-        if getattr(sys, "frozen", False):
-            command = [sys.executable, "--port", str(server.server_port), "--no-browser"]
-            environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
-            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        else:
-            command = [sys.executable, "-B", str(APP_HOME / "localization/tools/editor_server.py"),
-                       "--port", str(server.server_port), "--no-browser"]
-            environment = os.environ.copy()
-            flags = 0
-        subprocess.Popen(command, cwd=APP_HOME, env=environment, creationflags=flags,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-    return 0
+        if packaged:
+            try:
+                session_path.unlink(missing_ok=True)
+            except OSError:
+                LOG.warning('Could not remove the closed editor session marker')
+    return server.server_port if getattr(server, 'restart_requested', False) else None
 
 
 if __name__ == "__main__":

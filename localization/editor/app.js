@@ -50,7 +50,7 @@ let inLogs = false;
 let downloadTimer;
 let sourceVersions = null, sourceVersionRequest = null;
 let gameStatusRequest = false;
-let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "";
+let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "", editorRestartStarted = 0;
 let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
 let editorUpdateInstance = "", editorIntegrity = null, latestEditorInfo = null;
 let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
@@ -67,18 +67,29 @@ function rememberFailedSaves() {
 let saveCompletion = null, resolveSaveCompletion = null;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
-let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
+function emptyFilters() {
+  return {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
+}
+let filters = emptyFilters();
+function filtersPreference() { return developer() ? "developer_filters" : "translator_filters"; }
 function logUI(name, detail = "") { api("/api/event", {name, detail}).catch(() => {}); }
 
-async function api(path, body) {
+async function api(path, body, timeoutMs = 0) {
   const options = body === undefined ? {} : {
     method: "POST", headers: {"Content-Type": "application/json", "X-Editor-Token": token},
     body: JSON.stringify(body)
   };
-  const response = await fetch(path, options);
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Request failed");
-  return result;
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  if (controller) options.signal = controller.signal;
+  try {
+    const response = await fetch(path, options);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Request failed");
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 function message(value, error = false) {
   el("message").textContent = value;
@@ -256,6 +267,7 @@ function updateBaselineNotice() {
   }
 }
 function changeMode() {
+  filters = {...emptyFilters(), ...prefs[filtersPreference()]};
   el("mode-name").textContent = developer() ? "Developer" : "Translator";
   el("mode").dataset.mode = developer() ? "developer" : "translator";
   el("mode-symbol").setAttribute("d", developer()
@@ -304,7 +316,6 @@ function renderFilterChoices() {
   el("filter-kind-title").textContent = developer() ? "Operation" : "Type";
   el("filter-status-label").hidden = developer();
   el("filter-date-field").querySelector('option[value="translation_updated_at"]').hidden = developer();
-  if (developer()) filters.date_field = "english_edited_at";
   select.value = filters.kind;
   el("filter-status").value = filters.status;
   el("filter-date-field").value = filters.date_field;
@@ -757,13 +768,15 @@ async function refresh() {
   const notice = meta.update_notice;
   const failure = el("update-failure");
   failure.hidden = !notice || notice.result !== "failure";
-  if (!failure.hidden) failure.textContent = "The previous editor was restored. " +
+  if (!failure.hidden) failure.textContent = (notice.recovery === "restored"
+    ? "The previous application files were restored. " : notice.recovery === "unchanged"
+    ? "The application files were not changed. " : "The editor update could not finish. ") +
     (notice.detail || "The update could not finish.") +
     " See Logs or localization/workspace/editor-updates/update.log.";
   if (notice && notice.result === "failure" &&
       sessionStorage.getItem("last-update-alert") !== notice.at) {
     sessionStorage.setItem("last-update-alert", notice.at);
-    message("The update failed; the previous editor was restored. Open Logs or " +
+    message("The update could not finish. Open Logs or " +
       "localization/workspace/editor-updates/update.log for the cause, then retry.", true);
   }
   renderConnections();
@@ -991,7 +1004,6 @@ el("mode").addEventListener("click", async () => {
     try {
       inMerge = false; el("merge-view").hidden = true;
       await preference({mode: developer() ? "translator" : "developer"});
-      filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
       if (inLogs) closeLogs();
       changeMode(); renderConnections();
       logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
@@ -1130,9 +1142,10 @@ el("filters-close").addEventListener("click", () => {
   const next = {kind: el("filter-kind").value, status: developer() ? "" : el("filter-status").value,
     date_field: developer() ? "english_edited_at" : el("filter-date-field").value,
     date_from: from, date_to: to, version: el("filter-version").value,
-    needs_translation: el("filter-needs").checked ? "true" : ""};
+    needs_translation: !developer() && el("filter-needs").checked ? "true" : ""};
   el("filters-dialog").close();
-  guardNavigation(() => {
+  guardNavigation(async () => {
+    await preference({[filtersPreference()]: next});
     filters = next; offset = 0; renderFilterChoices();
     logUI("filter-changed"); return load();
   });
@@ -1140,7 +1153,8 @@ el("filters-close").addEventListener("click", () => {
 el("filters-reset").addEventListener("click", () => {
   el("filters-dialog").close();
   guardNavigation(async () => {
-    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
+    await preference({[filtersPreference()]: emptyFilters()});
+    filters = emptyFilters();
     offset = 0; renderFilterChoices(); logUI("filter-changed");
     await load(); message("Filters cleared.");
   });
@@ -1701,15 +1715,12 @@ el("update-verify").addEventListener("click", verifyEditorFiles);
 async function followEditorUpdate() {
   if (!editorUpdateStarted) return;
   try {
-    const live = await api("/api/meta");
-    if ((live.editor_version === editorUpdateVersion &&
-         live.server_instance !== editorUpdateInstance) ||
-        (live.update_notice?.result === "failure" &&
-         Date.parse(live.update_notice.at) > editorUpdateStarted)) {
+    const live = await api("/api/health", undefined, 2000);
+    if (!live.updating && live.server_instance && live.server_instance !== editorUpdateInstance) {
       location.reload();
       return;
     }
-    const progress = await api("/api/editor-update-status");
+    const progress = await api("/api/editor-update-status", undefined, 2000);
     if (progress.state === "error") {
       editorUpdateFailed(progress.error);
       return;
@@ -1719,16 +1730,18 @@ async function followEditorUpdate() {
       el("update-status").textContent = "Downloading editor v" + progress.version + ": " +
         ((progress.bytes || 0) / 1048576).toFixed(1) + size + " MB…";
     } else if (progress.state === "installing") {
-      el("update-status").textContent = "Installing editor v" + progress.version +
+      if (!editorRestartStarted) editorRestartStarted = Date.now();
+      el("update-status").textContent = progress.message || "Installing editor v" + progress.version +
         " and restarting this page…";
     } else {
       el("update-status").textContent = "Checking editor release…";
     }
   } catch (_) {
+    if (!editorRestartStarted) editorRestartStarted = Date.now();
     el("update-status").textContent = "The editor is restarting. This page will reconnect automatically…";
   }
-  if (Date.now() - editorUpdateStarted > 600000) {
-    editorUpdateFailed("The editor did not reopen. Double-click its EXE to retry.");
+  if (editorRestartStarted && Date.now() - editorRestartStarted > 240000) {
+    editorUpdateFailed("The editor could not reconnect within four minutes. Check the local update log for the cause; saved translations remain in the project.");
     return;
   }
   editorUpdateTimer = setTimeout(followEditorUpdate, 700);
@@ -1736,6 +1749,7 @@ async function followEditorUpdate() {
 async function startEditorUpdate() {
   const repair = !!editorIntegrity?.damaged_files.length;
   editorUpdateInstance = meta.server_instance;
+  editorRestartStarted = 0;
   setEditorUpdateLock(true);
   el("update-failure").hidden = true;
   el("update-status").classList.add("busy-inline");

@@ -20,11 +20,100 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
     UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
     _wait_ready, verify_installation, _publish_helper_ready,
+    verify_editor_processes, _wait_executable_stopped, UpdateProgress, install_update,
 )
 from lekmod_localization.connections import editor_manifest
 
 
 class UpdateTests(unittest.TestCase):
+    def test_only_current_editor_and_its_bootloader_are_allowed_before_handoff(self):
+        """A second released editor is rejected before the current one closes."""
+        with patch('lekmod_localization.editor_update.editor_processes', return_value={20: 10, 10: 1}):
+            verify_editor_processes(Path('/editor'), 20)
+        with patch('lekmod_localization.editor_update.editor_processes', return_value={
+                20: 10, 10: 1, 40: 30, 30: 1}):
+            with self.assertRaisesRegex(RuntimeError, 'Another editor instance.*30, 40'):
+                verify_editor_processes(Path('/editor'), 20)
+
+    def test_waits_for_bootloader_and_times_out_without_killing_other_work(self):
+        """An exited child does not imply Windows has released its EXE yet."""
+        with patch('lekmod_localization.editor_update.editor_processes', side_effect=[{10: 1}, {}]), \
+             patch('lekmod_localization.editor_update.time.sleep') as pause:
+            _wait_executable_stopped(Path('/editor'))
+            pause.assert_called_once_with(.2)
+        with patch('lekmod_localization.editor_update.editor_processes', return_value={10: 1}), \
+             patch('lekmod_localization.editor_update.time.monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(RuntimeError, 'still running.*10'):
+                _wait_executable_stopped(Path('/editor'), seconds=30)
+
+    def test_progress_server_answers_on_original_port_and_exposes_no_project_files(self):
+        """A stopped app still has bounded, read-only installation progress."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with HTTPServer(('127.0.0.1', 0), None) as reservation:
+                port = reservation.server_port
+            progress = UpdateProgress(root, port)
+            base = f'http://127.0.0.1:{port}'
+            try:
+                progress.update('installing', 'Installing app.js…')
+                with urlopen(base + '/api/health', timeout=1) as response:
+                    self.assertTrue(json.load(response)['updating'])
+                with urlopen(base + '/api/editor-update-status', timeout=1) as response:
+                    self.assertEqual(json.load(response)['message'], 'Installing app.js…')
+                with self.assertRaises(URLError):
+                    urlopen(base + '/localization/translations/RU_RU.csv', timeout=1)
+            finally:
+                progress.close()
+            with HTTPServer(('127.0.0.1', port), None):
+                pass  # Starting the new editor can reuse the original address.
+
+    def test_locked_update_restores_only_replaced_files_and_verifies_reopened_editor(self):
+        """Both EXE-first and partial install failures retain all contributor files."""
+        import shutil
+        import subprocess
+        for locked in ('LekmodLocalizationEditor.exe', 'localization/editor/index.html'):
+            with self.subTest(locked=locked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                stage = root / 'localization/workspace/editor-updates/editor-v0.20'
+                for folder, version in ((root, '0.19'), (stage, '0.20')):
+                    for name in UPDATE_FILES:
+                        target = folder / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(json.dumps({'version': version, 'compatible_releases': []})
+                                          if name.endswith('version.json') else version + ':' + name)
+                private = root / 'localization/translations/RU_RU.csv'
+                private.parent.mkdir(parents=True)
+                private.write_text('contributor text')
+                before = {name: (root / name).read_bytes() for name in UPDATE_FILES}
+                replacements = []
+
+                def replace(source, target):
+                    replacements.append((source, target))
+                    if source == stage / locked:
+                        raise PermissionError('blocked file')
+                    shutil.copy2(source, target)
+
+                with patch('lekmod_localization.editor_update._wait_old_process'), \
+                     patch('lekmod_localization.editor_update._wait_executable_stopped'), \
+                     patch('lekmod_localization.editor_update._pid_alive', return_value=False), \
+                     patch('lekmod_localization.editor_update._replace', side_effect=replace), \
+                     patch('lekmod_localization.editor_update.subprocess.Popen'), \
+                     patch('lekmod_localization.editor_update._wait_ready') as ready, \
+                     patch.object(subprocess, 'CREATE_NO_WINDOW', 0, create=True):
+                    with self.assertRaisesRegex(RuntimeError, 'blocked file'):
+                        install_update(root, stage, 123, no_browser=True)
+                    self.assertEqual(ready.call_args.args[2], '0.19')
+                self.assertEqual([source for source, target in replacements if target == root / locked],
+                                 [stage / locked], 'Unchanged locked file must not be restored')
+                for name, content in before.items():
+                    self.assertEqual((root / name).read_bytes(), content)
+                self.assertEqual(private.read_text(), 'contributor text')
+                events = [json.loads(line) for line in (stage.parent.parent /
+                    'editor-actions.jsonl').read_text().splitlines()]
+                failure = next(event for event in events if event['result'] == 'failure')
+                self.assertEqual(failure['recovery'], 'unchanged' if locked.endswith('.exe') else 'restored')
+                self.assertEqual(events[-1]['result'], 'recovered')
+
     def test_verification_and_same_version_repair_stage_exclude_translations(self):
         """Damaged application files are found; all personal files stay untouched."""
         with tempfile.TemporaryDirectory() as temporary:

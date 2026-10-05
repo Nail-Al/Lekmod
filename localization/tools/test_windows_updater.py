@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -66,13 +67,108 @@ def start(root: Path) -> tuple[subprocess.Popen, str, str]:
     raise RuntimeError("packaged editor did not open within 30 seconds")
 
 
+@contextmanager
+def locked_file(path: Path):
+    """Hold a real Windows handle allowing reads but denying file replacement."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # FILE_SHARE_READ | FILE_SHARE_WRITE deliberately omits FILE_SHARE_DELETE.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 3, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def test_locked_updates(archive_path: Path) -> None:
+    """Reproduce the EXE bottleneck and partial-install rollback on every release."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+        for locked in ('LekmodLocalizationEditor.exe', 'localization/editor/index.html'):
+            root = Path(directory) / Path(locked).name
+            with zipfile.ZipFile(archive_path) as archive:
+                archive.extractall(root)
+                manifest = json.loads(archive.read('localization/editor/version.json'))
+                current = manifest['version']
+                stage = root / 'localization/workspace/editor-updates' / ('editor-v' + current)
+                archive.extractall(stage)
+            major, minor = map(int, current.split('.'))
+            previous = f'{major}.{minor - 1}'
+            manifest.update(version=previous, release_tag='editor-v' + previous)
+            (root / 'localization/editor/version.json').write_text(json.dumps(manifest), encoding='utf-8')
+            private = {
+                'localization/workspace/editor-settings.json': json.dumps({
+                    'locale': 'DE_DE', 'column_widths': {'translation': 740},
+                    'translator_filters': {'status': 'missing', 'date_field': 'translation_updated_at'},
+                    'developer_filters': {'kind': 'Replace', 'date_field': 'english_edited_at'}}).encode(),
+                'localization/workspace/vanilla-snapshot.json.gz': b'private reference',
+                'localization/translations/DE_DE.csv': 'saved translation'.encode(),
+                'localization/en_US/primary.xml': b'saved English source',
+            }
+            for name, content in private.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            before = {name: (root / name).read_bytes() for name in UPDATE_FILES}
+            old, base, pid = start(root)
+            original = wait_for(base, previous)
+            port = int(base.rsplit(':', 1)[1])
+            with locked_file(root / locked):
+                started = time.monotonic()
+                helper = subprocess.Popen(installer_command(stage, root, pid, port, no_browser=True),
+                    cwd=stage, env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                stop(base, token_at(base))
+                # The original browser address must expose live progress while locked.
+                progress = None
+                deadline = time.monotonic() + 25
+                while time.monotonic() < deadline:
+                    try:
+                        with urlopen(base + '/api/editor-update-status', timeout=1) as response:
+                            progress = json.load(response)
+                        if progress.get('phase') == 'installing':
+                            break
+                    except (URLError, TimeoutError, ConnectionError):
+                        pass
+                    time.sleep(.1)
+                assert progress and progress.get('phase') == 'installing', 'No live installation progress'
+                assert helper.wait(timeout=90) != 0, 'Locked file unexpectedly replaced'
+                assert time.monotonic() - started < 90, 'Update lock recovery exceeded its time limit'
+                restored = wait_for(base, previous)
+                assert restored['server_instance'] != original['server_instance']
+            old.wait(timeout=30)
+            for name, content in {**before, **private}.items():
+                assert (root / name).read_bytes() == content, 'Failure changed ' + name
+            events = [json.loads(line) for line in (stage.parent.parent / 'editor-actions.jsonl').read_text().splitlines()]
+            failure = next(e for e in reversed(events) if e['result'] == 'failure')
+            assert failure['recovery'] == ('unchanged' if locked.endswith('.exe') else 'restored')
+            log = (stage.parent / 'update.log').read_text(encoding='utf-8')
+            assert 'Windows denied replacing ' + Path(locked).name in log
+            assert 'restoring ' + Path(locked).name + ' failed' not in log
+            assert 'Previous editor reopened' in log
+            stop(base, token_at(base))
+            print('Windows file-lock regression passed:', locked, f'({time.monotonic() - started:.1f}s)')
+
+
 def main() -> int:
     """Verify no console, same-tab restart, preserved work, and failed-start rollback."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument('--locks-only', action='store_true',
+                        help='Test real Windows locks, bounded recovery, and private file preservation')
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("run this executable test on a Windows runner")
+    if args.locks_only:
+        test_locked_updates(args.archive)
+        return 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
         root = Path(directory) / "Editor With Spaces"
         with zipfile.ZipFile(args.archive) as archive:
@@ -108,6 +204,9 @@ def main() -> int:
 
         old, base, pid = start(root)
         wait_for(base, old_version)
+        duplicate, duplicate_base, duplicate_pid = start(root)
+        assert duplicate_base == base and duplicate_pid == pid, 'Double launch started another editor server'
+        assert duplicate.wait(timeout=15) == 0, 'Duplicate launch did not reuse the running editor'
         helper = subprocess.Popen(installer_command(stage, root, pid, int(base.rsplit(":", 1)[1]),
                                                     no_browser=True), cwd=stage,
                                   env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
