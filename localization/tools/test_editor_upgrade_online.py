@@ -158,6 +158,11 @@ def main() -> int:
                 time.sleep(.25)
             else:
                 raise RuntimeError("Same-version repair did not reopen the editor")
+            # Health is deliberately available before a large connected project
+            # finishes preparing. Verify preserved inputs after that work too.
+            repaired = wait_for(base, version, timeout=150)
+            if args.connected_project:
+                assert repaired['ready'], repaired.get('connection_error')
             with zipfile.ZipFile(args.new_archive) as archive:
                 assert readme.read_bytes() == archive.read("README-START.txt")
             assert translation.read_text(encoding="utf-8") == "saved translation from the old editor"
