@@ -42,7 +42,7 @@ from lekmod_localization.common import (
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
 )
 from lekmod_localization.connections import (
-    APP_HOME, apply_game, detect_game, inspect_game, release_version,
+    APP_HOME, TEAM_SNAPSHOT_URL, apply_game, detect_game, inspect_game, release_version,
     save_settings, settings, validate_project,
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
@@ -519,6 +519,7 @@ class Editor:
             "config": manage.read_config() if self.ready else {},
             "vanilla_counts": self.vanilla_counts,
             "snapshot_error": self.snapshot_error,
+            "team_snapshot_url": TEAM_SNAPSHOT_URL,
             "ready": self.ready,
             "version_history": self.version_info,
             "handoff": ({'handoff_id': self.handoff_id, **self.handoff_preview,
@@ -601,6 +602,8 @@ class Editor:
         """Download encrypted text; keep only its verified local copy and URL."""
         if not self.ready or not isinstance(url, str) or not isinstance(password, str):
             raise CatalogError("connect a complete project and enter a snapshot link and password")
+        if len(password) < 16:
+            raise CatalogError("Enter the snapshot encryption password (at least 16 characters), not your Dropbox account password.")
         reference = REPO_ROOT / "localization/reference/vanilla-fingerprints.json.gz"
         data = decrypt_snapshot(download_encrypted(url), password, reference)
         result = self.import_snapshot(data)
@@ -1677,6 +1680,9 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif self.path == "/api/redo":
                     result = editor.replay(undo=False)
                 elif self.path == "/api/stop":
+                    if (editor.download_state.get('state') in ('running', 'canceling') or
+                            editor.update_state.get('state') not in ('idle', 'error')):
+                        raise CatalogError('finish the current download/update before closing the editor')
                     self.respond(200, {"stopping": True})
                     editor.record_event("stop", "success")
                     threading.Thread(target=self.server.shutdown, daemon=True).start()

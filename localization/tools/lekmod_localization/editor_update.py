@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -200,7 +202,7 @@ def launch_update(stage: Path, home: Path = APP_HOME, old_pid: int | None = None
     """Run the staged helper without PowerShell, a terminal, or inherited handles."""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         raise ValueError("automatic installation requires the packaged Windows editor")
-    verify_editor_processes(home, old_pid or os.getpid())
+    verify_editor_processes(home, old_pid or os.getpid(), close_idle=True)
     ticket = uuid.uuid4().hex
     ready = home / "localization/workspace/editor-updates" / ("helper-ready-" + ticket)
     process = subprocess.Popen(installer_command(stage, home, old_pid or os.getpid(), port,
@@ -321,8 +323,178 @@ def editor_processes(home: Path) -> dict[int, int]:
     return result
 
 
-def verify_editor_processes(home: Path, old_pid: int) -> None:
-    """Refuse extra copies before closing the user's current editor."""
+def editor_listener_ports() -> dict[int, int]:
+    """Find loopback listeners and their owning PIDs using Windows, not port scans."""
+    if os.name != 'nt':
+        return {}
+    import ctypes
+    from ctypes import wintypes
+    function = ctypes.WinDLL('iphlpapi').GetExtendedTcpTable
+    function.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+                         wintypes.ULONG, ctypes.c_int, wintypes.ULONG)
+    function.restype = wintypes.DWORD
+    size = wintypes.DWORD(0)
+    result = function(None, ctypes.byref(size), False, socket.AF_INET, 3, 0)
+    for _ in range(3):
+        if result not in (0, 122) or not 4 <= size.value <= 512 * 1024:
+            raise OSError('Could not inspect the editor\'s local listeners (Windows error ' + str(result) + ')')
+        buffer = ctypes.create_string_buffer(size.value)
+        result = function(buffer, ctypes.byref(size), False, socket.AF_INET, 3, 0)
+        if result == 0:
+            raw = buffer.raw
+            count, = struct.unpack_from('=I', raw)
+            if 4 + count * 24 > len(raw):
+                raise ValueError('Invalid Windows listener table')
+            ports = {}
+            for index in range(count):
+                state, address, port, _, _, pid = struct.unpack_from('=6I', raw, 4 + index * 24)
+                if state == 2 and socket.inet_ntoa(struct.pack('=I', address)) == '127.0.0.1':
+                    ports[socket.ntohs(port & 0xffff)] = pid
+            return ports
+    raise OSError('The local listener table kept changing; retry the update')
+
+
+@contextmanager
+def extra_editor_handles(home: Path, pids: set[int]):
+    """Anchor extra processes to handles so a recycled PID can never be killed."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel.TerminateProcess.restype = wintypes.BOOL
+    kernel.GetProcessTimes.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME))
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    expected = os.path.normcase(str((home / 'LekmodLocalizationEditor.exe').resolve()))
+    handles = {}
+    try:
+        for pid in pids:
+            handle = kernel.OpenProcess(0x00101001, False, pid)
+            if not handle:
+                if pid not in editor_processes(home):
+                    continue
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles[pid] = handle
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = wintypes.DWORD(len(buffer))
+            if (not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)) or
+                    os.path.normcase(str(Path(buffer.value).resolve())) != expected):
+                raise RuntimeError('An editor process changed during inspection; retry the update')
+
+        def remaining() -> set[int]:
+            """Check the exact inspected processes, even after their numeric PID is reused."""
+            return {pid for pid, handle in handles.items()
+                    if kernel.WaitForSingleObject(handle, 0) == 0x102}
+
+        def terminate(pid: int) -> None:
+            """Finish an acknowledged shutdown whose bootloader failed to exit."""
+            if (pid in remaining() and not kernel.TerminateProcess(handles[pid], 0)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if kernel.WaitForSingleObject(handles[pid], 5000) != 0:
+                raise TimeoutError('The extra editor did not release its files')
+
+        def age(pid: int) -> float:
+            """Protect a recently launched editor whose local server is not ready yet."""
+            created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+            if not kernel.GetProcessTimes(handles[pid], ctypes.byref(created), ctypes.byref(exited),
+                                          ctypes.byref(kernel_time), ctypes.byref(user_time)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            timestamp = ((created.dwHighDateTime << 32) | created.dwLowDateTime) / 10000000 - 11644473600
+            return max(0, time.time() - timestamp)
+
+        yield remaining, terminate, age
+    finally:
+        for handle in handles.values():
+            kernel.CloseHandle(handle)
+
+
+def close_idle_editors(home: Path, processes: dict[int, int]) -> None:
+    """Close verified idle legacy servers, keeping the updating session untouched."""
+    extra = set(processes)
+    with extra_editor_handles(home, extra) as (remaining, terminate, age):
+        live = remaining()
+        ports = editor_listener_ports()
+        servers = []
+        for port, pid in ports.items():
+            if pid not in live:
+                continue
+            base = f'http://127.0.0.1:{port}'
+
+            def read(path: str) -> bytes:
+                """Bound local requests and reject redirects away from the owned listener."""
+                with urllib.request.urlopen(base + path, timeout=2) as response:
+                    if response.url != base + path:
+                        raise RuntimeError('Unexpected editor shutdown redirect')
+                    data = response.read(256 * 1024 + 1)
+                    if len(data) > 256 * 1024:
+                        raise ValueError('Unexpected editor shutdown response size')
+                    return data
+
+            try:
+                health = json.loads(read('/api/health'))
+                if (not re.fullmatch(r'\d+\.\d+', str(health.get('editor_version', ''))) or
+                        not health.get('server_instance') or health.get('updating')):
+                    raise RuntimeError('The extra editor is still starting or updating')
+                for path, allowed in (
+                    ('/api/save-status', {'idle', 'complete'}),
+                    ('/api/download-status', {'idle', 'complete', 'error', 'canceled'}),
+                    ('/api/editor-update-status', {'idle', 'error'}),
+                    ('/api/editor-verify-status', {'idle', 'complete', 'error'}),
+                ):
+                    if json.loads(read(path)).get('state') not in allowed:
+                        raise RuntimeError('The extra editor has unfinished work: ' + path)
+                page = read('/').decode('utf-8')
+                token = re.search(r'<meta name="editor-token" content="([^"]+)">', page)
+                if not token:
+                    raise RuntimeError('Could not verify the extra editor\'s shutdown token')
+                servers.append((pid, port, base, token.group(1)))
+            except (OSError, ValueError, RuntimeError, urllib.error.URLError) as error:
+                raise RuntimeError(f'Extra editor PID {pid} was kept open: {error}. '
+                    'Finish its save/download, then retry. The current editor stays open.') from error
+        # A new process without a server may still be starting. Long-abandoned,
+        # serverless copies cannot accept edits and may be retired from this folder.
+        verified = set()
+        for pid, _, _, _ in servers:
+            while pid in processes and pid not in verified:
+                verified.add(pid)
+                pid = processes[pid]
+        orphaned = remaining() - verified
+        if any(age(pid) < 120 for pid in orphaned):
+            raise RuntimeError('An extra editor is still starting or cannot be verified (processes ' +
+                ', '.join(map(str, sorted(orphaned))) + '). Wait a moment and retry; '
+                'the current editor stays open.')
+        for pid in sorted(orphaned):
+            _record(home, 'progress', f'Retiring abandoned serverless legacy editor PID {pid}')
+        for pid, port, base, token in servers:
+            if pid not in remaining():
+                continue
+            if editor_listener_ports().get(port) != pid:
+                raise RuntimeError('The extra editor listener changed; retry the update')
+            _record(home, 'progress', f'Closing idle legacy editor PID {pid} before updating this session')
+            request = urllib.request.Request(base + '/api/stop', data=b'{}', headers={
+                'Origin': base, 'X-Editor-Token': token, 'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                if response.url != base + '/api/stop' or json.load(response).get('stopping') is not True:
+                    raise RuntimeError('The extra editor did not acknowledge shutdown')
+        deadline = time.monotonic() + 5
+        while remaining() and time.monotonic() < deadline:
+            time.sleep(.1)
+        for pid in sorted(remaining(), key=lambda pid: processes[pid] not in processes):
+            _record(home, 'progress', f'Finishing acknowledged editor shutdown for PID {pid}')
+            terminate(pid)
+        _record(home, 'progress', 'Extra legacy editor sessions closed; continuing the requested update')
+
+
+def verify_editor_processes(home: Path, old_pid: int, *, close_idle: bool = False) -> None:
+    """Resolve old duplicate sessions before closing the user's current editor."""
     processes = editor_processes(home)
     allowed = set()
     pid = old_pid
@@ -330,6 +502,9 @@ def verify_editor_processes(home: Path, old_pid: int) -> None:
         allowed.add(pid)
         pid = processes[pid]  # PyInstaller also keeps its parent bootloader alive.
     extra = set(processes) - allowed
+    if extra and close_idle:
+        close_idle_editors(home, {pid: processes[pid] for pid in extra})
+        extra = set(editor_processes(home)) - allowed
     if extra:
         raise RuntimeError("Another editor instance is using this installation (processes " +
                            ", ".join(map(str, sorted(extra))) + "). Save work in every editor, "
@@ -705,8 +880,7 @@ def installer_main(argv: list[str]) -> int:
     pending = None
     active = args.editor_root / 'localization/workspace/editor-updates/helper-active.json'
     try:
-        if args.handoff_ticket:
-            verify_editor_processes(args.editor_root, args.old_pid)
+        verify_editor_processes(args.editor_root, args.old_pid, close_idle=True)
         active.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False,
                                          dir=active.parent, prefix='.helper-active-') as output:

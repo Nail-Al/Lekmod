@@ -1,6 +1,7 @@
 """Stage an editor release without overwriting any translator's project data."""
 
 from hashlib import sha256
+from contextlib import nullcontext
 import io
 import json
 from http.server import HTTPServer
@@ -21,11 +22,92 @@ from lekmod_localization.editor_update import (
     UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
     _wait_ready, verify_installation, _publish_helper_ready,
     verify_editor_processes, _wait_executable_stopped, UpdateProgress, install_update,
+    close_idle_editors,
 )
 from lekmod_localization.connections import editor_manifest
 
 
 class UpdateTests(unittest.TestCase):
+    def test_update_closes_only_extra_verified_idle_servers(self):
+        """Use the real authenticated stop endpoint, retaining the requesting session."""
+        from editor_server import make_handler
+        editor = Mock(instance_id='extra', initializing=False,
+            save_state={'state': 'idle'}, download_state={'state': 'idle'},
+            update_state={'state': 'idle'}, integrity_state={'state': 'idle'})
+        alive = {10, 20}
+        editor.record_event.side_effect = lambda *args: alive.clear()
+        server = HTTPServer(('127.0.0.1', 0), make_handler(editor, 'token', 0))
+        server.RequestHandlerClass = make_handler(editor, 'token', server.server_port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        terminate = Mock()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch('lekmod_localization.editor_update.extra_editor_handles',
+                       return_value=nullcontext((lambda: alive.copy(), terminate, lambda pid: 300))), \
+                 patch('lekmod_localization.editor_update.editor_listener_ports',
+                       return_value={server.server_port: 20, 12345: 999}):
+                close_idle_editors(Path(directory), {10: 1, 20: 10})
+            editor.record_event.assert_called_once_with('stop', 'success')
+            terminate.assert_not_called()
+        finally:
+            server.shutdown()
+            thread.join(3)
+            server.server_close()
+
+    def test_update_preserves_a_duplicate_that_is_saving(self):
+        """Neither authenticated shutdown nor forced termination may interrupt a save."""
+        from editor_server import make_handler
+        editor = Mock(instance_id='extra', initializing=False,
+            save_state={'state': 'running'}, download_state={'state': 'idle'},
+            update_state={'state': 'idle'}, integrity_state={'state': 'idle'})
+        server = HTTPServer(('127.0.0.1', 0), make_handler(editor, 'token', 0))
+        server.RequestHandlerClass = make_handler(editor, 'token', server.server_port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        terminate = Mock()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch('lekmod_localization.editor_update.extra_editor_handles',
+                       return_value=nullcontext((lambda: {10, 20}, terminate, lambda pid: 300))), \
+                 patch('lekmod_localization.editor_update.editor_listener_ports',
+                       return_value={server.server_port: 20}):
+                with self.assertRaisesRegex(RuntimeError, 'kept open.*unfinished work'):
+                    close_idle_editors(Path(directory), {10: 1, 20: 10})
+            editor.record_event.assert_not_called()
+            terminate.assert_not_called()
+        finally:
+            server.shutdown()
+            thread.join(3)
+            server.server_close()
+
+    def test_old_orphaned_processes_are_retired_but_a_recent_launch_is_kept(self):
+        """A serverless leftover is distinct from an editor still starting."""
+        for age in (5, 300):
+            with self.subTest(age=age), tempfile.TemporaryDirectory() as directory:
+                alive = {10, 20}
+                terminate = Mock(side_effect=lambda pid: alive.remove(pid))
+                with patch('lekmod_localization.editor_update.extra_editor_handles',
+                           return_value=nullcontext((lambda: alive.copy(), terminate, lambda pid: age))), \
+                     patch('lekmod_localization.editor_update.editor_listener_ports', return_value={}), \
+                     patch('lekmod_localization.editor_update.time.monotonic', side_effect=[0, 6]):
+                    if age == 5:
+                        with self.assertRaisesRegex(RuntimeError, 'still starting'):
+                            close_idle_editors(Path(directory), {10: 1, 20: 10})
+                        terminate.assert_not_called()
+                    else:
+                        close_idle_editors(Path(directory), {10: 1, 20: 10})
+                        self.assertEqual([call.args[0] for call in terminate.call_args_list], [20, 10])
+                        self.assertEqual(alive, set())
+
+    def test_cleanup_never_includes_the_updating_process_or_its_bootloader(self):
+        """Only duplicate families enter the closure routine; the active editor remains."""
+        with patch('lekmod_localization.editor_update.editor_processes', side_effect=[
+                {20: 10, 10: 1, 40: 30, 30: 1}, {20: 10, 10: 1}]), \
+             patch('lekmod_localization.editor_update.close_idle_editors') as close:
+            verify_editor_processes(Path('/editor'), 20, close_idle=True)
+            close.assert_called_once_with(Path('/editor'), {40: 30, 30: 1})
+
     def test_only_current_editor_and_its_bootloader_are_allowed_before_handoff(self):
         """A second released editor is rejected before the current one closes."""
         with patch('lekmod_localization.editor_update.editor_processes', return_value={20: 10, 10: 1}):

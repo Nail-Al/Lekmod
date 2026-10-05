@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import urllib.request
+from urllib.parse import urlsplit
 
 try:
     from cryptography.exceptions import InvalidTag
@@ -77,8 +78,19 @@ def decrypt_snapshot(archive: bytes, password: str, reference: Path) -> bytes:
 
 def download_encrypted(url: str) -> bytes:
     """Retrieve a direct HTTPS file link, bounding redirects and response size."""
-    if not url.startswith("https://") or len(url) > 4096 or "@" in url.split("/", 3)[2]:
-        raise ValueError("enter an HTTPS direct-download link")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("The snapshot link is empty. Enter its HTTPS download link or choose Use team link in Settings.")
+    url = url.strip()
+    try:
+        parsed = urlsplit(url)
+        valid = (parsed.scheme == "https" and parsed.hostname and
+                 not parsed.username and not parsed.password and
+                 not any(character.isspace() for character in url) and len(url) <= 4096)
+        parsed.port  # Reject malformed ports before attempting a download.
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Enter a complete HTTPS direct-download link.")
     request = urllib.request.Request(url, headers={"User-Agent": "Lekmod-Localization-Editor"})
     with urllib.request.urlopen(request, timeout=45) as response:
         if not response.url.startswith("https://"):

@@ -947,6 +947,15 @@ el("snapshot-url-clear").addEventListener("click", async () => {
     sectionMessage("snapshot", "Saved link cleared. The local reference is unchanged.");
   } catch (error) { sectionMessage("snapshot", error.message, "error"); }
 });
+el("snapshot-url-team").addEventListener("click", async () => {
+  try {
+    if (!meta.team_snapshot_url) throw new Error("The team link is unavailable. Reconnect the editor and retry.");
+    el("snapshot-url").value = meta.team_snapshot_url;
+    await preference({snapshot_url: meta.team_snapshot_url});
+    sectionMessage("snapshot", "Team link restored. Enter the snapshot encryption password, then download.");
+    el("snapshot-password").focus();
+  } catch (error) { sectionMessage("snapshot", error.message, "error"); }
+});
 el("snapshot-encrypt").addEventListener("click", async () => {
   const password = el("snapshot-new-password").value;
   const confirmation = el("snapshot-confirm-password").value;
@@ -972,13 +981,33 @@ el("snapshot-encrypt").addEventListener("click", async () => {
   }
 });
 el("snapshot-cloud").addEventListener("click", async () => {
+  const url = el("snapshot-url").value.trim();
+  if (!url) {
+    sectionMessage("snapshot", "The snapshot link is empty. Choose Use team link, or paste an HTTPS direct-download link.", "error");
+    el("snapshot-url").focus();
+    return;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || /\s/.test(url))
+      throw new Error("invalid snapshot link");
+  } catch (error) {
+    sectionMessage("snapshot", "Enter a complete HTTPS direct-download link, or choose Use team link.", "error");
+    el("snapshot-url").focus();
+    return;
+  }
   const password = el("snapshot-password").value;
+  if (password.length < 16) {
+    sectionMessage("snapshot", "Enter the snapshot encryption password (at least 16 characters), not your Dropbox account password.", "error");
+    el("snapshot-password").focus();
+    return;
+  }
   const button = el("snapshot-cloud");
   button.disabled = true;
   try {
     sectionMessage("snapshot", "Downloading and verifying the encrypted snapshot…", "busy");
     const result = await api("/api/snapshot-cloud", {
-      url: el("snapshot-url").value.trim(), password});
+      url, password});
     el("snapshot-password").value = "";
     await refresh();
     sectionMessage("snapshot", "Snapshot verified against this project's reference.");

@@ -88,44 +88,22 @@ def main() -> int:
             time.sleep(1)
         else:
             raise RuntimeError(f"GitHub did not publish editor v{version} in time: {latest}")
-        ignored_failure_at = None
+        extra = None
+        other = None
         if args.test_extra_instance:
             # Old released editors allowed multiple EXE copies from one folder.
-            # The downloaded helper must detect these before shutting either down.
+            # The downloaded helper must close the idle duplicate automatically,
+            # keeping the session that requested the update until handoff is ready.
             extra, extra_base, _ = start(root)
             assert extra_base != base, 'Fixture needs the released multi-instance editor'
             wait_for(extra_base, previous)
-            rejected = Request(base + '/api/editor-update', data=b'{}', headers={
-                'Origin': base, 'X-Editor-Token': token_at(base), 'Content-Type': 'application/json'})
-            with urlopen(rejected, timeout=15) as response:
-                assert response.status == 202
-            deadline = time.monotonic() + 120
-            while time.monotonic() < deadline:
-                with urlopen(base + '/api/editor-update-status', timeout=5) as response:
-                    status = json.load(response)
-                if status['state'] == 'error':
-                    break
-                time.sleep(.2)
-            else:
-                raise RuntimeError('Extra running editor was not rejected before shutdown')
-            assert wait_for(base, previous)['editor_version'] == previous
-            assert wait_for(extra_base, previous)['editor_version'] == previous
-            events = json.loads(get(base + '/api/logs'))['events']
-            failure = next(e for e in reversed(events) if e.get('action') == 'editor-update-install'
-                           and e.get('result') == 'failure')
-            assert 'Another editor instance' in failure['detail'], failure
-            assert failure['recovery'] == 'unchanged'
-            ignored_failure_at = failure['at']
+            # An editor copied into another installation belongs to that project,
+            # even when its EXE filename/version is identical.
+            other_root = Path(directory) / 'Independent editor installation'
             with zipfile.ZipFile(args.old_archive) as archive:
-                assert (root / 'LekmodLocalizationEditor.exe').read_bytes() == archive.read(
-                    'LekmodLocalizationEditor.exe')
-            assert translation.read_text(encoding='utf-8') == 'saved translation from the old editor'
-            assert english.read_text(encoding='utf-8') == 'saved English source'
-            for path, content in connected_files.items():
-                assert path.read_bytes() == content
-            stop(extra_base, token_at(extra_base))
-            extra.wait(timeout=30)
-            print('Legacy extra-instance preflight preserved both servers and all contributor work.')
+                archive.extractall(other_root)
+            other, other_base, _ = start(other_root)
+            other_instance = wait_for(other_base, previous)['server_instance']
         request = Request(base + "/api/editor-update", data=b"{}", headers={
             "Origin": base, "X-Editor-Token": token_at(base),
             "Content-Type": "application/json"})
@@ -138,7 +116,7 @@ def main() -> int:
                 if metadata["editor_version"] == version and not metadata.get('initializing'):
                     break
                 notice = metadata.get("update_notice")
-                if notice and notice["result"] == "failure" and notice.get('at') != ignored_failure_at:
+                if notice and notice["result"] == "failure":
                     raise RuntimeError("The old editor reopened after a failed update: " +
                                        (workspace / "editor-updates/update.log").read_text()[-2000:])
                 with urlopen(base + "/api/editor-update-status", timeout=2) as response:
@@ -150,6 +128,13 @@ def main() -> int:
             time.sleep(.25)
         else:
             raise RuntimeError("The updated EXE did not reopen the original browser address")
+        if extra is not None:
+            assert extra.wait(timeout=15) == 0, 'Legacy duplicate was not closed cleanly'
+            assert wait_for(other_base, previous)['server_instance'] == other_instance
+            stop(other_base, token_at(other_base))
+            assert other.wait(timeout=15) == 0
+            print('Legacy duplicate closed automatically; the requesting session updated on its original URL.')
+            print('Independent editor installation remained running and unchanged.')
         assert metadata["preferences"]["project_path"] == preferences['project_path']
         if args.connected_project:
             assert metadata['ready'], metadata.get('connection_error')

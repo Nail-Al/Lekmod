@@ -1,6 +1,7 @@
 """A shared ciphertext must never bypass the pinned vanilla reference."""
 
 from contextlib import closing
+import io
 from pathlib import Path
 import sqlite3
 import sys
@@ -12,11 +13,38 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.vanilla_snapshot import write_snapshot
 from lekmod_localization.vanilla_reference import write_reference
-from snapshot_cloud import decrypt_snapshot, encrypt_snapshot
+from snapshot_cloud import decrypt_snapshot, download_encrypted, encrypt_snapshot, MAGIC
 from editor_server import Editor
 
 
 class CloudSnapshotTests(unittest.TestCase):
+    def test_empty_or_invalid_links_never_start_a_network_download(self):
+        """Distinguish an empty placeholder from a real HTTPS file address."""
+        with patch("snapshot_cloud.urllib.request.urlopen") as download:
+            for url in ("", "   ", "https://", "http://example.org/reference.enc",
+                        "https://user:password@example.org/reference.enc",
+                        "https://example.org:invalid/reference.enc", "https://example.org/a b.enc"):
+                with self.subTest(url=url), self.assertRaisesRegex(ValueError, "link"):
+                    download_encrypted(url)
+            download.assert_not_called()
+        url = "https://example.org/reference.enc"
+        response = io.BytesIO(MAGIC + b"encrypted archive")
+        response.url = url
+        with patch("snapshot_cloud.urllib.request.urlopen", return_value=response) as download:
+            self.assertEqual(download_encrypted("  " + url + "  "), MAGIC + b"encrypted archive")
+            self.assertEqual(download.call_args.args[0].full_url, url)
+
+    def test_missing_encryption_password_does_not_download_or_replace_a_snapshot(self):
+        """Explain which password is needed before any existing reference is touched."""
+        editor = Editor.__new__(Editor)
+        editor.ready = True
+        with patch("editor_server.download_encrypted") as download, \
+             patch.object(editor, "import_snapshot") as install:
+            with self.assertRaisesRegex(ValueError, "snapshot encryption password"):
+                editor.import_cloud_snapshot("https://example.org/reference.enc", "")
+            download.assert_not_called()
+            install.assert_not_called()
+
     def test_password_and_reference_are_both_required(self):
         """Wrong passwords, tampering and other game tables all fail closed."""
         with tempfile.TemporaryDirectory() as temporary:
