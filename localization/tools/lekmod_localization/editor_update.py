@@ -208,8 +208,12 @@ def launch_update(stage: Path, home: Path = APP_HOME, old_pid: int | None = None
                                creationflags=subprocess.CREATE_NO_WINDOW)
     for _ in range(150):
         if ready.is_file():
-            ready.unlink(missing_ok=True)
-            return
+            try:
+                ready.unlink(missing_ok=True)
+            except PermissionError:
+                pass  # A Windows scanner may hold the acknowledgement briefly.
+            else:
+                return
         if process.poll() is not None:
             raise RuntimeError("The downloaded editor update helper exited early. "
                                "The current editor remains open; see editor-startup.log.")
@@ -434,6 +438,22 @@ def install_update(home: Path, stage: Path, old_pid: int, *, port: int = 0,
         raise RuntimeError(failure) from error
 
 
+def _publish_helper_ready(marker: Path) -> None:
+    """Expose the acknowledgement only after its write handle has closed."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False,
+                                         dir=marker.parent, prefix=".helper-ready-",
+                                         suffix=".tmp") as output:
+            temporary = Path(output.name)
+            output.write("ready")
+        temporary.replace(marker)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def installer_main(argv: list[str]) -> int:
     """Run only in the downloaded EXE, before importing the browser server."""
     parser = argparse.ArgumentParser(description="Finish a staged editor update")
@@ -450,11 +470,11 @@ def installer_main(argv: list[str]) -> int:
     if args.handoff_ticket:
         if not re.fullmatch(r"[0-9a-f]{32}", args.handoff_ticket):
             parser.error("invalid update ticket")
-        marker = args.editor_root / "localization/workspace/editor-updates" / (
-            "helper-ready-" + args.handoff_ticket)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("ready", encoding="utf-8")
     try:
+        if args.handoff_ticket:
+            marker = args.editor_root / "localization/workspace/editor-updates" / (
+                "helper-ready-" + args.handoff_ticket)
+            _publish_helper_ready(marker)
         install_update(args.editor_root, args.stage, args.old_pid, port=args.port,
                        no_browser=args.no_browser, repair=args.repair)
     except Exception as error:

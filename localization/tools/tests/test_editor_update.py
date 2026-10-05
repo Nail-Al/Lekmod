@@ -19,7 +19,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.editor_update import (
     UPDATE_FILES, latest_release, stage_release, installer_command, launch_update, _record,
-    _wait_ready, verify_installation,
+    _wait_ready, verify_installation, _publish_helper_ready,
 )
 from lekmod_localization.connections import editor_manifest
 
@@ -309,6 +309,74 @@ class UpdateTests(unittest.TestCase):
                     uuid_mock.return_value.hex = ticket
                     launch_update(stage, root, 123, 8123)
                 self.assertFalse(marker.exists())
+
+    def test_helper_acknowledgement_is_published_after_closing_its_handle(self):
+        """Old Windows editors can delete the marker as soon as it is visible."""
+        handles = []
+        create_temporary = tempfile.NamedTemporaryFile
+        replace = Path.replace
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "helper-ready-ticket"
+
+            def capture_handle(*args, **kwargs):
+                handle = create_temporary(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            def publish(path, destination):
+                self.assertFalse(marker.exists())
+                self.assertTrue(handles[0].closed)
+                self.assertEqual(path.read_text(encoding="utf-8"), "ready")
+                return replace(path, destination)
+
+            with patch("lekmod_localization.editor_update.tempfile.NamedTemporaryFile",
+                       side_effect=capture_handle), patch.object(Path, "replace", publish):
+                _publish_helper_ready(marker)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ready")
+            self.assertEqual(list(marker.parent.iterdir()), [marker])
+
+    def test_failed_helper_acknowledgement_has_no_partial_marker(self):
+        """A failed atomic publish leaves no marker for the old editor to trust."""
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "helper-ready-ticket"
+            with patch.object(Path, "replace", side_effect=PermissionError("locked")):
+                with self.assertRaises(PermissionError):
+                    _publish_helper_ready(marker)
+            self.assertEqual(list(marker.parent.iterdir()), [])
+
+    def test_editor_retries_a_temporarily_locked_helper_acknowledgement(self):
+        """A scanner locking the marker cannot immediately fail a running update."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "localization/workspace/editor-updates/editor-v0.19"
+            stage.mkdir(parents=True)
+            ticket = "a" * 32
+            marker = stage.parent / ("helper-ready-" + ticket)
+            marker.write_text("ready", encoding="utf-8")
+            unlink = Path.unlink
+            attempts = []
+
+            def remove_marker(path, *args, **kwargs):
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise PermissionError("Windows sharing violation")
+                return unlink(path, *args, **kwargs)
+
+            with patch("lekmod_localization.editor_update.sys.platform", "win32"), \
+                 patch.object(sys, "frozen", True, create=True), \
+                 patch.object(subprocess, "CREATE_NO_WINDOW", 0, create=True), \
+                 patch("lekmod_localization.editor_update.subprocess.Popen") as process, \
+                 patch("lekmod_localization.editor_update.uuid.uuid4") as uuid_mock, \
+                 patch("lekmod_localization.editor_update.time.sleep") as pause, \
+                 patch.object(Path, "unlink", remove_marker):
+                process.return_value.poll.return_value = None
+                uuid_mock.return_value.hex = ticket
+                launch_update(stage, root, 123, 8123)
+                pause.assert_called_once_with(.2)
+            self.assertEqual(attempts, [marker, marker])
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":
