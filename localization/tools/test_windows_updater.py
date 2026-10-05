@@ -25,7 +25,7 @@ def wait_for(url: str, version: str, timeout: int = 75) -> dict:
         try:
             with urlopen(url + "/api/meta", timeout=2) as response:
                 metadata = json.load(response)
-            if metadata["editor_version"] == version:
+            if metadata["editor_version"] == version and not metadata.get('initializing'):
                 return metadata
         except (URLError, TimeoutError, ConnectionError):
             pass

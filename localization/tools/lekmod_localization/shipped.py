@@ -87,7 +87,13 @@ def approved_entries(
             raise CatalogError(f"invalid approved locale: {selected_locale}")
         seen.add(locale)
         for key, approval in translated.items():
-            if key not in source or not isinstance(approval, dict):
+            if not isinstance(approval, dict):
+                raise CatalogError(f"unknown approved key: {locale} {key}")
+            if key not in source:
+                if key in catalog.get('known_english_keys', []):
+                    # Retain past work when English returns to vanilla or a
+                    # source becomes conflicted; these rows cannot override it.
+                    continue
                 raise CatalogError(f"unknown approved key: {locale} {key}")
             if approval.get("source_fingerprint") != editor_source_fingerprint(key, source[key]):
                 # Preserve the old CSV row for review; the game receives English

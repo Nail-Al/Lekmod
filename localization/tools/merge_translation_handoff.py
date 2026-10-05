@@ -143,7 +143,8 @@ def encoded_records(rows: dict[str, dict[str, str]]) -> bytes:
 
 def merge_handoff(archive: Path | bytes, project: Path, *, apply: bool = False,
                   choices: dict[str, str] | None = None,
-                  expected: dict[str, str] | None = None) -> dict:
+                  expected: dict[str, str] | None = None,
+                  sources: dict[str, dict] | None = None) -> dict:
     """Review every key; apply selected current rows atomically across all languages."""
     project = project.resolve()
     reference = (project / "localization/reference/vanilla-fingerprints.json.gz").read_bytes()
@@ -156,7 +157,7 @@ def merge_handoff(archive: Path | bytes, project: Path, *, apply: bool = False,
             raise CatalogError(f"this project has no {locale} translation CSV")
         original[locale] = target[locale].read_bytes()
         existing[locale] = csv_records(original[locale], str(target[locale]))
-        source_rows[locale] = current_source_rows(project, locale)
+        source_rows[locale] = sources if sources is not None else current_source_rows(project, locale)
     hashes = {locale: hashlib.sha256(content).hexdigest()
               for locale, content in original.items()}
     if expected is not None and hashes != expected:

@@ -22,6 +22,22 @@ from lekmod_localization.common import CatalogError
 
 
 class EditorViewTests(unittest.TestCase):
+    def test_project_switch_records_upgrade_even_when_translation_copy_is_off(self):
+        """Release comparisons are required independently of optional saved-row transfer."""
+        with tempfile.TemporaryDirectory() as directory:
+            old, new = Path(directory) / 'old', Path(directory) / 'new'
+            old.mkdir(); new.mkdir()
+            editor = object.__new__(Editor)
+            editor.ready = True
+            with patch('editor_server.REPO_ROOT', old), \
+                 patch('editor_server.validate_project'), \
+                 patch('editor_server.save_settings', side_effect=lambda value: value):
+                result = editor.connect({'project_path': str(new), 'game_path': '',
+                                         'carry_translations': False})
+            self.assertTrue(result['restart'])
+            pending = json.loads((new / 'localization/workspace/pending-transfer.json').read_text())
+            self.assertEqual(pending, {'from': str(old), 'carry_translations': False})
+
     def test_old_private_snapshot_does_not_block_new_editor_baseline(self):
         """After a team reference update, Settings must remain available."""
         with tempfile.TemporaryDirectory() as directory:
@@ -152,8 +168,12 @@ class EditorViewTests(unittest.TestCase):
         """Portable handoff contains the canonical source and a review manifest."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, reference = root / "primary.xml", root / "fingerprints.json.gz"
-            source.write_text("<Text>edited English</Text>", encoding="utf-8")
+            source = root / 'localization/en_US/primary.xml'
+            source.parent.mkdir(parents=True)
+            reference = root / "fingerprints.json.gz"
+            source.write_text('<GameData>\n\t<Language_en_US>\n\t\t<Row Tag="TXT_KEY_ONE">\n'
+                              '\t\t\t<Text>edited English</Text>\n\t\t</Row>\n'
+                              '\t</Language_en_US>\n</GameData>', encoding="utf-8")
             reference.write_bytes(b"reference")
             editor = object.__new__(Editor)
             with patch.object(Editor, "require_developer"), \
@@ -269,6 +289,10 @@ class EditorViewTests(unittest.TestCase):
             editor.handoff_data = None
             editor.handoff_preview = None
             editor.handoff_id = ""
+            editor.handoff_packages = []
+            editor.log_lock = threading.Lock()
+            editor.log_path = project / 'workspace/actions.jsonl'
+            editor.events = []
             editor.snapshot = None
             editor.actions = []
             editor.cursor = 0
@@ -283,18 +307,23 @@ class EditorViewTests(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             headers = {"Origin": base, "X-Editor-Token": "test-token"}
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, 'w') as archive:
+                archive.writestr('README.txt', 'translation ZIP')
+            payload_bytes = stream.getvalue()
             try:
-                with patch("editor_server.merge_handoff", side_effect=[preview, applied]) as merge, \
+                with patch("editor_server.review_merge", side_effect=[preview, applied]) as merge, \
+                     patch("editor_server.WORKSPACE", project / 'workspace'), \
                      patch("editor_server.build_shipped_localization.DEFAULT_SOURCE", game), \
                      patch.object(Editor, "record_event"):
                     with urlopen(base + "/api/save-status", timeout=5) as response:
                         self.assertEqual(json.load(response)["state"], "idle")
-                    with urlopen(Request(base + "/api/handoff-preview", data=b"ZIP bytes",
+                    with urlopen(Request(base + "/api/handoff-preview", data=payload_bytes,
                                          headers=headers), timeout=5) as response:
                         review = json.load(response)
                     self.assertEqual(review["locales"], ["RU_RU"])
                     self.assertTrue(review["handoff_id"])
-                    self.assertEqual(editor.handoff_data, b"ZIP bytes")
+                    self.assertEqual(editor.handoff_data, payload_bytes)
                     payload = json.dumps({"handoff_id": review["handoff_id"],
                                           "choices": {"RU_RU:TXT_KEY_A": "keep"}}).encode()
                     with urlopen(Request(base + "/api/handoff-apply", data=payload,
@@ -356,6 +385,7 @@ class EditorViewTests(unittest.TestCase):
             editor.handoff_data = b"archive"
             editor.handoff_preview = {"target_sha256": {"RU_RU": "a" * 64}}
             editor.handoff_id = "session-1"
+            editor.handoff_packages = [b'archive']
             editor.snapshot = None
             editor.actions = []
             editor.cursor = 0
@@ -363,9 +393,12 @@ class EditorViewTests(unittest.TestCase):
             def merged(*args, **kwargs):
                 target.write_bytes(b"incoming rows")
                 game.write_bytes(b"new game XML")
-                return {"applied": True, "backups": {"RU_RU": str(backup)}}
+                return {"applied": True, "backups": {"translations/RU_RU.csv": str(backup),
+                         "game.xml": str(root / 'original-game.xml')}}
 
-            with patch("editor_server.merge_handoff", side_effect=merged), \
+            (root / 'original-game.xml').write_bytes(game.read_bytes())
+            with patch("editor_server.review_merge", side_effect=merged), \
+                 patch("editor_server.REPO_ROOT", root), \
                  patch("editor_server.TRANSLATIONS", translations), \
                  patch("editor_server.build_shipped_localization.DEFAULT_SOURCE", game), \
                  patch("editor_server.manage.read_config", return_value={}), \

@@ -36,6 +36,7 @@ import build_shipped_localization
 import manage
 import sync_primary_english
 from merge_translation_handoff import MAX_ARCHIVE, merge_handoff
+from merge_localization import review_merge, english_base
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
@@ -54,6 +55,9 @@ from lekmod_localization.vanilla_snapshot import read_snapshot
 from lekmod_localization.vanilla_reference import verify_snapshot_reference
 from lekmod_localization.vanilla_reference import read_reference
 from lekmod_localization.workspace import EDITOR_FIELDNAMES
+from lekmod_localization.version_history import (
+    change_map, synchronize as sync_history, carry_translations, read_history, between,
+)
 from snapshot_cloud import decrypt_snapshot, download_encrypted, encrypt_snapshot
 
 
@@ -66,7 +70,7 @@ TRANSLATIONS = REPO_ROOT / "localization" / "translations"
 APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at")
 OPERATIONS = re.compile(
     r"(?ms)^(?P<indent>[ \t]+)<(?P<kind>Row|Replace)\b(?P<attrs>[^>]*)>"
-    r"(?P<body>.*?)^[ \t]*</(?P=kind)>"
+    r"(?P<body>.*?)</(?P=kind)>"
 )
 TAG = re.compile(r'\bTag="(TXT_KEY_[A-Za-z0-9_]+)"')
 TEXT = re.compile(r"<Text>(.*?)</Text>", re.DOTALL)
@@ -223,9 +227,32 @@ class Editor:
     """Validate and persist browser edits before touching the shipped XML."""
 
     def __init__(self, snapshot: Path = manage.SNAPSHOT):
-        manage.migrate_workspace()
+        # Initialize diagnostics and recovery controls before costly project work.
+        self.instance_id = getattr(self, 'instance_id', secrets.token_hex(16))
+        self.actions, self.events = [], []
+        self.cursor = 0
+        self.log_lock = threading.Lock()
+        self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
+        self.download_state = {"state": "idle"}
+        self.update_state = {"state": "idle"}
+        self.integrity_state = {"state": "idle"}
+        self.save_state = {"state": "idle"}
+        self.download_cancel = threading.Event()
+        self.handoff_data = self.handoff_preview = None
+        self.handoff_id = ""
+        self.handoff_packages = []
+        self.handoff_choices = {}
+        self.last_encrypted_archive = None
         self.ready = False
         self.connection_error = ""
+        self.project_info = None
+        self.snapshot = None
+        self.snapshot_error = ""
+        self.vanilla_counts = {}
+        self.english_dates = self.local_dates = {}
+        self.version_changes = {}
+        self.version_info = {'available': [], 'synced': [], 'upgrade_versions': []}
+        manage.migrate_workspace()
         try:
             self.project_info = validate_project(REPO_ROOT, full=True)
             self.ready = True
@@ -248,7 +275,36 @@ class Editor:
             if self.snapshot is not None else {}
         )
         if self.ready:
-            manage.prepare(manage.read_config(), self.snapshot)
+            try:
+                manage.prepare(manage.read_config(), self.snapshot)
+                transfer = REPO_ROOT / 'localization/workspace/pending-transfer.json'
+                if transfer.is_file():
+                    request = json.loads(transfer.read_text(encoding='utf-8'))
+                    paths = [build_shipped_localization.DEFAULT_SOURCE, *TRANSLATIONS.glob('*.csv')]
+                    originals = {path: path.read_bytes() for path in paths}
+                    try:
+                        previous = Path(request['from'])
+                        if request.get('carry_translations', True):
+                            result = carry_translations(previous, REPO_ROOT)
+                        else:
+                            old_version, current_version = release_version(previous), release_version(REPO_ROOT)
+                            sync_history(REPO_ROOT, between(read_history(REPO_ROOT), old_version, current_version),
+                                         since=old_version)
+                            result = {'from': old_version, 'to': current_version,
+                                      'copied': 0, 'conflicts': 0, 'archived': 0}
+                        manage.prepare(manage.read_config(), self.snapshot)
+                        atomic_bytes(transfer.with_name('last-transfer.json'), json.dumps(result).encode())
+                        transfer.unlink()
+                    except Exception:
+                        for path, data in originals.items(): atomic_bytes(path, data)
+                        raise
+            except Exception as error:
+                self.ready = False
+                self.connection_error = 'Project preparation failed: ' + str(error)
+                self.record_event('project-prepare', 'error:' + type(error).__name__ + ': ' +
+                                  safe_ui_event_detail(str(error)[:500]))
+                LOG.exception('Project preparation failed; Settings remain available')
+        if self.ready:
             source = sync_primary_english.DEFAULT_ENGLISH
             self.english_dates = read_dates(source, primary_operations(
                 source.read_text(encoding="utf-8")), REPO_ROOT)
@@ -265,36 +321,61 @@ class Editor:
                     self.english_dates.update(self.local_dates)
             except (OSError, ValueError):
                 pass
-        self.actions: list[dict] = []
-        self.instance_id = secrets.token_hex(16)
-        self.cursor = 0
-        self.download_state: dict = {"state": "idle"}
-        self.update_state: dict = {"state": "idle"}
-        self.integrity_state: dict = {"state": "idle"}
-        self.download_cancel = threading.Event()
-        self.save_state: dict = {"state": "idle"}
-        self.handoff_data: bytes | None = None
-        self.handoff_id = ""
-        self.handoff_preview: dict | None = None
-        self.last_encrypted_archive: Path | None = None
-        self.log_path = APP_HOME / "localization/workspace/editor-actions.jsonl"
-        self.events: list[dict] = []
-        if self.log_path.is_file():
-            for line in self.log_path.read_text(encoding="utf-8").splitlines()[-500:]:
+        if self.ready:
+            english_base(REPO_ROOT)
+        self.version_changes, self.version_info = change_map(REPO_ROOT, release_version(REPO_ROOT)) if self.ready else ({}, {'available': [], 'synced': [], 'upgrade_versions': []})
+        self.read_events()
+        if self.ready:
+            path = WORKSPACE / 'pending-handoff/manifest.json'
+            if path.is_file():
                 try:
-                    self.events.append(json.loads(line))
-                except ValueError:
-                    continue
+                    saved = json.loads(path.read_text(encoding='utf-8'))
+                    names = saved.get('files', [])
+                    if not isinstance(names, list) or not 1 <= len(names) <= 20 or any(
+                        not isinstance(name, str) or not re.fullmatch(r'[0-9a-f]{64}\.zip', name) for name in names):
+                        raise CatalogError('Invalid pending merge package list')
+                    packages = [(path.parent / name).read_bytes() for name in names]
+                    if sum(len(data) for data in packages) > MAX_ARCHIVE:
+                        raise CatalogError('Pending merge review is too large')
+                    self.handoff_packages = packages
+                    self.handoff_choices = saved.get('choices', {})
+                    if not isinstance(self.handoff_choices, dict) or any(
+                        not isinstance(key, str) or value not in ('incoming', 'keep', 'review')
+                        for key, value in self.handoff_choices.items()):
+                        raise CatalogError('Invalid pending merge choices')
+                    self.handoff_preview = review_merge(packages, REPO_ROOT,
+                        choices={key: value for key, value in self.handoff_choices.items() if key.startswith('en_US:')})
+                    self.handoff_data = packages[-1]
+                    self.handoff_id = secrets.token_urlsafe(16)
+                    self.handoff_choices = {item['id']: self.handoff_choices.get(item['id'],
+                                            'keep' if item['status'] in ('stale', 'blocked') else 'incoming')
+                                            for item in self.handoff_preview['items']}
+                    for item in self.handoff_preview['items']:
+                        if item['status'] in ('stale', 'blocked'): self.handoff_choices[item['id']] = 'keep'
+                except (OSError, ValueError) as error:
+                    self.handoff_packages = []
+                    self.handoff_preview = self.handoff_data = None
+                    self.record_event('handoff-restore', 'error:' + safe_ui_event_detail(str(error)[:500]))
 
     def record_event(self, name: str, result: str) -> None:
         """Keep a bounded, text-free local action journal for troubleshooting."""
         if not re.fullmatch(r"[a-z0-9/_-]{1,60}", name):
             return
-        self.events.append({"at": datetime.now(timezone.utc).isoformat(),
-                            "action": name, "result": result})
-        self.events = self.events[-500:]
-        atomic_bytes(self.log_path, ("\n".join(json.dumps(item) for item in self.events)
-                                     + "\n").encode("utf-8"))
+        event = {"at": datetime.now(timezone.utc).isoformat(), "action": name, "result": result}
+        with self.log_lock:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps(event) + '\n')
+            self.read_events()
+
+    def read_events(self) -> list[dict]:
+        """Include diagnostics appended by the independent update helper."""
+        self.events = []
+        if self.log_path.is_file():
+            for line in self.log_path.read_text(encoding='utf-8').splitlines()[-500:]:
+                try: self.events.append(json.loads(line))
+                except ValueError: continue
+        return self.events
 
     def start_download(self, version: str) -> dict:
         """Fetch a reviewed source release in the background without replacing files."""
@@ -399,6 +480,7 @@ class Editor:
 
     def metadata(self) -> dict:
         """Return selector choices and current feature switches."""
+        self.read_events()
         manifest = self.manifest() if self.ready else {"locales": {}}
         prefs = settings()
         game_path = prefs["game_path"] or detect_game()
@@ -413,6 +495,11 @@ class Editor:
             "vanilla_counts": self.vanilla_counts,
             "snapshot_error": self.snapshot_error,
             "ready": self.ready,
+            "version_history": self.version_info,
+            "handoff": ({'handoff_id': self.handoff_id, **self.handoff_preview,
+                         'choices': self.handoff_choices} if self.handoff_preview else None),
+            "transfer": (json.loads((WORKSPACE / 'last-transfer.json').read_text())
+                         if (WORKSPACE / 'last-transfer.json').is_file() else None),
             "connection_error": self.connection_error,
             "project": self.project_info,
             "editor_version": editor_manifest()["version"],
@@ -439,11 +526,21 @@ class Editor:
         mod = ""
         if game:
             inspected = inspect_game(Path(game), source_root)
-            if inspected["state"] not in ("installed", "vanilla"):
+            if inspected["state"] not in ("installed", "vanilla", "mismatch"):
                 raise CatalogError("Game: " + inspected["error"])
             if inspected["state"] == "installed":
                 mod = inspected["mods"][0]["name"]
         changed = (Path(project).resolve() if project else APP_HOME) != REPO_ROOT
+        if changed and self.ready:
+            target = source_root / 'localization/workspace/pending-transfer.json'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and json.loads(target.read_text(encoding='utf-8')).get('from') != str(REPO_ROOT):
+                raise CatalogError('This destination already has a pending translation transfer; finish it first')
+            atomic_bytes(target, json.dumps({'from': str(REPO_ROOT),
+                          'carry_translations': data.get('carry_translations', True) is True}).encode())
+        elif not changed and not self.ready:
+            # Retry a project whose files have been repaired through an IDE.
+            changed = True
         saved = save_settings({"project_path": project, "game_path": game,
                                "game_mod": mod, "onboarded": True})
         return {"restart": changed, "preferences": saved}
@@ -622,11 +719,74 @@ class Editor:
         """Hold an imported ZIP only in memory until this editor session ends."""
         if not self.ready or not isinstance(data, bytes) or not 0 < len(data) <= MAX_ARCHIVE:
             raise CatalogError("connect a project and choose a valid handoff ZIP")
-        report = merge_handoff(data, REPO_ROOT)
+        packages = [*self.handoff_packages, data]
+        if len(packages) > 20 or sum(map(len, packages)) > MAX_ARCHIVE:
+            raise CatalogError('Finish or clear this review before importing more ZIPs')
+        report = review_merge(packages, REPO_ROOT)
+        with zipfile.ZipFile(io.BytesIO(data)) as package:
+            contains_english = 'localization/en_US/primary.xml' in package.namelist()
+        if contains_english and settings()['mode'] != 'developer':
+            raise CatalogError('Import English source in Developer mode first')
+        self.handoff_packages = packages
         self.handoff_data = data
         self.handoff_id = secrets.token_urlsafe(16)
         self.handoff_preview = report
+        self.handoff_choices = {key: value for key, value in getattr(self, 'handoff_choices', {}).items()
+                                if key in {item['id'] for item in report['items']}}
+        for item in report['items']:
+            if item['status'] in ('stale', 'blocked'): self.handoff_choices[item['id']] = 'keep'
+        self.persist_handoff()
         return {"handoff_id": self.handoff_id, **report}
+
+    def persist_handoff(self) -> None:
+        """Preserve the project-bound pending review through editor upgrades."""
+        folder = WORKSPACE / 'pending-handoff'
+        names = []
+        for data in self.handoff_packages:
+            name = hashlib.sha256(data).hexdigest() + '.zip'
+            if not (folder / name).is_file(): atomic_bytes(folder / name, data)
+            names.append(name)
+        atomic_bytes(folder / 'manifest.json', json.dumps(
+            {'files': names, 'choices': self.handoff_choices}).encode())
+
+    def clear_handoff(self) -> None:
+        """Remove only our private pending review, leaving saved source untouched."""
+        folder = WORKSPACE / 'pending-handoff'
+        (folder / 'manifest.json').unlink(missing_ok=True)
+        if folder.is_dir():
+            for path in folder.glob('*.zip'):
+                if re.fullmatch(r'[0-9a-f]{64}\.zip', path.name): path.unlink()
+        self.handoff_packages, self.handoff_choices = [], {}
+        self.handoff_preview = self.handoff_data = None
+        self.handoff_id = ''
+
+    def save_handoff_choices(self, choices: dict) -> dict:
+        """Persist checkbox choices without rebuilding the source catalog."""
+        if not self.handoff_preview or not isinstance(choices, dict):
+            raise CatalogError('Open a pending review before choosing rows')
+        items = {item['id']: item for item in self.handoff_preview['items']}
+        for key, value in choices.items():
+            if key not in items or value not in ('incoming', 'keep', 'review') or (
+                value == 'incoming' and items[key]['status'] in ('stale', 'blocked')):
+                raise CatalogError('Invalid pending merge choice')
+        self.handoff_choices = choices
+        self.persist_handoff()
+        return {'saved': True}
+
+    def review_handoff(self, choices: dict) -> dict:
+        """Recompute dependent translations when an English checkbox changes."""
+        if not self.handoff_preview or not isinstance(choices, dict):
+            raise CatalogError('Import a ZIP before reviewing its choices')
+        report = review_merge(self.handoff_packages, REPO_ROOT, choices=choices,
+                              expected=self.handoff_preview['target_sha256'])
+        self.handoff_preview = report
+        self.handoff_choices.update(choices)
+        valid = {item['id'] for item in report['items']}
+        self.handoff_choices = {key: value for key, value in self.handoff_choices.items() if key in valid}
+        for item in report['items']:
+            if item['status'] in ('stale', 'blocked'): self.handoff_choices[item['id']] = 'keep'
+        self.persist_handoff()
+        return {'handoff_id': self.handoff_id, **report}
 
     def apply_handoff(self, data: dict) -> dict:
         """Recheck the preview, merge selected rows, and rebuild the project XML."""
@@ -634,26 +794,37 @@ class Editor:
                 data.get("handoff_id") != self.handoff_id):
             raise CatalogError("import a handoff ZIP before applying it")
         choices = data.get("choices")
-        if not isinstance(choices, dict) or len(choices) > 20000:
+        if not isinstance(choices, dict) or len(choices) > 100000:
             raise CatalogError("invalid handoff decisions")
-        game = build_shipped_localization.DEFAULT_SOURCE
-        old_game = game.read_bytes()
-        report = merge_handoff(self.handoff_data, REPO_ROOT, apply=True, choices=choices,
+        destination = data.get('destination', 'project')
+        if destination not in ('project', 'project_game'):
+            raise CatalogError('invalid merge destination')
+        if destination == 'project_game':
+            prefs = settings()
+            game_info = inspect_game(Path(prefs['game_path']), REPO_ROOT)
+            if game_info['state'] != 'installed':
+                raise CatalogError('Game is not connected to one matching Lekmod installation')
+        report = review_merge(self.handoff_packages, REPO_ROOT, apply=True, choices=choices,
                                expected=self.handoff_preview["target_sha256"])
         if report["applied"]:
             try:
                 manage.prepare(manage.read_config(), self.snapshot)
             except Exception:
-                for locale, path in report["backups"].items():
-                    atomic_bytes(TRANSLATIONS / f"{locale}.csv", Path(path).read_bytes())
-                atomic_bytes(game, old_game)
+                for name, path in report["backups"].items():
+                    atomic_bytes(REPO_ROOT / name, Path(path).read_bytes())
                 manage.prepare(manage.read_config(), self.snapshot)
                 raise
             self.actions = []
             self.cursor = 0
-        self.handoff_data = None
-        self.handoff_preview = None
-        self.handoff_id = ""
+        if destination == 'project_game':
+            try:
+                prefs = settings()
+                report['game_result'] = apply_game(REPO_ROOT, Path(prefs['game_path']),
+                                                   game_info['mods'][0]['name'], APP_HOME)
+            except (ValueError, OSError) as error:
+                # The reviewed source stays saved even if the external game copy is locked.
+                report['game_error'] = str(error)
+        self.clear_handoff()
         return {**report, **self.history_state()}
 
     def export_english(self) -> bytes:
@@ -669,6 +840,7 @@ class Editor:
             "repository_commit": revision,
             "vanilla_reference_sha256": hashlib.sha256(reference).hexdigest(),
             "english_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "english_base": english_base(REPO_ROOT),
         }
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -688,7 +860,11 @@ class Editor:
     def rows(self, locale: str, category: str, query: str, offset: int,
              limit: str = "100", filters: dict | None = None) -> dict:
         """Search a category and return one page with approval state."""
-        rows = csv_rows(self.path(locale, category))
+        categories = ([name.removesuffix('.csv') for name in self.manifest().get('locales', {}).get(locale, {}).get('files', {})]
+                      if category == 'all' else [category])
+        if not categories:
+            raise CatalogError('unknown language or category')
+        rows = [{**row, 'category': name} for name in categories for row in csv_rows(self.path(locale, name))]
         approved = read_approvals(TRANSLATIONS).get(locale, {})
         approval_path = TRANSLATIONS / f"{locale}.csv"
         approved_sha = (hashlib.sha256(approval_path.read_bytes()).hexdigest()
@@ -705,6 +881,10 @@ class Editor:
         shipped = manage.read_config()["build"]["shipped"]
         for row in rows:
             item = dict(row)
+            item['changed_in'] = getattr(self, 'version_changes', {}).get(row['key'], [])
+            selected_version = (filters or {}).get('version', '')
+            if selected_version and not (set(item['changed_in']) & set(self.version_info['upgrade_versions']) if selected_version == 'upgrade' else selected_version in item['changed_in']):
+                continue
             item["approved_sha256"] = approved_sha
             item["english_source_sha256"] = english_sha
             item["english_edited_at"] = self.english_dates.get(row["key"], "")
@@ -712,6 +892,7 @@ class Editor:
             saved = approved.get(row["key"])
             if saved:
                 item["translation_status"] = (
+                    "needs_source_review" if row.get('classification') == 'source_conflict' else
                     ("applied" if shipped else "saved")
                     if saved["source_fingerprint"] == row["source_fingerprint"]
                     else "stale"
@@ -722,6 +903,10 @@ class Editor:
                 item["translation_gender"] = saved.get("gender", "")
                 item["translation_plurality"] = saved.get("plurality", "")
                 item["translator_note"] = approved_details[row["key"]]["translator_note"]
+            if row.get('classification') == 'source_conflict':
+                item['translation_status'] = 'needs_source_review'
+            if (filters or {}).get('needs_translation') == 'true' and item.get('translation_status') not in ('missing', 'stale'):
+                continue
             if (not query or any(query in item[field].casefold()
                                  for field in ("key", "lekmod_en_US", "vanilla_en_US",
                                                "vanilla_target", "translation"))) and matches_filters(
@@ -745,6 +930,11 @@ class Editor:
                     "source_file": "localization/en_US/primary.xml",
                     "source_line": bisect_right(starts, row["start"]),
                     "english_edited_at": self.english_dates.get(row["key"], "")}
+            item['changed_in'] = getattr(self, 'version_changes', {}).get(row['key'], [])
+            item['required_format_tokens'] = token_counts(value)
+            version = (filters or {}).get('version', '')
+            if version and not (set(item['changed_in']) & set(self.version_info['upgrade_versions']) if version == 'upgrade' else version in item['changed_in']):
+                continue
             if matches_filters(item, filters or {}, primary=True):
                 selected.append(item)
         return {"total": len(selected), "rows": page_slice(selected, offset, limit)}
@@ -797,6 +987,8 @@ class Editor:
         row = next((candidate for candidate in rows if candidate["key"] == key), None)
         if row is None or row["source_fingerprint"] != data.get("source_fingerprint"):
             raise CatalogError("the English source changed; reload this row")
+        if row.get('classification') == 'source_conflict':
+            raise CatalogError('Conflicting English sources need a developer review before this key can be translated')
         for name in ("translation", "translation_gender", "translation_plurality", "translator_note"):
             if not isinstance(data.get(name), str) or len(data[name]) > 200000:
                 raise CatalogError(f"invalid {name}")
@@ -1148,6 +1340,12 @@ def make_handler(editor: Editor, token: str, port: int):
             args = parse_qs(url.query)
             one = lambda key, default="": args.get(key, [default])[0]
             try:
+                if getattr(editor, 'initializing', False) is True and url.path.startswith('/api/') and url.path != '/api/health':
+                    if url.path == '/api/meta':
+                        self.respond(200, {'initializing': True, 'editor_version': editor_manifest()['version'],
+                                           'server_instance': editor.instance_id})
+                    else: self.respond(503, {'error': 'Preparing the connected project; please wait'})
+                    return
                 if url.path == "/":
                     html = PAGE.read_text(encoding="utf-8").replace("{{TOKEN}}", token).encode("utf-8")
                     self.send_response(200)
@@ -1175,7 +1373,7 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif url.path == "/api/meta":
                     self.respond(200, editor.metadata())
                 elif url.path == "/api/logs":
-                    self.respond(200, {"events": editor.events})
+                    self.respond(200, {"events": editor.read_events()})
                 elif url.path == "/api/logs/download":
                     self.download("lekmod-editor-actions.jsonl",
                                   editor.log_path.read_bytes() if editor.log_path.exists() else b"",
@@ -1201,14 +1399,14 @@ def make_handler(editor: Editor, token: str, port: int):
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
                     filters = {name: one(name) for name in
-                               ("kind", "status", "date_field", "date_from", "date_to")}
+                               ("kind", "status", "date_field", "date_from", "date_to", "version", "needs_translation")}
                     self.respond(200, editor.rows(one("locale"), one("category"), one("q"),
                                                   int(one("offset", "0")), one("limit", "100"), filters))
                 elif url.path == "/api/primary":
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
                     filters = {name: one(name) for name in
-                               ("kind", "date_field", "date_from", "date_to")}
+                               ("kind", "date_field", "date_from", "date_to", "version")}
                     self.respond(200, editor.primary(one("q"), int(one("offset", "0")),
                                                      one("limit", "100"), filters))
                 elif url.path == "/api/primary-create-info":
@@ -1239,6 +1437,8 @@ def make_handler(editor: Editor, token: str, port: int):
                 self.respond(403, {"error": "editor request rejected"})
                 return
             try:
+                if getattr(editor, 'initializing', False) is True:
+                    self.respond(503, {'error': 'Preparing the connected project; please wait'}); return
                 length = int(self.headers.get("Content-Length", "0"))
                 if self.path == "/api/snapshot":
                     if editor.save_state.get("state") == "running":
@@ -1256,7 +1456,9 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(200, editor.preview_handoff(self.rfile.read(length)))
                     editor.record_event("handoff-preview", "success")
                     return
-                if not 0 < length <= 512 * 1024:
+                max_body = 8 * 1024 * 1024 if self.path in (
+                    '/api/handoff-apply', '/api/handoff-review', '/api/handoff-choices') else 512 * 1024
+                if not 0 < length <= max_body:
                     raise CatalogError("invalid request size")
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
@@ -1266,13 +1468,24 @@ def make_handler(editor: Editor, token: str, port: int):
                     "/api/create-primary", "/api/rename-primary", "/api/connect",
                     "/api/snapshot", "/api/snapshot-cloud", "/api/editor-update",
                     "/api/apply-game", "/api/check", "/api/undo", "/api/redo",
-                    "/api/handoff-apply", "/api/stop",
+                    "/api/handoff-apply", "/api/handoff-review", "/api/history-sync", "/api/stop",
                 }:
                     raise CatalogError("wait until the current row finishes saving")
                 if self.path == "/api/translate-async":
                     result = editor.start_translation_save(data)
                 elif self.path == "/api/handoff-apply":
                     result = editor.apply_handoff(data)
+                elif self.path == '/api/handoff-review':
+                    result = editor.review_handoff(data.get('choices', {}))
+                elif self.path == '/api/handoff-clear':
+                    editor.clear_handoff()
+                    result = {'cleared': True}
+                elif self.path == '/api/handoff-choices':
+                    result = editor.save_handoff_choices(data.get('choices'))
+                elif self.path == '/api/history-sync':
+                    sync_history(REPO_ROOT, [data.get('version', '')])
+                    editor.version_changes, editor.version_info = change_map(REPO_ROOT, release_version(REPO_ROOT))
+                    result = {'version_history': editor.version_info}
                 elif self.path == "/api/translate":
                     result = editor.save_translation(data)
                 elif self.path == "/api/primary":
@@ -1324,6 +1537,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     threading.Thread(target=verify_in_background, daemon=True).start()
                     return
                 elif self.path == "/api/editor-update":
+                    if getattr(editor, 'download_state', {}).get('state') in ('running', 'canceling'):
+                        raise CatalogError('Finish or cancel the Lekmod source download before updating the editor')
                     if editor.update_state["state"] not in ("idle", "error"):
                         raise CatalogError("an editor update is already running")
                     if editor.integrity_state["state"] == "running":
@@ -1448,7 +1663,8 @@ def make_handler(editor: Editor, token: str, port: int):
                 self.respond(400, {"error": str(error)})
                 detail = (": " + safe_ui_event_detail(str(error)[:500])) if self.path in (
                     "/api/check", "/api/preferences", "/api/handoff-preview",
-                    "/api/handoff-apply", "/api/translate-async") else ""
+                    "/api/handoff-apply", "/api/handoff-review", "/api/connect", "/api/history-sync",
+                    "/api/translate-async") else ""
                 editor.record_event(self.path.removeprefix("/api/"),
                                     "error:" + type(error).__name__ + detail)
 
@@ -1481,8 +1697,10 @@ def main() -> int:
     started_at = time.monotonic()
     LOG.info("Initializing editor process %s", os.getpid())
     try:
-        editor = Editor()
-        LOG.info("Editor data initialized in %.1fs", time.monotonic() - started_at)
+        editor = object.__new__(Editor)
+        editor.instance_id = secrets.token_hex(16)
+        editor.initializing = True
+        editor.initialization_error = ''
         token = secrets.token_urlsafe(32)
         server = HTTPServer(("127.0.0.1", args.port), make_handler(editor, token, args.port))
         # The handler compares the browser Origin with the actual assigned port.
@@ -1502,6 +1720,20 @@ def main() -> int:
                                        "port": server.server_port}).encode("utf-8"))
     if not args.no_browser:
         webbrowser.open(url)
+    def initialize_project() -> None:
+        """Serve health and a loading screen while a slow project is prepared."""
+        try:
+            Editor.__init__(editor)
+            LOG.info('Project prepared in %.1fs', time.monotonic() - started_at)
+        except Exception as error:
+            editor.ready = False
+            editor.connection_error = 'Project preparation failed: ' + str(error)
+            editor.record_event('project-prepare', 'error:' + type(error).__name__ + ': ' +
+                                safe_ui_event_detail(str(error)[:500]))
+            LOG.exception('Project preparation failed')
+        finally:
+            editor.initializing = False
+    threading.Thread(target=initialize_project, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

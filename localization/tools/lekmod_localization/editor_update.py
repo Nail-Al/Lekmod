@@ -299,7 +299,7 @@ def _wait_ready(home: Path, ticket: str, expected: str, process: subprocess.Pope
     """Wait through a slow first launch, then check the lightweight server and UI."""
     ready = home / "localization/workspace/editor-updates" / ("ready-" + ticket + ".json")
     started = time.monotonic()
-    timeout_seconds = 150
+    timeout_seconds = 300
     last_report = 0
     last_error = "the new editor has not opened its local server"
     while time.monotonic() - started < timeout_seconds:

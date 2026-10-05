@@ -343,6 +343,7 @@ def build_catalog(
             },
         },
         "source_categories": ordered_categories,
+        "known_english_keys": sorted(english_variants),
         "review": {
             "metadata_only": metadata_review,
         },

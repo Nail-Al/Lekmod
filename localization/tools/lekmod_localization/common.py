@@ -6,13 +6,17 @@ from collections import Counter
 import json
 from pathlib import Path
 import re
+import sys
 
 from .connections import project_root
 
 
 # A packaged editor keeps writable project data beside the executable, not in
 # PyInstaller's temporary extraction directory.
-REPO_ROOT = project_root()
+# IDE commands operate on their checkout. Only the browser editor follows its
+# saved connection; it must not silently redirect a maintainer's CLI commands.
+REPO_ROOT = project_root(editor=getattr(sys, 'frozen', False) or
+                         Path(sys.argv[0]).stem in ('editor_server', 'editor_main'))
 DEFAULT_SOURCE = (
     REPO_ROOT / "LEKMOD" / "Override" / "CIV5Units_Mongol.xml"
 )

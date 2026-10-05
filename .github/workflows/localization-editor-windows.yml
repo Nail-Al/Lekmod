@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install "pyinstaller==6.22.3" "cryptography>=45,<47"
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools --add-data "localization/editor/favicon.svg;." localization/tools/editor_main.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools --add-data "localization/editor/favicon.svg;." --add-data "localization/reference/lekmod-versions.json.gz;." localization/tools/editor_main.py
       - name: Package contributor files
         shell: pwsh
         run: |
@@ -66,7 +66,7 @@ jobs:
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          foreach ($previous in @('editor-v0.11', 'editor-v0.12', 'editor-v0.13')) {
+          foreach ($previous in @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14')) {
             $folder = "dist/previous-$previous"
             New-Item -ItemType Directory -Force $folder | Out-Null
             gh release download $previous --pattern LekmodLocalizationEditor-Windows.zip --dir $folder
@@ -75,7 +75,7 @@ jobs:
               '--old-archive', "$folder/LekmodLocalizationEditor-Windows.zip",
               '--new-archive', 'dist/published/LekmodLocalizationEditor-Windows.zip'
             )
-            if ($previous -eq 'editor-v0.13') { $upgradeArgs += '--test-repair' }
+            if ($previous -eq 'editor-v0.14') { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

@@ -13,6 +13,9 @@ from urllib.request import Request, urlopen
 import zipfile
 
 from test_windows_updater import start, stop, token_at, wait_for
+from test_portable_editor import source_fixture
+from merge_localization import candidate_sources
+from merge_translation_handoff import encoded_records
 
 
 def main() -> int:
@@ -21,6 +24,7 @@ def main() -> int:
     parser.add_argument("--old-archive", type=Path, required=True)
     parser.add_argument("--new-archive", type=Path, required=True)
     parser.add_argument("--test-repair", action="store_true")
+    parser.add_argument('--connected-project', action='store_true')
     args = parser.parse_args()
     if os.name != "nt":
         raise RuntimeError("run the online upgrade test on Windows")
@@ -36,6 +40,20 @@ def main() -> int:
                 "localization/editor/version.json")}
         preferences = {"project_path": "C:/Lekmod source", "mode": "translator",
                        "column_widths": {"key": 515}, "snapshot_url": "https://example.invalid"}
+        connected_files = {}
+        if args.connected_project:
+            project = root / 'Connected project with spaces'
+            source_fixture(project)
+            primary = project / 'localization/en_US/primary.xml'
+            sources = candidate_sources(project, primary.read_text(encoding='utf-8'))
+            key = 'TXT_KEY_BUILDING_ALCAZABA_PEDIA'
+            approved = project / 'localization/translations/RU_RU.csv'
+            approved.write_bytes(encoded_records({key: {'key': key,
+                'source_fingerprint': sources[key]['source_fingerprint'],
+                'text': 'Saved contributor translation', 'gender': '', 'plurality': '',
+                'translator_note': 'Keep this work', 'updated_at': '2026-10-05T00:00:00Z'}}))
+            connected_files = {path: path.read_bytes() for path in (primary, approved)}
+            preferences['project_path'] = str(project)
         workspace = root / "localization/workspace"
         workspace.mkdir(parents=True)
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
@@ -66,7 +84,7 @@ def main() -> int:
             try:
                 with urlopen(base + "/api/meta", timeout=2) as response:
                     metadata = json.load(response)
-                if metadata["editor_version"] == version:
+                if metadata["editor_version"] == version and not metadata.get('initializing'):
                     break
                 notice = metadata.get("update_notice")
                 if notice and notice["result"] == "failure":
@@ -81,7 +99,11 @@ def main() -> int:
             time.sleep(.25)
         else:
             raise RuntimeError("The updated EXE did not reopen the original browser address")
-        assert metadata["preferences"]["project_path"] == "C:/Lekmod source"
+        assert metadata["preferences"]["project_path"] == preferences['project_path']
+        if args.connected_project:
+            assert metadata['ready'], metadata.get('connection_error')
+            for path, content in connected_files.items():
+                assert path.read_bytes() == content, f'updater modified {path}'
         assert metadata["preferences"]["column_widths"] == {"key": 515}
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
         for name, expected in expected_ui.items():
@@ -142,6 +164,8 @@ def main() -> int:
             assert english.read_text(encoding="utf-8") == "saved English source"
             assert (workspace / "vanilla-snapshot.json.gz").read_bytes() == b"private snapshot fixture"
             assert json.loads((workspace / "editor-settings.json").read_text()) == preferences
+            for path, content in connected_files.items():
+                assert path.read_bytes() == content, f'repair modified {path}'
             for _ in range(40):
                 if details.count(f"success  Installed v{version}") >= 2:
                     break

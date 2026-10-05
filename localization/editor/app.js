@@ -10,12 +10,12 @@ const translatorColumns = [
   ["lekmod_target", "Existing Lekmod translation"], ["translation", "My translation"],
   ["translation_status", "Status"], ["translation_characters", "My characters"],
   ["english_edited_at", "English edited"], ["translation_updated_at", "Translation edited"],
-  ["translator_note", "Translator note"]
+  ["translator_note", "Translator note"], ["changed_in", "Changed in Lekmod"]
 ];
 const developerColumns = [["key", "Key"], ["kind", "Operation"],
   ["text", "English text"], ["characters", "Characters"],
   ["english_edited_at", "English edited"], ["source_file", "Source file"],
-  ["source_line", "Line"]];
+  ["source_line", "Line"], ["changed_in", "Changed in Lekmod"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
   "lekmod_en_US", "lekmod_target", "text", "source_file"]);
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
@@ -39,8 +39,8 @@ function rememberFailedSaves() {
 }
 let saveCompletion = null, resolveSaveCompletion = null;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
-let mergeApplying = false;
-let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+let mergeApplying = false, mergeChecking = false;
+let filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
 function logUI(name, detail = "") { api("/api/event", {name, detail}).catch(() => {}); }
 
 async function api(path, body) {
@@ -260,7 +260,7 @@ function changeMode() {
 function renderFilterChoices() {
   const select = el("filter-kind");
   select.replaceChildren(new Option("Any", ""));
-  for (const item of (developer() ? ["Row", "Replace"] : ["lekmod_new", "vanilla_modified"]))
+  for (const item of (developer() ? ["Row", "Replace"] : ["lekmod_new", "vanilla_modified", "source_conflict"]))
     select.append(new Option(item, item));
   el("filter-kind-title").textContent = developer() ? "Operation" : "Type";
   el("filter-status-label").hidden = developer();
@@ -271,19 +271,27 @@ function renderFilterChoices() {
   el("filter-date-field").value = filters.date_field;
   el("filter-from").value = filters.date_from;
   el("filter-to").value = filters.date_to;
+  el("filter-version").replaceChildren(new Option("Any version", ""));
+  if (meta.version_history?.upgrade_versions?.length)
+    el("filter-version").append(new Option("Since last project update", "upgrade"));
+  for (const version of meta.version_history?.synced || [])
+    el("filter-version").append(new Option(version, version));
+  el("filter-version").value = filters.version || "";
+  el("filter-needs").checked = filters.needs_translation === "true";
+  el("filter-needs").parentElement.hidden = developer();
   el("filters-button").classList.toggle("active", Object.entries(filters).some(
     ([key, value]) => key !== "date_field" && !!value));
 }
 function categories() {
   const select = el("category");
-  select.replaceChildren();
+  select.replaceChildren(new Option("All categories", "all"));
   for (const name of locales[el("locale").value] || []) {
     const option = document.createElement("option");
     option.value = name; option.textContent = name.replace(/_/g, " ");
     select.append(option);
   }
-  select.value = (locales[el("locale").value] || []).includes(prefs.category)
-    ? prefs.category : (locales[el("locale").value] || [])[0] || "";
+  select.value = prefs.category === "all" || (locales[el("locale").value] || []).includes(prefs.category)
+    ? prefs.category : "all";
   updateBaselineNotice();
 }
 function renderColumnChoices() {
@@ -291,12 +299,12 @@ function renderColumnChoices() {
   container.replaceChildren();
   const groups = developer()
     ? [["English source", ["key", "kind", "text", "characters"]],
-       ["File and history", ["source_file", "source_line", "english_edited_at"]]]
+       ["File and history", ["source_file", "source_line", "english_edited_at", "changed_in"]]]
     : [["Identity", ["key", "classification"]],
        ["Vanilla reference", ["vanilla_en_US", "vanilla_en_US_characters", "vanilla_target"]],
        ["Lekmod source", ["lekmod_en_US", "lekmod_en_US_characters", "lekmod_target"]],
        ["Translation and review", ["translation", "translation_status", "translation_characters",
-         "english_edited_at", "translation_updated_at", "translator_note"]]];
+         "english_edited_at", "translation_updated_at", "translator_note", "changed_in"]]];
   const fields = new Map(activeColumns());
   for (const [heading, names] of groups) {
     const group = document.createElement("div");
@@ -431,10 +439,11 @@ function selectRow(row, tr) {
   tr.classList.add("selected");
   const locale = el("locale").value;
   el("selected").textContent = row.key + (developer() ? " · English source" : " · " + locale);
-  el("translation").disabled = false;
+  const sourceBlocked = !developer() && row.classification === "source_conflict";
+  el("translation").disabled = sourceBlocked;
   el("discard").disabled = true;
   el("identifier").disabled = !developer();
-  for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer();
+  for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer() || sourceBlocked;
   if (el("prefill").checked) {
     el("translation").value = developer() ? row.text
       : row.translation || row.lekmod_target || "";
@@ -451,16 +460,19 @@ function selectRow(row, tr) {
   if (developer()) {
     el("context").textContent = "English edited: " + (row.english_edited_at || "unknown") +
       ". Existing translations become stale when this text changes. New keys need a gameplay reference.";
-    el("token-help").hidden = true;
   } else {
     el("context").textContent = "Type: " + row.classification + " · status: " +
       row.translation_status + " · English edited: " + (row.english_edited_at || "unknown") +
       " · translation edited: " + (row.translation_updated_at || "unknown") +
+      (sourceBlocked ? " · Conflicting English sources need a developer review before translation." : "") +
       (row.translation_status === "stale"
         ? " · Game text falls back to English until reviewed." :
         row.translation_status === "applied" ? " · Applied to the project XML; game install is separate." : "");
+  }
+  {
     let tokens = {};
-    try { tokens = JSON.parse(row.required_format_tokens); } catch (error) {}
+    try { tokens = developer() ? row.required_format_tokens : JSON.parse(row.required_format_tokens); } catch (error) {}
+    tokens = tokens || {};
     const entries = Object.entries(tokens);
     el("token-help").hidden = !entries.length;
     el("tokens").replaceChildren();
@@ -482,7 +494,8 @@ async function load() {
   el("table-scroll").setAttribute("aria-busy", "true");
   const args = new URLSearchParams({q: el("search-input").value, offset,
     limit: pageSize(), kind: filters.kind, date_field: filters.date_field,
-    date_from: filters.date_from, date_to: filters.date_to});
+    date_from: filters.date_from, date_to: filters.date_to, version: filters.version,
+    needs_translation: filters.needs_translation});
   if (!developer()) {
     args.set("locale", el("locale").value);
     args.set("category", el("category").value);
@@ -532,6 +545,10 @@ function fillSettings() {
   el("game-path").value = prefs.game_path || meta.game.path;
   el("snapshot-url").value = prefs.snapshot_url || "";
   el("snapshot-password").value = "";
+  el("history-version").replaceChildren();
+  for (const version of meta.version_history?.available || [])
+    el("history-version").append(new Option(version, version));
+  el("carry-translations").disabled = !meta.ready;
   el("snapshot-new-password").value = "";
   el("snapshot-confirm-password").value = "";
   sectionMessage("source", meta.ready ? "Compatible source connected: " + meta.release :
@@ -597,8 +614,20 @@ async function updateDownload() {
 }
 async function refresh() {
   meta = await api("/api/meta");
+  for (let attempt = 0; meta.initializing && attempt < 600; attempt++) {
+    showConnectionLoading("The editor is open. Preparing the connected Lekmod project…");
+    el("editor-version").textContent = "v" + meta.editor_version;
+    await new Promise(resolve => setTimeout(resolve, 500));
+    meta = await api("/api/meta");
+  }
+  if (meta.initializing) throw new Error("Project preparation is taking longer than expected. See Logs.");
   el("app-loading").hidden = true;
   prefs = meta.preferences;
+  if (meta.handoff && !mergeReview) {
+    mergeReview = meta.handoff;
+    mergeChoices = {...(meta.handoff.choices || {})};
+  }
+  el("merge-button").disabled = !mergeReview?.items.length;
   el("restore-failed").hidden = !failedSaves.length;
   el("row-panel").open = prefs.panel_expanded !== false;
   locales = meta.locales;
@@ -715,15 +744,15 @@ el("settings-save").addEventListener("click", async () => {
   try {
     sectionMessage("source", "Validating and connecting the project…", "busy");
     const result = await api("/api/connect", {project_path: el("project-path").value,
-      game_path: el("game-path").value});
+      game_path: el("game-path").value, carry_translations: el("carry-translations").checked});
     if (result.restart) {
       showConnectionLoading("Connecting project and restarting the editor…");
       logUI("project-reconnect");
-      for (let attempt = 0; attempt < 90; attempt++) {
+      for (let attempt = 0; attempt < 300; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         try {
           const live = await api("/api/meta");
-          if (live.server_instance !== instance) {
+          if (!live.initializing && live.server_instance !== instance) {
             if (!live.ready) throw new Error(live.connection_error || "Project could not open");
             location.reload();
             return;
@@ -827,14 +856,23 @@ el("snapshot-cloud").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+el("history-sync").addEventListener("click", async () => {
+  const button = el("history-sync"); button.disabled = true;
+  sectionMessage("history", "Synchronizing the reviewed change index…", "busy");
+  try { const result = await api("/api/history-sync", {version: el("history-version").value});
+    meta.version_history = result.version_history; renderFilterChoices();
+    sectionMessage("history", "Comparison available in the version filter; no mod files changed."); }
+  catch (error) { sectionMessage("history", error.message, "error"); }
+  finally { button.disabled = false; }
+});
 el("mode").addEventListener("click", async () => {
   guardNavigation(async () => {
     try {
       inMerge = false; el("merge-view").hidden = true;
       await preference({mode: developer() ? "translator" : "developer"});
-      filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+      filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
       if (inLogs) closeLogs();
-      changeMode();
+      changeMode(); renderConnections();
       logUI("mode-switch"); message("Switched to " + (developer() ? "Developer" : "Translator") + " mode.");
     } catch (error) {
       message(error.message + " Connect a full compatible project in Settings.", true);
@@ -969,7 +1007,8 @@ el("filters-close").addEventListener("click", () => {
   if (from && to && from > to) { message("The end date must follow the start date.", true); return; }
   const next = {kind: el("filter-kind").value, status: developer() ? "" : el("filter-status").value,
     date_field: developer() ? "english_edited_at" : el("filter-date-field").value,
-    date_from: from, date_to: to};
+    date_from: from, date_to: to, version: el("filter-version").value,
+    needs_translation: el("filter-needs").checked ? "true" : ""};
   el("filters-dialog").close();
   guardNavigation(() => {
     filters = next; offset = 0; renderFilterChoices();
@@ -979,7 +1018,7 @@ el("filters-close").addEventListener("click", () => {
 el("filters-reset").addEventListener("click", () => {
   el("filters-dialog").close();
   guardNavigation(async () => {
-    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: ""};
+    filters = {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
     offset = 0; renderFilterChoices(); logUI("filter-changed");
     await load(); message("Filters cleared.");
   });
@@ -993,6 +1032,13 @@ el("discard-confirm").addEventListener("click", () => {
   el("discard-dialog").close();
 });
 function fillExchange() {
+  el("exchange-title").textContent = developer() ? "Import/Export English source" : "Import/Export translations";
+  el("exchange-help").textContent = developer()
+    ? "Export the primary English source. A recipient reviews changed keys and affected translations before applying."
+    : "Export only selected languages. All their saved rows are included; the recipient reviews keys before applying.";
+  el("exchange-locales").hidden = developer();
+  el("share").hidden = developer(); el("share-english").hidden = !developer();
+  el("handoff-label").textContent = developer() ? "Import an English source ZIP to review" : "Import a translation ZIP to review";
   const choices = el("exchange-locales");
   choices.replaceChildren();
   const active = el("locale").value;
@@ -1013,7 +1059,7 @@ for (const id of ["exports-close", "exports-x"])
   el(id).addEventListener("click", () => el("exports-dialog").close());
 function mergeDecisions() {
   return Object.fromEntries((mergeReview?.items || []).map(item =>
-    [item.id, mergeChoices[item.id] || item.choice]));
+    [item.id, mergeChoices[item.id] || (item.status === "stale" || item.status === "blocked" ? "keep" : "incoming")]));
 }
 function renderMerge() {
   if (!mergeReview) return;
@@ -1024,7 +1070,7 @@ function renderMerge() {
     const row = document.createElement("tr");
     const columns = [
       item.locale + " · " + item.status + "\n" + item.key,
-      item.english || "(English source unavailable)",
+      item.locale === "en_US" ? "Primary English" : item.english || "(English source unavailable)",
       (item.team || "(none)") + (item.team_gender ? "\nGender: " + item.team_gender : "") +
         (item.team_plurality ? "\nPlurality: " + item.team_plurality : "") +
         (item.team_note ? "\nNote: " + item.team_note : ""),
@@ -1036,24 +1082,47 @@ function renderMerge() {
       const cell = document.createElement("td"); cell.textContent = value;
       row.append(cell);
     }
+    const status = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "merge-status" + (["conflict"].includes(item.status) ? " warning" :
+      ["stale", "blocked"].includes(item.status) ? " blocked" : "");
+    badge.textContent = item.status_label || ({new: "Ready to add", ready: "Ready", conflict: "Review replacement",
+      stale: "Source mismatch", blocked: "Needs IDE migration"}[item.status] || item.status);
+    badge.title = item.reason || ""; status.append(badge); row.append(status);
+    const resets = document.createElement("td");
+    resets.textContent = (item.resets || []).map(locale => locale.split("_")[0]).join(", ") || "—";
+    resets.title = "Older saved translations fall back to English after this source change. Their CSV text is retained.";
+    row.append(resets);
     const cell = document.createElement("td");
-    const select = document.createElement("select");
-    const options = item.status === "new"
-      ? [["incoming", "Add incoming"], ["keep", "Skip"]]
-      : item.status === "stale"
-        ? [["review", "Review required"], ["keep", "Skip stale row"]]
-        : [["review", "Review required"], ["incoming", "Use incoming"], ["keep", "Keep current"]];
-    for (const [value, label] of options) select.append(new Option(label, value));
-    select.value = mergeChoices[item.id] || item.choice;
-    select.addEventListener("change", () => {
-      mergeChoices[item.id] = select.value; updateMergeSummary();
+    const check = document.createElement("input"); check.type = "checkbox";
+    check.disabled = ["stale", "blocked"].includes(item.status) || mergeApplying || mergeChecking;
+    check.checked = mergeDecisions()[item.id] === "incoming";
+    check.setAttribute("aria-label", "Include " + item.locale + " " + item.key);
+    check.addEventListener("change", async () => {
+      mergeChoices[item.id] = check.checked ? "incoming" : "keep";
+      if (item.locale === "en_US") {
+        mergeChecking = true;
+        updateMergeSummary();
+        for (const input of el("merge-table").querySelectorAll("input")) input.disabled = true;
+        el("merge-apply").disabled = true;
+        sectionMessage("merge", "Checking translations against the selected English changes…", "busy");
+        try {
+          const englishChoices = Object.fromEntries(Object.entries(mergeDecisions()).filter(([key]) => key.startsWith("en_US:")));
+          mergeReview = await api("/api/handoff-review", {choices: englishChoices});
+          for (const entry of mergeReview.items)
+            if (["stale", "blocked"].includes(entry.status)) mergeChoices[entry.id] = "keep";
+          sectionMessage("merge", "English dependencies checked.");
+        } catch (error) {
+          mergeChoices[item.id] = check.checked ? "keep" : "incoming";
+          message(error.message, true); sectionMessage("merge", error.message, "error");
+        } finally { mergeChecking = false; renderMerge(); }
+      } else {
+        updateMergeSummary();
+        try { await api("/api/handoff-choices", {choices: mergeDecisions()}); }
+        catch (error) { message("Could not retain merge choices: " + error.message, true); }
+      }
     });
-    cell.append(select);
-    const dates = document.createElement("small");
-    dates.className = "hint";
-    dates.textContent = "\nCurrent: " + (item.team_updated_at || "unknown") +
-      " · Incoming: " + (item.incoming_updated_at || "unknown");
-    cell.append(dates); row.append(cell);
+    cell.append(check); row.append(cell);
     body.append(row);
   }
   el("merge-prev").disabled = mergePage === 0;
@@ -1075,24 +1144,38 @@ function updateMergeSummary() {
     (mergeReview.source_commit && mergeReview.current_commit &&
      mergeReview.source_commit !== mergeReview.current_commit ?
       " Source revisions differ; each English row was checked." : "");
-  el("merge-apply").disabled = !!pending || !!savePending || mergeApplying;
+  el("merge-apply").disabled = !!pending || !!savePending || mergeApplying || mergeChecking;
+  for (const id of ["merge-clear", "merge-back", "merge-prev", "merge-next", "mode", "settings-button", "logs-button", "merge-button"])
+    if (mergeChecking) el(id).disabled = true;
+    else if (!mergeApplying) el(id).disabled = id === "merge-prev" ? mergePage === 0 :
+      id === "merge-next" ? (mergePage + 1) * 100 >= mergeReview.items.length : false;
+  const gameAvailable = meta.game.state === "installed" && !el("game-apply").disabled;
+  el("merge-destination").querySelector('option[value="project_game"]').disabled = !gameAvailable;
+  if (!gameAvailable) el("merge-destination").value = "project";
 }
 function openMerge() {
   if (!mergeReview?.items.length) return;
+  if (inLogs) closeLogs();
   inMerge = true; mergePage = 0;
+  el("merge-destination").value = !el("game-apply").disabled ? "project_game" : "project";
   renderConnections(); renderMerge();
 }
 function closeMerge() {
   inMerge = false; renderConnections();
 }
-el("merge-button").addEventListener("click", () => guardNavigation(openMerge));
+el("merge-button").addEventListener("click", () => inMerge ? closeMerge() : guardNavigation(openMerge));
+el("merge-clear").addEventListener("click", async () => {
+  try { await api("/api/handoff-clear", {}); mergeReview = null; mergeChoices = {};
+    el("merge-button").disabled = true; closeMerge(); message("Pending review cleared; saved files unchanged."); }
+  catch (error) { message(error.message, true); }
+});
 el("merge-back").addEventListener("click", closeMerge);
 el("merge-prev").addEventListener("click", () => { mergePage--; renderMerge(); });
 el("merge-next").addEventListener("click", () => { mergePage++; renderMerge(); });
 el("handoff-preview").addEventListener("click", async () => {
   const file = el("handoff-file").files[0];
   if (!file || !file.name.toLowerCase().endsWith(".zip")) {
-    sectionMessage("exchange", "Choose a translation ZIP first.", "error"); return;
+    sectionMessage("exchange", "Choose a localization ZIP first.", "error"); return;
   }
   const button = el("handoff-preview");
   button.disabled = true; button.classList.add("busy-action");
@@ -1102,7 +1185,10 @@ el("handoff-preview").addEventListener("click", async () => {
       headers: {"X-Editor-Token": token, "Content-Type": "application/zip"}, body: file});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not preview this ZIP.");
-    mergeReview = result; mergeChoices = {};
+    mergeReview = result;
+    mergeChoices = Object.fromEntries(Object.entries(mergeChoices).filter(([id]) => result.items.some(item => item.id === id)));
+    for (const item of result.items)
+      if (["stale", "blocked"].includes(item.status)) mergeChoices[item.id] = "keep";
     el("merge-button").disabled = !result.items.length;
     sectionMessage("exchange", "Reviewed " + result.locales.join(", ") +
       ": " + result.items.length + " changed rows.");
@@ -1116,26 +1202,27 @@ el("merge-apply").addEventListener("click", async () => {
   const button = el("merge-apply");
   mergeApplying = true;
   for (const id of ["mode", "settings-button", "logs-button", "merge-back",
-                    "merge-prev", "merge-next", "merge-button"])
+                    "merge-prev", "merge-next", "merge-button", "merge-clear", "merge-destination"])
     el(id).disabled = true;
-  for (const select of el("merge-table").querySelectorAll("select")) select.disabled = true;
+  for (const select of el("merge-table").querySelectorAll("input")) select.disabled = true;
   button.disabled = true; button.classList.add("busy-action");
   sectionMessage("merge", "Merging reviewed rows and rebuilding game XML…", "busy");
   try {
     const result = await api("/api/handoff-apply", {
-      handoff_id: mergeReview.handoff_id, choices: mergeDecisions()});
+      handoff_id: mergeReview.handoff_id, choices: mergeDecisions(), destination: el("merge-destination").value});
     mergeReview = null; mergeChoices = {};
     el("merge-button").disabled = true;
     inMerge = false;
     meta = await api("/api/meta"); updateHistory(meta); renderConnections();
     await load();
-    message(result.applied ? "Translations merged and project XML rebuilt. Review the project diff." :
+    if (result.game_error) message("Project saved; game copy failed: " + result.game_error, true);
+    else message(result.applied ? (result.game_result ? "Merged into project and installed game. Restart Civilization V." : "Merged into the connected project and rebuilt its XML. Review the project diff.") :
       "Review complete. No rows needed changing.");
   } catch (error) { sectionMessage("merge", error.message, "error"); message(error.message, true);
     button.disabled = false;
   } finally {
     mergeApplying = false;
-    for (const id of ["mode", "settings-button", "logs-button", "merge-back"])
+    for (const id of ["mode", "settings-button", "logs-button", "merge-back", "merge-clear", "merge-destination"])
       el(id).disabled = false;
     el("merge-button").disabled = !mergeReview?.items.length;
     if (mergeReview) renderMerge();
@@ -1180,7 +1267,7 @@ function updateSavedRow(pending, result) {
   if (el("locale").value === pending.locale) {
     for (const row of rows) {
       row.approved_sha256 = result.approved_sha256;
-      if (row.key === pending.key && el("category").value === pending.category) {
+      if (row.key === pending.key && (el("category").value === pending.category || el("category").value === "all")) {
         row.translation = pending.translation;
         row.translation_gender = pending.translation_gender;
         row.translation_plurality = pending.translation_plurality;
@@ -1226,7 +1313,7 @@ async function saveCurrent() {
       el("table-loading").hidden = true;
     }
   }
-  const pending = {locale: el("locale").value, category: el("category").value,
+  const pending = {locale: el("locale").value, category: chosen.category || el("category").value,
     key: chosen.key, source_fingerprint: chosen.source_fingerprint,
     english_source_sha256: chosen.english_source_sha256,
     approved_sha256: chosen.approved_sha256, translation: el("translation").value,
@@ -1371,7 +1458,7 @@ el("share").addEventListener("click", () => guardNavigation(() => {
   logUI("translation-export");
   location.href = "/api/export?locales=" + encodeURIComponent(selected.join(","));
   message("ZIP download started for " + selected.join(", ") +
-    ". A recipient can import it using Exchange → Preview merge.");
+    ". A recipient can import it using Import/Export → Preview merge.");
 }));
 el("share-english").addEventListener("click", () => guardNavigation(() => {
   logUI("english-export");
@@ -1517,7 +1604,7 @@ async function followEditorUpdate() {
   } catch (_) {
     el("update-status").textContent = "The editor is restarting. This page will reconnect automatically…";
   }
-  if (Date.now() - editorUpdateStarted > 210000) {
+  if (Date.now() - editorUpdateStarted > 600000) {
     editorUpdateFailed("The editor did not reopen. Double-click its EXE to retry.");
     return;
   }

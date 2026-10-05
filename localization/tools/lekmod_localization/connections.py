@@ -110,8 +110,10 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
     return candidate
 
 
-def project_root(home: Path = APP_HOME) -> Path:
+def project_root(home: Path = APP_HOME, *, editor: bool = True) -> Path:
     """Select the contributor's full project or the included source bundle."""
+    if not editor:
+        return home
     configured = settings(home)["project_path"]
     return Path(configured).expanduser().resolve() if configured else home
 
@@ -426,7 +428,7 @@ def extract_source_archive(archive: Path, destination: Path, *,
 def download_compatible_source(version: str, home: Path = APP_HOME, *,
                                progress: Callable[[str, int, int | None], None] | None = None,
                                cancelled: Callable[[], bool] | None = None) -> Path:
-    """Download the localization branch for the one reviewed release only."""
+    """Build a separate reviewed release project; never overwrite earlier work."""
     if version not in editor_manifest(home)["compatible_releases"]:
         raise ValueError("This version has no compatible localization baseline. "
                          "A maintainer must migrate it before it can be edited.")
@@ -461,6 +463,31 @@ def download_compatible_source(version: str, home: Path = APP_HOME, *,
         content = temporary_path / "project"
         content.mkdir()
         extract_source_archive(archive, content, progress=progress, cancelled=cancelled)
+        if release_version(content) != version:
+            revision = editor_manifest(home).get('release_sources', {}).get(version)
+            if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
+                raise ValueError('Selected release has no reviewed source revision')
+            upstream_archive = temporary_path / 'official.zip'
+            request = urllib.request.Request(
+                'https://api.github.com/repos/EnormousApplePie/Lekmod/zipball/' + revision,
+                headers={'User-Agent': 'Lekmod-Localization-Editor'})
+            with urllib.request.urlopen(request, timeout=45) as response, upstream_archive.open('wb') as output:
+                size = 0
+                expected = int(response.headers.get('Content-Length') or 0) or None
+                while block := response.read(1024 * 1024):
+                    if cancelled and cancelled(): raise DownloadCancelled('download canceled; earlier projects are unchanged')
+                    size += len(block)
+                    if size > 750 * 1024 * 1024: raise ValueError('official source exceeds 750 MB')
+                    output.write(block)
+                    if progress: progress('downloading official ' + version, size, expected)
+            official = temporary_path / 'official'; official.mkdir()
+            extract_source_archive(upstream_archive, official, progress=progress, cancelled=cancelled)
+            shutil.rmtree(content / 'LEKMOD')
+            shutil.move(str(official / 'LEKMOD'), str(content / 'LEKMOD'))
+            from sync_primary_english import bootstrap
+            english = content / 'localization/en_US/primary.xml'
+            english.unlink()
+            bootstrap(english, content / 'LEKMOD/Override/CIV5Units_Mongol.xml')
         if progress:
             progress("verifying", 0, None)
         info = validate_project(content, full=True)

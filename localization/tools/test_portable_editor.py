@@ -78,6 +78,10 @@ def start_editor(root: Path, port: int, log: Path) -> tuple[subprocess.Popen, st
             token = re.search(r'<meta name="editor-token" content="([^"]+)">', html)
             if not token:
                 raise RuntimeError("editor page has no request token")
+            metadata = json.loads(get(base + '/api/meta'))
+            if metadata.get('initializing'):
+                time.sleep(.25)
+                continue
             return process, base, token.group(1)
         except (URLError, TimeoutError):
             time.sleep(1)
@@ -166,7 +170,7 @@ def main() -> int:
             for _ in range(120):
                 try:
                     live = json.loads(get(base + "/api/meta"))
-                    if live["server_instance"] != meta["server_instance"] and live["ready"]:
+                    if not live.get('initializing') and live["server_instance"] != meta["server_instance"] and live["ready"]:
                         break
                 except OSError:
                     # Closing the old Windows server can reset a request mid-flight.

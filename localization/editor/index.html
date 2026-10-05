@@ -68,7 +68,10 @@
     #merge-view .merge-scroll { flex: 1; min-height: 120px; overflow: auto; border: 1px solid var(--divider); border-radius: 7px; }
     #merge-table { width: 100%; min-width: 980px; }
     #merge-table td { max-width: 340px; white-space: pre-wrap; }
-    #merge-table select { width: 100%; }
+    #merge-table input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+    .merge-status { border-radius: 5px; background: #e7f2ea; padding: 3px 7px; font-size: .82rem; }
+    .merge-status.warning { background: #fff0c9; }
+    .merge-status.blocked { background: #f6e4e2; }
     #merge-view .foot { border-top: 1px solid var(--divider); padding-top: 12px; display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
     .exchange-locales { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: 6px; }
     .exchange-locales label { display: flex; gap: 6px; align-items: center; }
@@ -194,7 +197,7 @@
     <h1>Lekmod Localization Editor <small id="editor-version"></small></h1>
     <span id="update-badge" class="badge" hidden>Editor update available</span>
     <button id="mode" class="mode-chip" data-mode="translator" title="Switch between Translator and Developer" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="mode-symbol" d="M4 5h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3v-3H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm2 9 2.5-6 2.5 6m-4-2h3m3-4h4m-2 0c0 3-1 5-3 6m1-4c.5 2 1.5 3 3 4"/></svg><span id="mode-name">Translator</span></button>
-    <button id="merge-button" disabled title="Review an imported translation ZIP">Merge</button>
+    <button id="merge-button" disabled title="Review imported English and translation ZIPs">Merge</button>
     <button id="logs-button" title="Open the local action log">Logs</button>
     <button id="settings-button" title="Connections and settings" aria-label="Connections and settings">⚙ Settings</button>
   </div>
@@ -263,7 +266,7 @@
         <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
         <button id="game-apply" disabled>Apply to installed game</button>
         <button id="run-checks" hidden>Run checks</button>
-        <button id="exports-button">Exchange…</button>
+        <button id="exports-button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg> Import/Export</button>
       </div>
       <button id="restore-failed" hidden>Restore translation after failed save</button>
       <p id="message" role="status"></p>
@@ -271,12 +274,12 @@
     </details>
   </div>
   <section id="merge-view" class="card" hidden>
-    <div class="quick"><h2>Merge translation review</h2><button id="merge-back">Back to editor</button></div>
+    <div class="quick"><h2>Merge review</h2><button id="merge-clear">Clear review</button><button id="merge-back">Back to editor</button></div>
     <p id="merge-summary" class="hint"></p>
     <nav class="pager" aria-label="Merge review pages"><button id="merge-prev">‹ Previous</button><span id="merge-count"></span><button id="merge-next">Next ›</button></nav>
-    <div class="merge-scroll"><table id="merge-table"><thead><tr><th>Language / key</th><th>Lekmod EN</th><th>Current translation</th><th>Incoming translation</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="merge-scroll"><table id="merge-table"><thead><tr><th>Language / key</th><th>Lekmod EN</th><th>Current text</th><th>Incoming text</th><th>Status</th><th>Translations reset</th><th>Include</th></tr></thead><tbody></tbody></table></div>
     <p id="merge-status" class="section-status" role="status" aria-live="polite"></p>
-    <div class="foot"><button id="merge-apply" class="primary" disabled>Apply reviewed changes</button></div>
+    <div class="foot"><label class="inline">Destination<select id="merge-destination"><option value="project_game">Project and installed game</option><option value="project">Project folder</option></select></label><button id="merge-apply" class="primary" disabled>Apply reviewed changes</button></div>
   </section>
   <section id="logs-view" class="card" hidden><div class="quick"><h2>Action log</h2><button id="logs-back">Back to editor</button><button id="logs-download">Download log</button></div><p class="hint">Actions and errors are recorded locally. Text, passwords, and snapshot contents are excluded.</p><pre id="logs-list"></pre></section>
 </main>
@@ -290,6 +293,8 @@
       <p class="hint">Connect a complete compatible Lekmod project. A clean game installation alone cannot supply its English source or localization tools.</p>
       <p id="source-status" class="section-status" role="status" aria-live="polite"></p>
       <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Choose a compatible project folder"></label><button id="project-browse">Browse…</button></div>
+      <label class="inline"><input id="carry-translations" type="checkbox" checked> Carry saved translations when switching projects</label>
+      <p class="hint">The earlier project is kept. Matching translations continue working; changed English falls back until translated again. Unsaved edits must be saved or discarded before switching.</p>
       <div class="row"><label>Get a compatible Lekmod version<select id="project-version"><option>Loading available versions…</option></select></label><button id="project-download">Download</button></div>
       <div id="project-progress-group" class="progress-group" hidden><progress id="project-progress"></progress><p id="project-progress-text" class="hint"></p><button id="project-cancel" type="button">Cancel download</button></div>
       <p class="hint">Downloads into this editor's <code>localization/workspace/projects/&lt;version&gt;</code> folder. Existing projects are reused after validation and are never overwritten. Earlier releases need a reviewed localization migration.</p>
@@ -303,20 +308,22 @@
     </div>
     <div class="settings-group"><details id="vanilla-details"><summary>Vanilla reference <span id="vanilla-summary" class="hint">Optional comparison: original vanilla text is not loaded.</span></summary>
       <div class="accordion-body"><p id="snapshot-status" class="section-status" role="status" aria-live="polite"></p>
-        <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
-        <div class="row"><button id="snapshot-import">Import and verify snapshot</button><button id="snapshot-reset">Clear inputs</button></div>
-        <strong>Share an encrypted copy</strong>
-        <p class="hint">Import and verify your local snapshot above. Choose a password of at least 16 characters. Only the encrypted .enc file will be downloaded for upload to your storage provider.</p>
-        <label>New snapshot password<input id="snapshot-new-password" type="password" autocomplete="new-password"></label>
-        <label>Repeat password<input id="snapshot-confirm-password" type="password" autocomplete="new-password"></label>
-        <button id="snapshot-encrypt">Encrypt and download .enc</button>
-        <p class="hint">Or download a previously encrypted snapshot. Enter a direct HTTPS link and decryption password; the password is never saved.</p>
+        <p class="hint">Download the team's encrypted reference. Its password is never saved.</p>
         <label>Encrypted snapshot link<span class="input-row"><input id="snapshot-url" type="url" placeholder="https://www.dropbox.com/...&dl=1"><button id="snapshot-url-clear" type="button" class="icon-control" title="Clear snapshot link" aria-label="Clear snapshot link">×</button></span></label>
         <label>Snapshot password<input id="snapshot-password" type="password" autocomplete="off"></label>
         <button id="snapshot-cloud">Download, decrypt and verify</button>
+        <hr>
+        <label>Optional local vanilla snapshot (.json.gz)<input id="snapshot-file" type="file" accept=".gz,.json.gz"></label>
+        <div class="row"><button id="snapshot-import">Import and verify snapshot</button><button id="snapshot-reset">Clear inputs</button></div>
+        <div hidden><strong>Share an encrypted copy</strong>
+        <p class="hint">Import and verify your local snapshot above. Choose a password of at least 16 characters. Only the encrypted .enc file will be downloaded for upload to your storage provider.</p>
+        <label>New snapshot password<input id="snapshot-new-password" type="password" autocomplete="new-password"></label>
+        <label>Repeat password<input id="snapshot-confirm-password" type="password" autocomplete="new-password"></label>
+        <button id="snapshot-encrypt">Encrypt and download .enc</button></div>
         <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
       </div></details>
     </div>
+    <div class="settings-group"><h2>Release comparisons</h2><p class="hint">Updates include every intermediate release. Add an older comparison here without downloading its full mod.</p><label>Compare another Lekmod version<select id="history-version"></select></label><button id="history-sync">Synchronize comparison</button><p id="history-status" class="section-status" role="status"></p></div>
     <div class="settings-group editor-update-group"><h2>Editor updates</h2>
       <p id="update-failure" class="section-status error" role="alert" hidden></p>
       <p class="hint"><span id="update-status">Check for a newer editor release.</span> <a id="update-link" target="_blank" rel="noopener" hidden>Release page</a></p>
@@ -326,9 +333,19 @@
   </section>
 </dialog>
 <dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="column-groups"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
-<dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option></select></label><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
+<dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option><option value="needs_source_review">Needs source review</option></select></label><div class="filter-dates"><label>Changed in Lekmod version<select id="filter-version"><option value="">Any version</option></select></label><label class="inline"><input id="filter-needs" type="checkbox"> Needs localization only</label></div><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
 <dialog id="create-key-dialog"><section><div class="dialog-heading"><h2>Create new English text key</h2><button id="create-x" type="button" class="icon-control" aria-label="Close without creating a key" title="Close without creating">×</button></div><p class="hint">Creates a new Row in the primary English source. The key appears in game only when gameplay XML, SQL or Lua refers to it.</p><label>Create TXT_KEY identifier<input id="create-identifier" placeholder="TXT_KEY_MY_NEW_DESCRIPTION" autocomplete="off"></label><label>English source text<textarea id="create-text"></textarea></label><div class="fields"><label>Source file<input id="create-source" disabled></label><label>Line<input id="create-line" disabled></label><label>Operation<select id="create-operation" disabled><option>Row</option></select></label></div><p id="create-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="create-cancel">Cancel</button><button id="create-confirm" class="primary">Create key</button></div></section></dialog>
-<dialog id="exports-dialog"><section><div class="dialog-heading"><h2>Exchange translations</h2><button id="exports-x" type="button" class="icon-control" aria-label="Close exchange" title="Close">×</button></div><p>Export only the checked languages. Each CSV contains all saved rows for that language, so the recipient must review and merge keys rather than replace a shared file.</p><div id="exchange-locales" class="exchange-locales"></div><button id="share">Download selected translations ZIP</button><button id="share-english" hidden>Download English source ZIP</button><hr><label>Import a translation ZIP to review<input id="handoff-file" type="file" accept=".zip,application/zip"></label><button id="handoff-preview">Preview merge</button><p id="exchange-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="exports-close">Done</button></div></section></dialog>
+<dialog id="exports-dialog"><section>
+  <div class="dialog-heading"><h2 id="exchange-title">Import/Export translations</h2><button id="exports-x" type="button" class="icon-control" aria-label="Close import/export" title="Close">×</button></div>
+  <p id="exchange-help">Export the selected languages, then review incoming rows in Merge.</p>
+  <div id="exchange-locales" class="exchange-locales"></div>
+  <div class="row"><button id="share">Download selected translations ZIP</button><button id="share-english" hidden>Download English source ZIP</button></div>
+  <hr>
+  <label><span id="handoff-label">Import a translation ZIP to review</span><input id="handoff-file" type="file" accept=".zip,application/zip"></label>
+  <p class="hint">Imports join the pending review. English is applied before matching translations. No files change until Apply.</p>
+  <button id="handoff-preview">Preview merge</button><p id="exchange-status" class="section-status" role="status" aria-live="polite"></p>
+  <div class="foot"><button id="exports-close">Done</button></div>
+</section></dialog>
 <script src="/app.js" defer></script>
 </body>
 </html>
