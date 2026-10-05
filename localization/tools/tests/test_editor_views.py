@@ -130,6 +130,21 @@ class EditorViewTests(unittest.TestCase):
         with self.assertRaises(CatalogError):
             page_slice(entries, -1, "50")
 
+    def test_local_date_filter_compares_instants_and_keeps_dst_boundaries(self):
+        """Prague's March 29 is a 23-hour local day; sender offsets are irrelevant."""
+        bounds = {'date_field': 'translation_updated_at',
+                  'date_from': '2026-03-29', 'date_to': '2026-03-29',
+                  'date_start_utc': '2026-03-28T23:00:00Z',
+                  'date_end_utc': '2026-03-29T22:00:00Z'}
+        for instant in ('2026-03-28T23:00:00Z', '2026-03-28T20:00:00-03:00',
+                        '2026-03-29T21:59:59.999999+00:00'):
+            self.assertTrue(matches_filters({'translation_updated_at': instant}, bounds, primary=False))
+        for instant in ('2026-03-28T22:59:59Z', '2026-03-29T22:00:00Z', ''):
+            self.assertFalse(matches_filters({'translation_updated_at': instant}, bounds, primary=False))
+        with self.assertRaisesRegex(CatalogError, 'invalid local date boundary'):
+            matches_filters({'translation_updated_at': '2026-03-29T13:10:00-03:00'},
+                            {**bounds, 'date_start_utc': '2026-03-29T00:00:00'}, primary=False)
+
     def test_parallel_editor_and_ide_changes_cannot_silently_overwrite(self):
         """Reject a save made against an outdated source or approval CSV."""
         import hashlib

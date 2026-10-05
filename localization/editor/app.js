@@ -18,6 +18,31 @@ const developerColumns = [["key", "Key"], ["kind", "Operation"],
   ["source_line", "Line"], ["changed_in", "Changed in Lekmod"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
   "lekmod_en_US", "lekmod_target", "text", "source_file"]);
+const dateFields = new Set(["english_edited_at", "translation_updated_at"]);
+function localEditTime(value) {
+  if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.split("-").reverse().join(".");
+  // A timestamp without an offset is ambiguous when contributors live abroad.
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return "Time zone not recorded";
+  const instant = new Date(value);
+  if (Number.isNaN(instant.getTime())) return "Date unavailable";
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit",
+    minute: "2-digit", hourCycle: "h23"
+  }).formatToParts(instant).map(part => [part.type, part.value]));
+  return `${parts.day}.${parts.month}.${parts.year} / ${parts.hour}:${parts.minute}`;
+}
+function editTimeTooltip(value) {
+  const instant = new Date(value);
+  if (!value || Number.isNaN(instant.getTime()) || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return value;
+  return new Intl.DateTimeFormat(undefined, {dateStyle: "long", timeStyle: "long"}).format(instant) +
+    " · " + Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+function localDateBoundary(value, end = false) {
+  const [year, month, day] = value.split("-").map(Number);
+  // Next local midnight is exclusive, including 23/25-hour daylight-saving days.
+  return new Date(year, month - 1, day + (end ? 1 : 0)).toISOString();
+}
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
 let visible = new Set(), widths = {}, searchTimer, requestId = 0;
 let toastTimer;
@@ -411,8 +436,8 @@ function renderTable(rows) {
         });
         content.append(span, copy); td.append(content);
       } else {
-        td.textContent = value;
-        if (value) td.title = value;
+        td.textContent = dateFields.has(field) ? localEditTime(value) : value;
+        if (value) td.title = dateFields.has(field) ? editTimeTooltip(value) : value;
       }
       tr.append(td);
     }
@@ -462,12 +487,12 @@ function selectRow(row, tr) {
   savedDraft = captureDraft();
   markDraft();
   if (developer()) {
-    el("context").textContent = "English edited: " + (row.english_edited_at || "unknown") +
+    el("context").textContent = "English edited: " + (localEditTime(row.english_edited_at) || "unknown") +
       ". Existing translations become stale when this text changes. New keys need a gameplay reference.";
   } else {
     el("context").textContent = "Type: " + row.classification + " · status: " +
-      row.translation_status + " · English edited: " + (row.english_edited_at || "unknown") +
-      " · translation edited: " + (row.translation_updated_at || "unknown") +
+      row.translation_status + " · English edited: " + (localEditTime(row.english_edited_at) || "unknown") +
+      " · translation edited: " + (localEditTime(row.translation_updated_at) || "unknown") +
       (sourceBlocked ? " · Conflicting English sources need a developer review before translation." : "") +
       (row.translation_status === "stale"
         ? " · Game text falls back to English until reviewed." :
@@ -500,6 +525,8 @@ async function load() {
     limit: pageSize(), kind: filters.kind, date_field: filters.date_field,
     date_from: filters.date_from, date_to: filters.date_to, version: filters.version,
     needs_translation: filters.needs_translation});
+  if (filters.date_from) args.set("date_start_utc", localDateBoundary(filters.date_from));
+  if (filters.date_to) args.set("date_end_utc", localDateBoundary(filters.date_to, true));
   if (!developer()) {
     args.set("locale", el("locale").value);
     args.set("category", el("category").value);
@@ -1052,7 +1079,7 @@ async function openLogs() {
   try {
     const result = await api("/api/logs");
     el("logs-list").textContent = result.events.map(event =>
-      event.at + "  " + event.action + "  " + event.result +
+      localEditTime(event.at) + "  " + event.action + "  " + event.result +
       (event.detail ? " · " + event.detail : "")).join("\n") || "No actions recorded yet.";
   } catch (error) { message(error.message, true); }
 }

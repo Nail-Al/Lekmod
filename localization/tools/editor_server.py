@@ -199,7 +199,7 @@ def page_slice(items: list[dict], offset: int, limit: str) -> list[dict]:
 
 
 def matches_filters(row: dict, filters: dict, *, primary: bool) -> bool:
-    """Apply exact category/status and inclusive UTC date filters."""
+    """Use the viewer's local day boundaries; old clients retain UTC day filters."""
     field = "kind" if primary else "classification"
     if filters.get("kind") and row.get(field) != filters["kind"]:
         return False
@@ -209,6 +209,24 @@ def matches_filters(row: dict, filters: dict, *, primary: bool) -> bool:
     if column not in ({"english_edited_at"} if primary else
                       {"english_edited_at", "translation_updated_at"}):
         raise CatalogError("invalid date field")
+    if filters.get('date_start_utc') or filters.get('date_end_utc'):
+        boundaries = {}
+        for name in ('date_start_utc', 'date_end_utc'):
+            if filters.get(name):
+                try:
+                    boundary = datetime.fromisoformat(filters[name].replace('Z', '+00:00'))
+                    if boundary.tzinfo is None: raise ValueError('missing time zone')
+                    boundaries[name] = boundary
+                except (ValueError, TypeError) as error:
+                    raise CatalogError('invalid local date boundary') from error
+        try:
+            current = datetime.fromisoformat(row.get(column, '').replace('Z', '+00:00'))
+        except ValueError:
+            return False
+        if current.tzinfo is not None:
+            return not ((boundaries.get('date_start_utc') and current < boundaries['date_start_utc']) or
+                        (boundaries.get('date_end_utc') and current >= boundaries['date_end_utc']))
+        # Legacy calendar-only records have no instant to convert; retain their date.
     for param in ("date_from", "date_to"):
         boundary = filters.get(param, "")
         if boundary:
@@ -1406,14 +1424,14 @@ def make_handler(editor: Editor, token: str, port: int):
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
                     filters = {name: one(name) for name in
-                               ("kind", "status", "date_field", "date_from", "date_to", "version", "needs_translation")}
+                               ("kind", "status", "date_field", "date_from", "date_to", "date_start_utc", "date_end_utc", "version", "needs_translation")}
                     self.respond(200, editor.rows(one("locale"), one("category"), one("q"),
                                                   int(one("offset", "0")), one("limit", "100"), filters))
                 elif url.path == "/api/primary":
                     if not editor.ready:
                         raise CatalogError("connect a compatible Lekmod project in Settings")
                     filters = {name: one(name) for name in
-                               ("kind", "date_field", "date_from", "date_to", "version")}
+                               ("kind", "date_field", "date_from", "date_to", "date_start_utc", "date_end_utc", "version")}
                     self.respond(200, editor.primary(one("q"), int(one("offset", "0")),
                                                      one("limit", "100"), filters))
                 elif url.path == "/api/primary-create-info":
