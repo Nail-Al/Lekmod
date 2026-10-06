@@ -176,7 +176,7 @@ function hasUnsaved() {
 }
 function markDraft() {
   const dirty = hasUnsaved();
-  el("discard").disabled = applyPending || (!dirty && !meta?.checkpoint_dirty);
+  el("discard").disabled = applyPending || historyPending || (!dirty && !meta?.checkpoint_dirty);
   el("save").disabled = !meta?.ready || !!draftWrite || checkpointPending || historyPending;
   el("undo").disabled = applyPending || historyPending || (!dirty && !meta?.draft_undo_available);
   clearTimeout(autoSaveTimer);
@@ -1573,6 +1573,7 @@ function draftPayload(row, context, form) {
     reverted: !row.draft_create && JSON.stringify(edit) === JSON.stringify(row.applied_edit)};
 }
 function reflectDraft(row, edit, result, context) {
+  const gameKey = row.game_key ?? row.key;
   row.draft_revision = result.entry?.revision || 0;
   row.draft_slot = result.entry?.slot || row.draft_slot;
   row.has_local_draft = !!result.entry?.payload;
@@ -1592,8 +1593,9 @@ function reflectDraft(row, edit, result, context) {
   }
   const expectedText = context.mode === "developer" ? edit.text : edit.text || row.lekmod_en_US;
   const current = row.game_value;
+  row.game_key = gameKey;
   row.synced_to = {project: !row.has_local_draft, game: row.synced_to?.game === null ? null :
-    !!(current && current.Text === (expectedText.trim() ? expectedText : "\u00a0") &&
+    !!(current && gameKey === row.key && current.Text === (expectedText.trim() ? expectedText : "\u00a0") &&
       (context.mode === "developer" || ((current.Gender || "") === (edit.text ? edit.gender : row.lekmod_en_US_gender || "") &&
         (current.Plurality || "") === (edit.text ? edit.plurality : row.lekmod_en_US_plurality || ""))))};
 }
@@ -1670,7 +1672,7 @@ async function pollApply() {
     const target = el("save-state");
     target.hidden = !applyPending && state.state !== "error";
     target.className = "section-status " + (applyPending ? "busy" : "error");
-    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " Your local drafts are retained." :
+    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " See Synced to for the state of each destination." :
       state.phase + " · " + state.count + " saved drafts. You can keep editing.";
     updateHistory(state); renderConnections();
     if (applyPending) { applyTimer = setTimeout(pollApply, 700); return; }

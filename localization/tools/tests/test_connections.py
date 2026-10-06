@@ -19,6 +19,9 @@ from lekmod_localization.connections import (
 )
 
 
+from lekmod_localization.game_process import GameRunningError
+
+
 class ConnectionTests(unittest.TestCase):
     def setUp(self):
         """Build a small release and installed Civ V DLC in separate folders."""
@@ -50,6 +53,18 @@ class ConnectionTests(unittest.TestCase):
                           '<Language_en_US><Row Tag="TXT_KEY_TEST"><Text>old</Text></Row>'
                           '</Language_en_US></GameData>', encoding="utf-8")
         self.target = target
+
+    def test_game_started_during_build_blocks_final_replacement_and_retry_succeeds(self):
+        """The second process check catches a game opened after the first check."""
+        previous = self.target.read_bytes()
+        with patch('lekmod_localization.game_process.require_game_closed',
+                   side_effect=[None, GameRunningError(['CivilizationV.exe'])]) as check:
+            with self.assertRaises(GameRunningError):
+                apply_game(self.project, self.game, self.installed.name, self.home)
+            self.assertEqual(check.call_count, 2)
+        self.assertEqual(self.target.read_bytes(), previous)
+        self.assertFalse(list(self.target.parent.glob('.lekmod-localization.*')))
+        self.assertTrue(apply_game(self.project, self.game, self.installed.name, self.home)['changed'])
 
     def test_matching_release_updates_only_language_xml_with_backup(self):
         """A local game test is reversible and avoids unrelated game files."""

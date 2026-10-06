@@ -1026,6 +1026,7 @@ class Editor:
             bool(valid and current and all(current.get(name, '') == value for name, value in expected.items())))
         item['synced_to'] = {'project': not local, 'game': game}
         item['game_value'] = current
+        item['game_key'] = item['key']
         if developer:
             item['entity_status'] = 'draft' if local else 'applied'
 

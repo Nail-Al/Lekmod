@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import io
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -25,6 +26,36 @@ def edit(text, identifier=''):
 
 
 class DraftStoreTests(unittest.TestCase):
+    def test_v024_cleared_draft_history_survives_version_migration(self):
+        """Old NULL draft rows still have useful Undo/Redo actions."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'drafts.sqlite3'
+            payload = {'mode': 'translator', 'locale': 'RU_RU', 'key': 'TXT_KEY_ONE',
+                       'index': -1, 'create': False, 'base': {'approval': None},
+                       'source_fingerprint': 'a' * 64, 'edit': edit('Legacy edit')}
+            with sqlite3.connect(path) as db:
+                db.executescript('''
+                    CREATE TABLE state (id INTEGER PRIMARY KEY, revision INTEGER, cursor INTEGER);
+                    INSERT INTO state VALUES (1, 2, 2);
+                    CREATE TABLE drafts (slot TEXT PRIMARY KEY, revision INTEGER, payload TEXT, updated_at TEXT);
+                    CREATE TABLE history (id INTEGER PRIMARY KEY, slot TEXT, before TEXT, after TEXT, edit_group TEXT);
+                ''')
+                slot = 'T:RU_RU:TXT_KEY_ONE'
+                db.execute('INSERT INTO drafts VALUES (?,2,NULL,?)', (slot, '2026-10-06'))
+                db.execute('INSERT INTO history VALUES (1,?,NULL,?,?)', (slot, json.dumps(payload), 'first'))
+                db.execute('INSERT INTO history VALUES (2,?,?,NULL,?)', (slot, json.dumps(payload), 'clear'))
+            store = DraftStore(path)
+            self.assertEqual(store.entries(), [])
+            store.replay(undo=True)
+            self.assertEqual(store.entries()[0]['payload']['edit']['text'], 'Legacy edit')
+            store.replay(undo=True)
+            self.assertEqual(store.entries(), [])
+            store.replay(undo=False)
+            self.assertEqual(store.entries()[0]['payload']['edit']['text'], 'Legacy edit')
+            store.replay(undo=False)
+            self.assertEqual(store.entries(), [])
+            self.assertFalse(DraftStore(path).status()['draft_redo_available'])
+
     def test_restart_undo_revision_and_discard_are_durable(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'drafts.sqlite3'

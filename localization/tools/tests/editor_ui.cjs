@@ -84,7 +84,7 @@ async function wait(fn,label){
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;};
  w.HTMLElement.prototype.setPointerCapture=function(){};
- w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorRefresh=refresh; window.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
+ w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorRefresh=refresh; window.editorReflectDraft=reflectDraft; window.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
  function select(i){d.querySelectorAll("tbody tr")[i].click();}
  function input(text){e("translation").value=text;e("translation").dispatchEvent(new w.Event("input",{bubbles:true}));}
  function hotkey(key){d.dispatchEvent(new w.KeyboardEvent("keydown",{key,ctrlKey:true,bubbles:true}));}
@@ -125,6 +125,10 @@ async function wait(fn,label){
  assert(!d.querySelector('thead th[data-field="synced_to"]'),"Synced to defaults off with one connected destination");
  e("mode").click();await wait(()=>e("mode-name").textContent==="Developer"&&e("table-loading").hidden,"Developer");
  assert(d.querySelector('thead th[data-field="entity_status"]'),"Developer Status is visible by default");
+ const renamed={key:"TXT_KEY_OLD",game_value:{Text:"English",Gender:"",Plurality:""},synced_to:{project:true,game:true}};
+ w.editorReflectDraft(renamed,{...blank(),identifier:"TXT_KEY_NEW",text:"English"},
+  {entry:{slot:"P:0:TXT_KEY_OLD",revision:1,payload:{mode:"developer",edit:{...blank(),identifier:"TXT_KEY_NEW",text:"English"}}}}, {mode:"developer"});
+ assert.equal(renamed.synced_to.game,false,"A renamed entity cannot match the old game's key");
  assert.deepEqual(errors,[]);
  dom.window.close();
  console.log("Editor UI: autosave, explicit Save/restore, Ctrl+Z/Ctrl+Y, branching, split actions, destination defaults and Developer Status passed.");

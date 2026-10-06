@@ -38,12 +38,22 @@ class DraftStore:
                 CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
             """)
             if not db.execute("SELECT 1 FROM migrations WHERE name='versions'").fetchone():
-                for row in db.execute("SELECT * FROM drafts WHERE payload IS NOT NULL").fetchall():
+                for row in db.execute("SELECT * FROM drafts").fetchall():
                     value = self.decode(row['payload'])
-                    baseline = self.baseline(value)
+                    seed = value
+                    if seed is None:
+                        for action in db.execute('SELECT before, after FROM history WHERE slot=? ORDER BY id DESC',
+                                                 (row['slot'],)).fetchall():
+                            seed = self.decode(action['after']) or self.decode(action['before'])
+                            if seed is not None:
+                                break
+                    if seed is None:
+                        continue
+                    baseline = self.baseline(seed)
+                    current = value if value is not None else baseline
                     db.execute('INSERT OR IGNORE INTO versions VALUES (?,?,?,?,?,?)',
-                        (row['slot'], self.encode(value), self.encode(baseline), self.encode(baseline),
-                         self.signature(value), self.signature(baseline)))
+                        (row['slot'], self.encode(current), self.encode(baseline), self.encode(baseline),
+                         self.signature(current), self.signature(baseline)))
                 for row in db.execute('SELECT * FROM history').fetchall():
                     version = db.execute('SELECT baseline FROM versions WHERE slot=?', (row['slot'],)).fetchone()
                     if version:
