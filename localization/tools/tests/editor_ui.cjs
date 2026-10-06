@@ -12,6 +12,7 @@ const prefs = {mode:"translator",onboarded:true,locale:"RU_RU",category:"all",pr
   translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
 let connected=true, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null;
 const requests=[], history=[], errors=[], values={};
+let debug=()=>({});
 const keys=Array.from({length:4},(_,i)=>"TXT_KEY_UI_"+(i+1));
 const blank=()=>({text:"",gender:"",plurality:"",note:"",identifier:""});
 function status(){return {draft_count:Object.values(values).filter(v=>v.text||v.note).length,
@@ -69,13 +70,14 @@ async function response(url,options={}){
 }
 async function wait(fn,label){
  for(let i=0;i<600;i++){if(fn())return;await new Promise(r=>setTimeout(r,15));}
- throw Error("Timed out: "+label);
+ throw Error("Timed out: "+label+" "+JSON.stringify({cursor,history:history.length,requests:requests.slice(-8),details:debug()}));
 }
 (async()=>{
  const vc=new VirtualConsole();vc.on("jsdomError",e=>{if(!/Not implemented: window|navigation/.test(e.message))errors.push(e.message);});
  const dom=new JSDOM(fs.readFileSync(path.join(root,"localization/editor/index.html"),"utf8"),{
   url:"http://localhost/",runScripts:"outside-only",pretendToBeVisual:true,virtualConsole:vc});
  const w=dom.window,d=w.document,e=id=>d.getElementById(id);
+ debug=()=>({undoDisabled:e("undo").disabled,workspaceHidden:e("workspace").hidden,dialogs:[...d.querySelectorAll("dialog[open]")].map(x=>x.id),state:w.eval("({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext})"),message:e("message").textContent});
  w.fetch=response;
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;};

@@ -412,5 +412,21 @@ class EditorDraftTests(unittest.TestCase):
         self.assertIsNone(item['synced_to']['game'])
 
 
+    def test_same_text_can_be_reapproved_against_changed_english(self):
+        approved = dict(key='TXT_KEY_ONE', source_fingerprint='a'*64,
+            text='Same [ICON_CULTURE]', gender='', plurality='', translator_note='', updated_at='')
+        path = self.translations / 'RU_RU.csv'
+        path.write_bytes(encoded_csv([approved], APPROVAL_FIELDS))
+        self.candidates.return_value['TXT_KEY_ONE']['source_fingerprint'] = 'c'*64
+        result = self.save(text=approved['text'], source_fingerprint='c'*64,
+                           base={'approval': approved, 'source_fingerprint': 'c'*64})
+        self.assertEqual(result['draft_count'], 1)
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        with path.open(encoding='utf-8-sig', newline='') as handle:
+            self.assertEqual(next(csv.DictReader(handle))['source_fingerprint'], 'c'*64)
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

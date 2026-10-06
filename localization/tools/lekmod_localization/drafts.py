@@ -74,7 +74,9 @@ class DraftStore:
     @classmethod
     def signature(cls, value):
         if value and value.get('mode') in ('translator', 'developer'):
-            value = {'absent': True} if value.get('delete') else {'edit': value['edit'], 'absent': False}
+            value = ({'absent': True} if value.get('delete') else
+                {'edit': value['edit'], 'absent': False, **({'source_fingerprint': value.get('source_fingerprint')}
+                 if value['mode'] == 'translator' and value['edit']['text'] else {})})
         return cls.encode(value) or ''
 
     @staticmethod
@@ -86,6 +88,8 @@ class DraftStore:
         base = value['base']
         if value['mode'] == 'translator':
             approved = base.get('approval')
+            if approved:
+                result['source_fingerprint'] = approved.get('source_fingerprint', result.get('source_fingerprint'))
             result['edit'] = ({'text': approved['text'], 'gender': approved.get('gender', ''),
                 'plurality': approved.get('plurality', ''), 'note': approved.get('translator_note', ''),
                 'identifier': ''} if approved else
