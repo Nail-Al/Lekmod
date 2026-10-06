@@ -1,7 +1,7 @@
 """Guard fast local saves, one batch rebuild, and work retained across failures."""
 
 import csv
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import io
 import json
 from pathlib import Path
@@ -33,7 +33,7 @@ class DraftStoreTests(unittest.TestCase):
             payload = {'mode': 'translator', 'locale': 'RU_RU', 'key': 'TXT_KEY_ONE',
                        'index': -1, 'create': False, 'base': {'approval': None},
                        'source_fingerprint': 'a' * 64, 'edit': edit('Legacy edit')}
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.executescript('''
                     CREATE TABLE state (id INTEGER PRIMARY KEY, revision INTEGER, cursor INTEGER);
                     INSERT INTO state VALUES (1, 2, 2);
