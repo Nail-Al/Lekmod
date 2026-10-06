@@ -84,7 +84,7 @@ async function wait(fn,label){
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;};
  w.HTMLElement.prototype.setPointerCapture=function(){};
- w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
+ w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorRefresh=refresh; window.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
  function select(i){d.querySelectorAll("tbody tr")[i].click();}
  function input(text){e("translation").value=text;e("translation").dispatchEvent(new w.Event("input",{bubbles:true}));}
  function hotkey(key){d.dispatchEvent(new w.KeyboardEvent("keydown",{key,ctrlKey:true,bubbles:true}));}
@@ -119,7 +119,7 @@ async function wait(fn,label){
  await wait(()=>e("apply-primary").dataset.target==="game"&&!e("apply-primary").disabled,"select game action");
  assert(requests.some(x=>x.path==="/api/apply-project"&&x.body.target==="game"));
  assert(!e("all-apply").hidden&&e("game-apply").hidden);
- connected=false;await w.refresh();await wait(()=>e("table-loading").hidden,"project only");
+ connected=false;await w.editorRefresh();await wait(()=>e("table-loading").hidden,"project only");
  assert.equal(e("apply-primary").dataset.target,"project");
  assert(e("game-apply").disabled&&e("all-apply").disabled);
  assert(!d.querySelector('thead th[data-field="synced_to"]'),"Synced to defaults off with one connected destination");
