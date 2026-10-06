@@ -1483,7 +1483,9 @@ class Editor:
             temporary = Path(folder)
             source, english, approvals = temporary / 'runtime.xml', temporary / 'primary.xml', temporary / 'translations'
             source.write_bytes(build_shipped_localization.DEFAULT_SOURCE.read_bytes())
-            english.write_text(plan['document'], encoding='utf-8')
+            # The plan already contains the source's CRLF/LF bytes. Windows text
+            # output would turn CRLF into CRCRLF and change multiline strings.
+            english.write_bytes(plan['document'].encode('utf-8'))
             approvals.mkdir()
             for path in TRANSLATIONS.glob('*.csv'):
                 (approvals / path.name).write_bytes(plan['writes'].get(path, path.read_bytes()))

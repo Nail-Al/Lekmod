@@ -173,7 +173,10 @@ class EditorDraftTests(unittest.TestCase):
         for number in range(100):
             result = self.save(text=f'incomplete draft {number}', revision=revision, group='typing')
             revision = result['entry']['revision']
-        self.assertLess(time.monotonic() - started, 5, 'Local Save regressed to a rebuild-like delay')
+        # Windows CI includes antivirus/filesystem sync jitter. The budget still
+        # gives each durable autosave less than half of the 350 ms typing debounce.
+        budget = 15 if sys.platform == 'win32' else 5
+        self.assertLess(time.monotonic() - started, budget, 'Local Save regressed to a rebuild-like delay')
         self.prepare.assert_not_called(); self.candidates.assert_not_called()
         self.assertEqual({path: path.read_bytes() for path in files}, originals)
         restored = DraftStore(self.editor.drafts.path)
@@ -398,6 +401,8 @@ class EditorDraftTests(unittest.TestCase):
         self.assertEqual(self.editor.drafts.entries()[0]['payload']['edit']['text'], 'Old [ICON_CULTURE]')
 
     def test_game_only_build_does_not_modify_project_or_clear_history(self):
+        # Exercise Windows line endings on every CI platform, not just Windows.
+        self.source.write_bytes(self.source.read_text().replace('\n', '\r\n').encode('utf-8'))
         self.save()
         originals = {path: path.read_bytes() for path in [self.source, self.game, self.translations / 'RU_RU.csv']}
         with patch('editor_server.settings', return_value={'game_path': str(self.root / 'game')}), \

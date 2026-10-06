@@ -21,7 +21,7 @@ permissions:
 jobs:
   editor:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -104,7 +104,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/published | Out-Null
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
-          Copy-Item dist/LekmodLocalizationEditor-Windows.zip dist/published/LekmodLocalizationEditor-Windows.zip
+          gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           # Updater code is unchanged. Exercise the current release plus the
           # two legacy duplicate/lock cases on each build; keep the complete
           # historical sweep available for changes to the updater itself.
@@ -124,7 +125,7 @@ jobs:
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration', '--test-extra-instance') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
             if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
-            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23')) { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24')) { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
