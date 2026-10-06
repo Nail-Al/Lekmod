@@ -67,6 +67,34 @@ def start(root: Path) -> tuple[subprocess.Popen, str, str]:
     raise RuntimeError("packaged editor did not open within 30 seconds")
 
 
+def start_update(stage: Path, root: Path, pid: int, base: str, *,
+                 repair: bool = False) -> subprocess.Popen:
+    """Use the real helper handshake before releasing the editor and its bootloader."""
+    ticket = uuid.uuid4().hex
+    helper = subprocess.Popen(installer_command(stage, root, pid,
+        int(base.rsplit(':', 1)[1]), no_browser=True, handoff_ticket=ticket, repair=repair),
+        cwd=stage, env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'},
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    marker = root / 'localization/workspace/editor-updates' / ('helper-ready-' + ticket)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if marker.is_file():
+            try:
+                marker.unlink()
+            except PermissionError:
+                pass  # A Windows scanner may briefly hold the readiness marker.
+            else:
+                stop(base, token_at(base))
+                return helper
+        if helper.poll() is not None:
+            log = root / 'localization/workspace/editor-updates/update.log'
+            raise RuntimeError('Update helper did not acknowledge handoff: ' +
+                               (log.read_text(encoding='utf-8')[-3000:] if log.exists() else 'no log'))
+        time.sleep(.1)
+    raise RuntimeError('Update helper did not acknowledge handoff within 30 seconds')
+
+
 @contextmanager
 def locked_file(path: Path):
     """Hold a real Windows handle allowing reads but denying file replacement."""
@@ -121,11 +149,7 @@ def test_locked_updates(archive_path: Path) -> None:
             port = int(base.rsplit(':', 1)[1])
             with locked_file(root / locked):
                 started = time.monotonic()
-                helper = subprocess.Popen(installer_command(stage, root, pid, port, no_browser=True),
-                    cwd=stage, env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'},
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
-                stop(base, token_at(base))
+                helper = start_update(stage, root, pid, base)
                 # The original browser address must expose live progress while locked.
                 progress = None
                 deadline = time.monotonic() + 25
@@ -207,13 +231,7 @@ def main() -> int:
         duplicate, duplicate_base, duplicate_pid = start(root)
         assert duplicate_base == base and duplicate_pid == pid, 'Double launch started another editor server'
         assert duplicate.wait(timeout=15) == 0, 'Duplicate launch did not reuse the running editor'
-        helper = subprocess.Popen(installer_command(stage, root, pid, int(base.rsplit(":", 1)[1]),
-                                                    no_browser=True), cwd=stage,
-                                  env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL,
-                                  creationflags=subprocess.CREATE_NO_WINDOW)
-        stop(base, token_at(base))
+        helper = start_update(stage, root, pid, base)
         assert helper.wait(timeout=210) == 0, (root /
             "localization/workspace/editor-updates/update.log").read_text(encoding="utf-8")
         old.wait(timeout=30)
@@ -237,13 +255,7 @@ def main() -> int:
         log_path = stage.parent / "update.log"
         current_pid = int(re.findall(r"Installed v" + re.escape(new_version) +
                                      r";[^\n]*pid: (\d+)", log_path.read_text())[-1])
-        repaired = subprocess.Popen(installer_command(stage, root, current_pid,
-                                   int(base.rsplit(":", 1)[1]), no_browser=True, repair=True),
-                                   cwd=stage, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
-        stop(base, token_at(base))
+        repaired = start_update(stage, root, current_pid, base, repair=True)
         assert repaired.wait(timeout=210) == 0, log_path.read_text(encoding="utf-8")
         assert wait_for(base, new_version)["server_instance"] != meta["server_instance"]
         assert (root / "README-START.txt").read_bytes() == (stage / "README-START.txt").read_bytes()
@@ -266,13 +278,7 @@ def main() -> int:
         success_log = (stage.parent / "update.log").read_text(encoding="utf-8")
         pid = int(re.findall(r"Installed v" + re.escape(new_version) +
                              r";[^\n]*pid: (\d+)", success_log)[-1])
-        failed = subprocess.Popen(installer_command(broken, root, pid,
-                                  int(base.rsplit(":", 1)[1]), no_browser=True), cwd=broken,
-                                  env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL,
-                                  creationflags=subprocess.CREATE_NO_WINDOW)
-        stop(base, token_at(base))
+        failed = start_update(broken, root, pid, base)
         assert failed.wait(timeout=210) != 0, "invalid UI unexpectedly passed readiness"
         wait_for(base, new_version)
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == previous
