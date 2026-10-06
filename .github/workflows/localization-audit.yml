@@ -48,7 +48,19 @@ jobs:
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci
 
-      - name: Verify editor keyboard, Save and destination controls
+
+  editor-ui:
+    name: Verify editor Save, history and Apply controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            localization/editor
+            localization/tools/tests/editor_ui.cjs
+          sparse-checkout-cone-mode: false
+      - name: Test actual browser interface
         run: |
           node --check localization/editor/app.js
           npm install --prefix "$RUNNER_TEMP/lle-ui" --no-save jsdom@26.1.0

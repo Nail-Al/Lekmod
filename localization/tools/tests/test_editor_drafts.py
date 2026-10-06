@@ -428,5 +428,19 @@ class EditorDraftTests(unittest.TestCase):
         self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
 
 
+    def test_open_game_blocks_all_before_changing_project_or_starting_job(self):
+        from lekmod_localization.game_process import GameRunningError
+        self.save()
+        before = self.source.read_bytes(), (self.translations / 'RU_RU.csv').read_bytes()
+        with patch('editor_server.require_game_closed', side_effect=GameRunningError(['CivilizationV.exe'])):
+            for target in ('game', 'all'):
+                with self.assertRaises(GameRunningError):
+                    self.editor.start_apply(target=target)
+        self.assertEqual(before, (self.source.read_bytes(), (self.translations / 'RU_RU.csv').read_bytes()))
+        self.assertEqual(self.editor.save_state['state'], 'idle')
+        self.prepare.assert_not_called()
+
+
+
 if __name__ == '__main__':
     unittest.main()

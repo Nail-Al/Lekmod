@@ -350,6 +350,33 @@ def main() -> int:
                     'key': checking, 'slot': item['draft_slot'], 'revision': item['draft_revision'],
                     'base': item['draft_base'], 'source_fingerprint': item['source_fingerprint'],
                     'edit': {'text': text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            # A benign renamed command interpreter proves the frozen process check.
+            if os.name == 'nt':
+                fake_folder = root / 'process-check'
+                fake_folder.mkdir()
+                fake_game = fake_folder / 'CivilizationV.exe'
+                shutil.copy2(Path(os.environ['SystemRoot']) / 'System32/cmd.exe', fake_game)
+                fake_process = subprocess.Popen([str(fake_game), '/d', '/q', '/k'],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                try:
+                    for _ in range(30):
+                        if json.loads(get(base + '/api/game-process'))['processes']:
+                            break
+                        time.sleep(.1)
+                    assert json.loads(get(base + '/api/game-process'))['processes']
+                    before_blocked = target.read_bytes(), game.read_bytes(), csv_path.read_bytes()
+                    for destination in ('game', 'all'):
+                        try:
+                            post(base, token, '/api/apply-project', {'target': destination})
+                            raise AssertionError('Apply accepted an open game')
+                        except urllib.error.HTTPError as error:
+                            detail = json.loads(error.read())
+                            assert detail['error_code'] == 'game_running', detail
+                    assert before_blocked == (target.read_bytes(), game.read_bytes(), csv_path.read_bytes())
+                finally:
+                    fake_process.communicate(b'exit\n', timeout=10)
+                assert not json.loads(get(base + '/api/game-process'))['processes']
             post(base, token, '/api/draft-checkpoint', {})
             original_project = {path: path.read_bytes() for path in (game, csv_path, project / 'localization/en_US/primary.xml')}
             change_menu(RUSSIAN[0] + ' Test')

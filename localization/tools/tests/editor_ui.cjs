@@ -10,7 +10,7 @@ const prefs = {mode:"translator",onboarded:true,locale:"RU_RU",category:"all",pr
   translator_column_order:[],developer_column_order:[],column_widths:{},translator_filters:{},developer_filters:{},
   project_path:"project",game_path:"game",snapshot_url:"",apply_target:"",
   translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
-let connected=true, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null;
+let connected=true, gameRunning=false, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null;
 const requests=[], history=[], errors=[], values={};
 let debug=()=>({});
 const keys=Array.from({length:4},(_,i)=>"TXT_KEY_UI_"+(i+1));
@@ -60,10 +60,12 @@ async function response(url,options={}){
   assert(action,"No history action");values[action.key]={...(undo?action.before:action.after)};cursor+=undo?-1:1;revision++;
   result={...status(),slot:"T:RU_RU:"+action.key,version:{mode:"translator",locale:"RU_RU",key:action.key,edit:values[action.key]}};
  } else if(u.pathname==="/api/apply-project"){
+  if(gameRunning&&["game","all"].includes(body.target))return {ok:false,json:async()=>({error:"Civilization V is running",error_code:"game_running",processes:["CivilizationV_DX11.exe"]})};
   applying=body.target;result={state:"running",target:applying,count:status().draft_count,...status()};
  } else if(u.pathname==="/api/apply-status"){result={state:"complete",target:applying,count:0,applied_count:0,phase:"Complete",...status()};}
  else if(u.pathname==="/api/versions")result={versions:[{version:"v35.4",supported:true}],warning:""};
  else if(u.pathname==="/api/editor-latest")result={current:"0.25",latest:"0.25",available:false};
+ else if(u.pathname==="/api/game-process")result={processes:gameRunning?["CivilizationV_DX11.exe"]:[]};
  else if(u.pathname==="/api/game-status")result=metadata().game;
  else if(u.pathname==="/api/download-status")result={state:"idle"};
  return {ok:true,json:async()=>result};
@@ -77,12 +79,12 @@ async function wait(fn,label){
  const dom=new JSDOM(fs.readFileSync(path.join(root,"localization/editor/index.html"),"utf8"),{
   url:"http://localhost/",runScripts:"outside-only",pretendToBeVisual:true,virtualConsole:vc});
  const w=dom.window,d=w.document,e=id=>d.getElementById(id);
- debug=()=>({undoDisabled:e("undo").disabled,workspaceHidden:e("workspace").hidden,dialogs:[...d.querySelectorAll("dialog[open]")].map(x=>x.id),state:w.eval("({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext})"),message:e("message").textContent});
+ debug=()=>({undoDisabled:e("undo").disabled,workspaceHidden:e("workspace").hidden,dialogs:[...d.querySelectorAll("dialog[open]")].map(x=>x.id),state:w.editorDebug(),message:e("message").textContent});
  w.fetch=response;
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;};
  w.HTMLElement.prototype.setPointerCapture=function(){};
- w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8"));
+ w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
  function select(i){d.querySelectorAll("tbody tr")[i].click();}
  function input(text){e("translation").value=text;e("translation").dispatchEvent(new w.Event("input",{bubbles:true}));}
  function hotkey(key){d.dispatchEvent(new w.KeyboardEvent("keydown",{key,ctrlKey:true,bubbles:true}));}
@@ -107,7 +109,12 @@ async function wait(fn,label){
  hotkey("z");assert.equal(requests.filter(x=>x.path==="/api/draft-undo").length,historyCalls,"Dialog typing keeps native shortcuts");
  e("discard-confirm").click();await wait(()=>!e("discard-dialog").open&&e("table-loading").hidden,"restore checkpoint");
  assert.equal(values[keys[0]].text,"Первый");assert(!values[keys[3]]);
+ gameRunning=true;
  e("apply-toggle").click();assert(!e("apply-menu").hidden);e("game-apply").click();
+ await wait(()=>e("game-running-dialog").open,"running game modal");
+ e("game-running-retry").click();await wait(()=>e("game-running-status").textContent.includes("still running"),"blocked Retry");
+ assert(e("game-running-dialog").open);
+ gameRunning=false;e("game-running-retry").click();await wait(()=>!e("game-running-dialog").open,"Retry after game closes");
  await wait(()=>e("apply-primary").dataset.target==="game"&&!e("apply-primary").disabled,"select game action");
  assert(requests.some(x=>x.path==="/api/apply-project"&&x.body.target==="game"));
  assert(!e("all-apply").hidden&&e("game-apply").hidden);

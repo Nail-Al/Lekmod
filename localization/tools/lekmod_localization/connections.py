@@ -29,6 +29,8 @@ TEAM_SNAPSHOT_URL = (
     "https://www.dropbox.com/scl/fi/998d6o71w2og8x9facylu/vanilla-snapshot-complete.enc"
     "?rlkey=ex0bn7c9hjecmu6ayy7qpxaip&dl=1"
 )
+from .game_process import require_game_closed
+
 DEFAULTS = {
     "project_path": "", "game_path": "", "game_mod": "", "onboarded": False,
     "mode": "translator", "prefill": True, "wrap": True, "panel_expanded": True, "locale": "RU_RU",
@@ -411,6 +413,7 @@ def _gameplay_digest(path: Path | bytes) -> str:
 
 def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME, *, content: bytes | None = None) -> dict:
     """Back up and replace only the matching installed localization XML."""
+    require_game_closed()
     info = validate_project(project, full=False)
     mods = {item["name"]: item for item in installed_mods(game)}
     if mod_name not in mods:
@@ -450,6 +453,7 @@ def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME, 
         temporary = Path(handle.name)
         handle.write(new)
     try:
+        require_game_closed()
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)

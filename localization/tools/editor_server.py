@@ -39,6 +39,7 @@ from merge_translation_handoff import MAX_ARCHIVE, merge_handoff
 from merge_localization import review_merge, english_base, candidate_sources
 from lekmod_localization.drafts import DraftStore
 from lekmod_localization.runtime_xml import runtime_text
+from lekmod_localization.game_process import GameRunningError, require_game_closed, running_game_processes
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
@@ -666,6 +667,8 @@ class Editor:
             raise CatalogError("generated localization is out of date; save or prepare the project first")
         try:
             return apply_game(REPO_ROOT, Path(game), name)
+        except GameRunningError:
+            raise
         except (ValueError, OSError) as error:
             raise CatalogError(str(error)) from error
 
@@ -1501,6 +1504,7 @@ class Editor:
         if not self.ready or self.save_state.get('state') == 'running':
             raise CatalogError('Wait for the current Apply to finish')
         if game:
+            require_game_closed()
             prefs = settings()
             inspected = inspect_game(Path(prefs.get('game_path') or detect_game()), REPO_ROOT)
             if inspected['state'] != 'installed':
@@ -1568,7 +1572,9 @@ class Editor:
                 self.apply_state = {**self.apply_state, 'state': 'complete', **result}
                 self.record_event('draft-apply', 'success')
             except Exception as error:
-                self.apply_state = {**self.apply_state, 'state': 'error', 'error': str(error), **self.drafts.status()}
+                self.apply_state = {**self.apply_state, 'state': 'error', 'error': str(error),
+                    'error_code': getattr(error, 'code', ''), 'processes': getattr(error, 'processes', []),
+                    **self.drafts.status()}
                 self.record_event('draft-apply', 'error:' + type(error).__name__ + ': ' + safe_ui_event_detail(str(error)[:500]))
                 LOG.exception('Draft Apply failed; local work retained')
             finally:
@@ -1999,6 +2005,8 @@ def make_handler(editor: Editor, token: str, port: int):
                                   json.dumps(report, indent=2).encode('utf-8'), 'application/json')
                 elif url.path == "/api/versions":
                     self.respond(200, source_catalog(APP_HOME, refresh=args.get('refresh') == ['1']))
+                elif url.path == "/api/game-process":
+                    self.respond(200, {"processes": running_game_processes()})
                 elif url.path == "/api/game-status":
                     path = settings()['game_path'] or detect_game()
                     game = (inspect_game(Path(path), REPO_ROOT if editor.ready else None)
@@ -2062,7 +2070,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(404, {"error": "not found"})
             except (CatalogError, OSError, ValueError, urllib.error.URLError,
                     subprocess.CalledProcessError) as error:
-                self.respond(400, {"error": str(error)})
+                self.respond(400, {"error": str(error), "error_code": getattr(error, "code", ""),
+                                   "processes": getattr(error, "processes", [])})
 
         def do_POST(self) -> None:
             if self.headers.get("Origin") != f"http://127.0.0.1:{port}" or (
@@ -2331,7 +2340,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     editor.record_event(self.path.removeprefix("/api/"), "success")
             except (CatalogError, OSError, ValueError, ET.ParseError, urllib.error.URLError,
                     subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-                self.respond(400, {"error": str(error)})
+                self.respond(400, {"error": str(error), "error_code": getattr(error, "code", ""),
+                                   "processes": getattr(error, "processes", [])})
                 detail = (": " + safe_ui_event_detail(str(error)[:500])) if self.path in (
                     "/api/check", "/api/preferences", "/api/handoff-preview",
                     "/api/handoff-apply", "/api/handoff-review", "/api/connect", "/api/history-sync",

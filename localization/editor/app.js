@@ -67,6 +67,7 @@ function rememberFailedSaves() {
 }
 let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
 let applyControlsBefore = new Map(), checkpointPending = false, historyPending = false;
+let blockedGameTarget = "game";
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
 function emptyFilters() {
@@ -87,7 +88,11 @@ async function api(path, body, timeoutMs = 0) {
   try {
     const response = await fetch(path, options);
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Request failed");
+    if (!response.ok) {
+      const error = new Error(result.error || "Request failed");
+      error.code = result.error_code; error.processes = result.processes || [];
+      throw error;
+    }
     return result;
   } finally {
     if (timer) clearTimeout(timer);
@@ -1675,7 +1680,8 @@ async function pollApply() {
       const index = (window.currentRows || []).findIndex(row => row.draft_slot === selectedSlot);
       if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
     });
-    if (state.state === "error") message("Apply failed: " + state.error + " Local drafts are retained.", true);
+    if (state.state === "error" && state.error_code === "game_running") showGameRunning(state.target, state.processes);
+    else if (state.state === "error") message("Apply failed: " + state.error + " See Synced to for destination state.", true);
     else message(state.target === "game" ? "Installed game updated. The source project is unchanged; restart Civilization V to test." :
       "Applied " + state.applied_count + " drafts to the Lekmod project." +
       (state.game_result ? " Installed game updated; restart Civilization V to test." : ""));
@@ -1684,18 +1690,46 @@ async function pollApply() {
     applyTimer = setTimeout(pollApply, 2000);
   }
 }
+function showGameRunning(target, processes = []) {
+  blockedGameTarget = target;
+  el("game-running-detail").textContent = "Close Civilization V before applying localization." +
+    (processes.length ? " Running: " + processes.join(", ") + "." : "");
+  el("game-running-status").textContent = "";
+  if (!el("game-running-dialog").open) el("game-running-dialog").showModal();
+}
 async function applyDrafts(target = "all") {
   return guardNavigation(async () => {
-    if (applyPending) return;
+    if (applyPending) return false;
     try {
       const state = await api("/api/apply-project", {target});
+      if (el("game-running-dialog").open) el("game-running-dialog").close();
       setApplyLock(state.state === "running");
       updateHistory(state); renderConnections();
       if (applyPending) pollApply();
       else message("The project already matches your saved drafts.");
-    } catch (error) { message(error.message, true); }
+      return true;
+    } catch (error) {
+      if (error.code === "game_running") showGameRunning(target, error.processes);
+      else if (el("game-running-dialog").open) el("game-running-status").textContent = error.message;
+      else message(error.message, true);
+      return false;
+    }
   });
 }
+el("game-running-cancel").addEventListener("click", () => el("game-running-dialog").close());
+el("game-running-retry").addEventListener("click", async () => {
+  el("game-running-retry").disabled = true;
+  el("game-running-status").textContent = "Checking game processes…";
+  try {
+    const result = await api("/api/game-process");
+    if (result.processes.length) {
+      el("game-running-status").textContent = "Civilization V is still running. Close it, then retry.";
+      return;
+    }
+    await applyDrafts(blockedGameTarget);
+  } catch (error) { el("game-running-status").textContent = error.message; }
+  finally { el("game-running-retry").disabled = false; }
+});
 function setApplyLock(active) {
   if (active === applyPending) return;
   const ids = ["settings-save", "history-sync", "snapshot-cloud", "snapshot-file", "snapshot-import", "update-install", "editor-quit", "run-checks",
