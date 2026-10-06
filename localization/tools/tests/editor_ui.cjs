@@ -105,7 +105,7 @@ async function wait(fn,label){
  await wait(()=>cursor===1&&e("table-loading").hidden&&!e("undo").disabled,"two rapid Ctrl+Z actions");
  assert(!values[keys[1]].text&&!values[keys[2]].text);
  assert.equal(e("category").value,"all","Undo reveals a row outside the current category");
- assert.equal(e("selected").textContent,keys[1]);
+ assert.equal(e("selected").textContent,keys[1]+" · RU_RU");
  hotkey("y");await wait(()=>cursor===2&&e("table-loading").hidden,"Ctrl+Y");
  hotkey("z");await wait(()=>cursor===1&&e("table-loading").hidden,"undo before branching");
  e("search-input").value="";e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
