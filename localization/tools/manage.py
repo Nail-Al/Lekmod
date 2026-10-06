@@ -155,11 +155,24 @@ def check(config: dict[str, dict[str, bool]], snapshot: Path, *, ci: bool) -> No
 def main() -> int:
     """Select the local preparation or read-only validation path."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "check"))
+    parser.add_argument("action", choices=("prepare", "check", "diagnose-game"))
     parser.add_argument("--ci", action="store_true", help="Do not require the private snapshot in CI")
     parser.add_argument("--vanilla-snapshot", type=Path, default=SNAPSHOT)
+    parser.add_argument("--game-folder", type=Path, help="Civilization V installation for read-only diagnostics")
+    parser.add_argument("--profile-folder", type=Path, help="Override the Civ V Documents profile for diagnostics")
     args = parser.parse_args()
     try:
+        if args.action == 'diagnose-game':
+            from lekmod_localization.connections import detect_game, game_diagnostics
+            game = args.game_folder or (Path(path) if (path := detect_game()) else None)
+            if game is None:
+                raise CatalogError('Game not found; specify --game-folder')
+            report = game_diagnostics(REPO_ROOT, game, profile=args.profile_folder)
+            WORKSPACE.mkdir(parents=True, exist_ok=True)
+            output = WORKSPACE / 'game-diagnostics.json'
+            output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+            print(f'Read-only game diagnostics: {output}')
+            return 0
         ensure_workspace_private()
         if not args.ci:
             migrate_workspace()

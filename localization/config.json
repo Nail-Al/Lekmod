@@ -20,7 +20,7 @@
       "english_sync": "Check that shipped English matches en_US/primary.xml.",
       "inventory": "Scan repository files for localization references and suspicious writes.",
       "unit_tests": "Run localization unit tests.",
-      "shipped": "Check that generated game XML matches approved CSV translations."
+      "shipped": "Check generated XML against approved CSV translations and required Civ V localization database columns."
     },
     "build": {
       "english": "Copy canonical English into the game XML during prepare.",

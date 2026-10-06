@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from .common import CatalogError, KEY_RE, PLACEHOLDER_RE, SOURCE_LOCALE, token_counts
 from .fallback import fallback_entries
 from .workspace import editor_source_fingerprint
+from .runtime_xml import validate_runtime_xml
 
 
 BEGIN = "\t<!-- BEGIN GENERATED FALLBACK -->\n"
@@ -131,7 +132,9 @@ def render_blocks(entries_by_locale: dict[str, dict[str, dict[str, str]]]) -> st
                 if name in fields:
                     ET.SubElement(operation, name).text = fields[name]
         ET.indent(language, space="  ")
-        blocks.append("\t" + ET.tostring(language, encoding="unicode") + "\n")
+        # Keep upstream's paired format for intentional empty Text fields.
+        blocks.append("\t" + ET.tostring(language, encoding="unicode",
+                                         short_empty_elements=False) + "\n")
     return "".join(blocks)
 
 
@@ -169,4 +172,5 @@ def install_candidate(document: str, blocks: str, locales: list[str]) -> str:
         ET.fromstring(candidate)
     except ET.ParseError as error:
         raise CatalogError(f"generated game XML is invalid: {error}") from error
+    validate_runtime_xml(candidate)
     return candidate

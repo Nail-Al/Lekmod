@@ -9,6 +9,11 @@ on:
       - "LEKMOD/Override/CIV5Units_Mongol.xml"
       - ".github/workflows/localization-editor-windows.yml"
   workflow_dispatch:
+    inputs:
+      full_upgrade_matrix:
+        description: Check every historical editor instead of the current and legacy lock cases
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,12 +21,17 @@ permissions:
 jobs:
   editor:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - name: Generate runtime XML from reviewed sources
+        shell: pwsh
+        run: |
+          python -B localization/tools/build_shipped_localization.py --vanilla-reference localization/reference/vanilla-fingerprints.json.gz --write
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Build Windows executable
         shell: pwsh
         run: |
@@ -51,6 +61,21 @@ jobs:
         shell: pwsh
         run: |
           python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_editor_drafts.py -q
+      - name: Regression test menu text and game localization database constraints
+        shell: pwsh
+        run: |
+          python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_runtime_xml.py -q
+      - name: Persist verified generated game XML
+        shell: pwsh
+        run: |
+          git add -- LEKMOD/Override/CIV5Units_Mongol.xml
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 1) {
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Refresh verified generated localization for the editor release"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            git push origin HEAD:localization-infrastructure
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          } elseif ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Publish versioned Windows download
         shell: pwsh
         env:
@@ -58,10 +83,11 @@ jobs:
         run: |
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           $tag = $editor.release_tag
+          $releaseCommit = git rev-parse HEAD
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag dist/LekmodLocalizationEditor-Windows.zip `
-              --target $env:GITHUB_SHA --title "Lekmod Localization Editor $($editor.version)" `
+              --target $releaseCommit --title "Lekmod Localization Editor $($editor.version)" `
               --notes "Portable Windows localization editor. Extract the ZIP before launching."
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
@@ -69,12 +95,20 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          FULL_UPGRADE_MATRIX: ${{ inputs.full_upgrade_matrix }}
         run: |
           New-Item -ItemType Directory -Force dist/published | Out-Null
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
           gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          foreach ($previous in @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21')) {
+          # Updater code is unchanged. Exercise the current release plus the
+          # two legacy duplicate/lock cases on each build; keep the complete
+          # historical sweep available for changes to the updater itself.
+          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.22')
+          if ($env:FULL_UPGRADE_MATRIX -eq 'true') {
+            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22')
+          }
+          foreach ($previous in $previousVersions) {
             $folder = "dist/previous-$previous"
             New-Item -ItemType Directory -Force $folder | Out-Null
             gh release download $previous --pattern LekmodLocalizationEditor-Windows.zip --dir $folder
@@ -86,7 +120,7 @@ jobs:
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration', '--test-extra-instance') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
             if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
-            if ($previous -in @('editor-v0.20', 'editor-v0.21')) { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22')) { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

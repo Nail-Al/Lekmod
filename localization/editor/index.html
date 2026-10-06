@@ -297,7 +297,7 @@
     <p id="merge-status" class="section-status" role="status" aria-live="polite"></p>
     <div class="foot"><label class="inline">Destination<select id="merge-destination"><option value="project_game">Project and installed game</option><option value="project">Project folder</option></select></label><button id="merge-apply" class="primary" disabled>Apply reviewed changes</button></div>
   </section>
-  <section id="logs-view" class="card" hidden><div class="quick"><h2>Action log</h2><button id="logs-back">Back to editor</button><button id="logs-download">Download log</button></div><p class="hint">Actions and errors are recorded locally. Text, passwords, and snapshot contents are excluded.</p><pre id="logs-list"></pre></section>
+  <section id="logs-view" class="card" hidden><div class="quick"><h2>Action log</h2><button id="logs-back">Back to editor</button><button id="logs-download">Download log</button><button id="game-diagnostics">Download game diagnostics</button></div><p class="hint">Actions and errors are recorded locally. Text, passwords, and snapshot contents are excluded. For game diagnostics, close Civilization V after testing; its cache is read without modification.</p><pre id="logs-list"></pre></section>
 </main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>

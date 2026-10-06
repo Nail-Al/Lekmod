@@ -1175,6 +1175,10 @@ el("logs-download").addEventListener("click", () => {
   location.href = "/api/logs/download";
   message("Action log downloaded; you can attach it when reporting a problem.");
 });
+el("game-diagnostics").addEventListener("click", () =>
+  downloadExport('/api/game-diagnostics', 'lekmod-game-diagnostics.json', el('game-diagnostics'), {
+    message: 'Game diagnostics downloaded. The game files and cache were read without modification.'
+  }));
 el("columns-button").addEventListener("click", () => {
   pendingColumns = new Set(visible); renderColumnChoices(); el("columns-dialog").showModal();
 });
@@ -1706,7 +1710,7 @@ el("run-checks").addEventListener("click", async () => {
     finally { el("run-checks").disabled = false; el("run-checks").classList.remove("busy-action"); }
   });
 });
-async function downloadExport(path, filename, button) {
+async function downloadExport(path, filename, button, feedback = null) {
   button.disabled = true; button.classList.add("busy-action");
   try {
     const response = await fetch(path);
@@ -1715,9 +1719,10 @@ async function downloadExport(path, filename, button) {
     const link = document.createElement("a"); link.href = address; link.download = filename;
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(address), 1000);
-    sectionMessage("exchange", "ZIP includes your valid local drafts; the project files are unchanged.");
+    if (feedback) message(feedback.message);
+    else sectionMessage("exchange", "ZIP includes your valid local drafts; the project files are unchanged.");
   } catch (error) {
-    sectionMessage("exchange", error.message + " Your drafts remain saved; a draft backup can include unfinished text.", "error");
+    if (!feedback) sectionMessage("exchange", error.message + " Your drafts remain saved; a draft backup can include unfinished text.", "error");
     message(error.message, true);
   } finally { button.disabled = applyPending; button.classList.remove("busy-action"); }
 }

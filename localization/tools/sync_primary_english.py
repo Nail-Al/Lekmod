@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 import audit_primary_localization as primary_audit
 from lekmod_localization.common import CatalogError, DEFAULT_SOURCE, REPO_ROOT
+from lekmod_localization.runtime_xml import validate_runtime_xml
 
 
 DEFAULT_ENGLISH = REPO_ROOT / "localization" / "en_US" / "primary.xml"
@@ -42,6 +43,7 @@ def validate_source(document: str) -> str:
         "Language_en_US"
     ]:
         raise CatalogError("English source must contain only Language_en_US")
+    validate_runtime_xml(document)
     return block
 
 

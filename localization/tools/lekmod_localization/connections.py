@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -417,8 +419,15 @@ def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME) 
                          "Install the matching Lekmod release before applying text.")
     old = target.read_bytes()
     new = source.read_bytes()
+    # This lazy import avoids the shared-path module's startup dependency.
+    # Validate even a no-op: older LLE releases may have installed invalid XML.
+    from .runtime_xml import validate_runtime_xml
+    runtime = validate_runtime_xml(new.decode('utf-8-sig'))
+    if not runtime['counts'].get('en_US'):
+        raise ValueError('The prepared XML contains no English texts; rebuild the project before applying.')
     if old == new:
-        return {"changed": False, "target": str(target), "backup": None}
+        return {"changed": False, "target": str(target), "backup": None,
+                "validated_locales": sorted(runtime['counts'])}
     folder = home / "localization/workspace/game-backups" / mod_name
     folder.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -432,7 +441,142 @@ def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME) 
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
-    return {"changed": True, "target": str(target), "backup": str(backup)}
+    return {"changed": True, "target": str(target), "backup": str(backup),
+            "validated_locales": sorted(runtime['counts'])}
+
+
+def game_profile() -> Path:
+    """Resolve Windows' actual Documents folder, including a redirected one."""
+    documents = Path.home() / 'Documents'
+    if sys.platform == 'win32':
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buffer) == 0:
+            documents = Path(buffer.value)
+    return documents / "My Games/Sid Meier's Civilization 5"
+
+
+def game_diagnostics(project: Path, game: Path, *, profile: Path | None = None) -> dict:
+    """Read installed XML, loaded cache rows and loader errors without changing them.
+
+    Return hashes and presence/match results, rather than a copy of game text
+    or translator drafts. Cache dates distinguish a prior run from a fresh one.
+    This is evidence from a game run, separate from our synthetic SQLite gate.
+    """
+    from .common import normalize_text, quote_identifier
+    from .runtime_xml import LOCALES, validate_runtime_xml
+    from .sources import language_tables, database_uri
+    keys = ('TXT_KEY_BUILDING_BAZAAR_HELP', 'TXT_KEY_LEKMOD_MENU_DISCORD',
+            'TXT_KEY_LEKMOD_MENU_GITHUB', *('TXT_KEY_LEKMOD_MENU_VERSION_' + state
+            for state in ('CHECKING', 'OUTDATED', 'UNKNOWN', 'UNREACHABLE', 'UPTODATE')))
+    profile = profile if profile is not None else game_profile()
+    report = {'schema_version': 1, 'collected_at': datetime.now(timezone.utc).isoformat(),
+              'game': inspect_game(game, project), 'profile': str(profile),
+              'xml': {}, 'databases': [], 'loader_messages': [],
+              'note': 'Read-only report. A cache may describe an earlier game run. '
+                      'Close Civ V after testing before collecting this report.'}
+
+    def digest(text):
+        value = normalize_text(text)
+        return hashlib.sha256(value.encode('utf-8')).hexdigest() if value is not None else None
+
+    def inspect_xml(path):
+        data = path.read_bytes()
+        item = {'path': str(path), 'sha256': hashlib.sha256(data).hexdigest(),
+                'modified_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
+        try:
+            validated = validate_runtime_xml(data.decode('utf-8-sig'), keys=keys)
+            item['counts'] = validated['counts']
+            item['keys'] = {locale: {key: digest(text) for key, text in texts.items()}
+                            for locale, texts in validated['texts'].items()}
+        except (ValueError, UnicodeError) as error:
+            item['error'] = str(error)
+        return item
+
+    report['xml']['project'] = inspect_xml(project / 'LEKMOD/Override/CIV5Units_Mongol.xml')
+    mods = report['game']['mods']
+    if len(mods) == 1:
+        target = game / 'Assets/DLC' / mods[0]['name'] / 'Override/CIV5Units_Mongol.xml'
+        report['xml']['installed'] = inspect_xml(target)
+        report['xml']['same_file'] = (report['xml']['project']['sha256'] ==
+                                      report['xml']['installed']['sha256'])
+    expected = report['xml'].get('installed', report['xml']['project']).get('keys', {})
+    cache = profile / 'cache'
+    for path in sorted(cache.iterdir()) if cache.is_dir() else []:
+        if (not path.is_file() or path.suffix.lower() not in ('.db', '.sqlite') or
+                not any(word in path.name.lower() for word in ('localization', 'debugdatabase'))):
+            continue
+        item = {'path': str(path), 'modified_at': datetime.fromtimestamp(
+            path.stat().st_mtime, timezone.utc).isoformat(), 'languages': {}}
+        report['databases'].append(item)
+        try:
+            with closing(sqlite3.connect(database_uri(path), uri=True, timeout=2)) as database:
+                database.execute('PRAGMA query_only = ON')
+                names = {row[0].casefold(): row[0] for row in database.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+                readers = {locale: (table, None) for locale, table in language_tables(database).items()}
+                localized = names.get('localizedtext')
+                if localized:
+                    columns = {row[1].casefold() for row in database.execute(
+                        f'PRAGMA table_info({quote_identifier(localized)})')}
+                    if {'language', 'tag', 'text'} <= columns:
+                        # Merged and DLC caches can contain only LocalizedText,
+                        # without any Language_* tables or views.
+                        for (language,) in database.execute(
+                                f'SELECT DISTINCT Language FROM {quote_identifier(localized)}'):
+                            if isinstance(language, str):
+                                readers.setdefault(language.casefold(), (localized, language))
+                item['has_language_storage'] = bool(readers)
+                for locale, (table, stored_language) in readers.items():
+                    if locale not in {name.casefold() for name in LOCALES}:
+                        continue
+                    wanted = next((expected[name] for name in expected if name.casefold() == locale), {})
+                    quoted = quote_identifier(table)
+                    language_filter = ' AND Language=?' if stored_language is not None else ''
+                    parameters = (*keys, stored_language) if stored_language is not None else keys
+                    found = dict(database.execute(f'SELECT Tag,Text FROM {quoted} '
+                        f'WHERE Tag IN ({",".join("?" for key in keys)}){language_filter}', parameters))
+                    item['languages'][locale] = {'data_source': table, 'stored_language': stored_language,
+                        'columns': [
+                        {'name': row[1], 'not_null': bool(row[3])} for row in database.execute(
+                        f'PRAGMA table_info({quoted})')], 'keys': {key: {
+                        'present': key in found, 'expected_known': key in wanted,
+                        'matches_installed': key in wanted and
+                        key in found and digest(found[key]) == wanted[key],
+                        'text_sha256': digest(found[key]) if key in found else None,
+                    } for key in keys}}
+                if 'buildings' in names:
+                    item['bazaar_help_key'] = database.execute(
+                        "SELECT Help FROM Buildings WHERE Type='BUILDING_BAZAAR'").fetchone()
+                if 'scannedfiles' in names:
+                    item['scanned_mongol_files'] = list(database.execute(
+                        "SELECT Path,DateTime FROM ScannedFiles WHERE lower(Path) LIKE '%mongol%' LIMIT 20"))
+        except sqlite3.Error as error:
+            item['error'] = str(error)
+    for name in ('Database.log', 'XML.log', 'Localization.log'):
+        path = profile / 'Logs' / name
+        if not path.is_file():
+            continue
+        # Limit the report even when logging has run for months; do not copy a
+        # complete log or include unrelated rows containing official text.
+        with path.open('rb') as handle:
+            handle.seek(max(0, path.stat().st_size - 65536))
+            lines = handle.read().decode('utf-8-sig', errors='replace').splitlines()
+        matches = [line[:500] for line in lines if 'civ5units_mongol' in line.casefold()
+                   or 'no such table: language_' in line.casefold()
+                   or ('not null' in line.casefold() and 'language_' in line.casefold())]
+        report['loader_messages'].append({'path': str(path), 'lines': matches[-40:]})
+    report['configured_languages'] = {}
+    for name in ('config.ini', 'UserSettings.ini'):
+        path = profile / name
+        if path.is_file():
+            # Report only language choices; never include unrelated profile data.
+            selected = re.findall(r'^\s*(Language|AudioLanguage)\s*=\s*([^\r\n;]+)',
+                                  path.read_text(encoding='utf-8-sig', errors='replace'),
+                                  flags=re.MULTILINE | re.IGNORECASE)
+            if selected:
+                report['configured_languages'][name] = {key: value.strip()[:80] for key, value in selected}
+    return report
 
 
 def release_catalog(home: Path = APP_HOME) -> list[dict]:

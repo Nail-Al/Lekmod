@@ -207,6 +207,11 @@ def main() -> int:
         source_fixture(project)
         game = project / "LEKMOD/Override/CIV5Units_Mongol.xml"
         before = hashlib.sha256(game.read_bytes()).digest()
+        # Existing v0.22 projects must migrate through the frozen generator,
+        # without touching canonical English, translations or local drafts.
+        head, marker, fallback = game.read_bytes().partition(b'<!-- BEGIN GENERATED FALLBACK -->')
+        rejected_xml = head + marker + fallback.replace(b'<Text></Text>', b'<Text />')
+        game.write_bytes(rejected_xml)
         settings = root / "localization/workspace/editor-settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(json.dumps({"project_path": str(project), "onboarded": True}),
@@ -269,8 +274,8 @@ def main() -> int:
                 assert b'Portable local draft 19' in package.read('translations/RU_RU.csv')
                 assert 'translations/DE_DE.csv' not in package.namelist()
 
-            def apply_pending():
-                post(base, token, '/api/apply-project', {})
+            def apply_pending(*, installed=False):
+                post(base, token, '/api/apply-project', {'game': installed})
                 for _ in range(600):
                     state = json.loads(get(base + '/api/apply-status'))
                     if state['state'] != 'running': break
@@ -300,10 +305,48 @@ def main() -> int:
                          'note': '', 'identifier': ''}})
             assert apply_pending()['applied_count'] == 2
             assert b'Updated translation [ICON_CULTURE]' in csv_path.read_bytes()
+            # Apply the reported menu translations to an installed DLC that
+            # still contains the rejected pre-fix XML. Validate the actual
+            # frozen EXE's file output, not just the Python renderer in tests.
+            from lekmod_localization.runtime_xml import validate_runtime_xml, LOCALES
+            sys.path.insert(0, str(REPOSITORY / 'localization/tools/tests'))
+            from test_runtime_xml import KEYS, RUSSIAN
+            for key, text in zip(KEYS[2:], RUSSIAN):
+                menu_row = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': 'RU_RU', 'category': 'all', 'q': key})))['rows'] if item['key'] == key)
+                post(base, token, '/api/draft', {'mode': 'translator', 'locale': 'RU_RU', 'key': key,
+                    'slot': menu_row['draft_slot'], 'revision': menu_row['draft_revision'],
+                    'base': menu_row['draft_base'], 'source_fingerprint': menu_row['source_fingerprint'],
+                    'edit': {'text': text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            client = root / 'civilization-v'
+            client.mkdir()
+            (client / 'CivilizationV.exe').touch()
+            installed = client / 'Assets/DLC/LEKMOD_v35.3'
+            target = installed / 'Override/CIV5Units_Mongol.xml'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(rejected_xml)
+            shutil.copy2(project / 'LEKMOD/VERSION', installed / 'VERSION')
+            connection = post(base, token, '/api/connect', {'project_path': str(project), 'game_path': str(client)})
+            assert not connection['restart']
+            applied = apply_pending(installed=True)
+            assert applied['applied_count'] == 5
+            assert set(applied['game_result']['validated_locales']) == set(LOCALES)
+            assert Path(applied['game_result']['backup']).read_bytes() == rejected_xml
+            menu = validate_runtime_xml(target.read_text(encoding='utf-8'), keys=KEYS)['texts']
+            assert [menu['RU_RU'][key] for key in KEYS[2:]] == list(RUSSIAN)
+            for locale in LOCALES:
+                assert menu[locale][KEYS[0]] == 'DISCORD' and menu[locale][KEYS[1]] == 'GITHUB'
+            assert '[COLOR_POSITIVE_TEXT]' in menu['RU_RU'][KEYS[-1]]
+            assert not apply_pending(installed=True)['game_result']['changed']
+            diagnostics = json.loads(get(base + '/api/game-diagnostics'))
+            assert diagnostics['xml']['same_file']
+            assert set(diagnostics['xml']['installed']['counts']) == set(LOCALES)
+            assert 'schema_version' in diagnostics and 'databases' in diagnostics
             logs = json.loads(get(base + "/api/logs"))["events"]
             assert any(event["action"] == "draft-apply" for event in logs)
             print(f'Portable editor: 20 local saves in {duration:.2f}s; project unchanged before Apply.')
             print('Frozen batch Apply, English-first translation, local undo/redo and draft export passed.')
+            print('Frozen migration and installed-game Apply: five Russian menu texts, ten locales, links/colors, backup and read-only diagnostics passed.')
         except Exception:
             print((root / "connected-launch.log").read_text(
                 encoding="utf-8", errors="replace")[-8000:])

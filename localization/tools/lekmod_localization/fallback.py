@@ -55,7 +55,8 @@ def render_locale(locale: str, entries: dict[str, dict[str, str]]) -> bytes:
             if name in fields:
                 ET.SubElement(row, name).text = fields[name]
     ET.indent(game, space="  ")
-    rendered = ET.tostring(game, encoding="utf-8", xml_declaration=True) + b"\n"
+    rendered = ET.tostring(game, encoding="utf-8", xml_declaration=True,
+                           short_empty_elements=False) + b"\n"
     try:
         ET.fromstring(rendered)
     except ET.ParseError as error:

@@ -43,7 +43,7 @@ from lekmod_localization.common import (
     PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
 )
 from lekmod_localization.connections import (
-    APP_HOME, TEAM_SNAPSHOT_URL, apply_game, detect_game, inspect_game, release_version,
+    APP_HOME, TEAM_SNAPSHOT_URL, apply_game, detect_game, inspect_game, game_diagnostics, release_version,
     save_settings, settings, validate_project,
     release_catalog, download_compatible_source, editor_manifest, DownloadCancelled,
 )
@@ -1817,6 +1817,16 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.download("lekmod-editor-actions.jsonl",
                                   editor.log_path.read_bytes() if editor.log_path.exists() else b"",
                                   "application/x-ndjson")
+                elif url.path == '/api/game-diagnostics':
+                    if not editor.ready:
+                        raise CatalogError('Connect a compatible Lekmod project first')
+                    game = settings()['game_path'] or detect_game()
+                    if not game:
+                        raise CatalogError('Connect a Civilization V installation in Settings first')
+                    report = game_diagnostics(REPO_ROOT, Path(game))
+                    editor.record_event('game-diagnostics', 'success')
+                    self.download('lekmod-game-diagnostics.json',
+                                  json.dumps(report, indent=2).encode('utf-8'), 'application/json')
                 elif url.path == "/api/versions":
                     self.respond(200, source_catalog(APP_HOME, refresh=args.get('refresh') == ['1']))
                 elif url.path == "/api/game-status":

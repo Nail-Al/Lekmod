@@ -3,6 +3,8 @@
 from pathlib import Path
 import io
 import json
+import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -13,7 +15,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.connections import (
     DownloadCancelled, apply_game, download_compatible_source, extract_source_archive,
-    inspect_game, save_settings, settings, steam_game_candidates, TEAM_SNAPSHOT_URL,
+    inspect_game, game_diagnostics, save_settings, settings, steam_game_candidates, TEAM_SNAPSHOT_URL,
 )
 
 
@@ -70,6 +72,106 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different gameplay data"):
             apply_game(self.project, self.game, self.installed.name, self.home)
         self.assertIn(b'Id="2"', self.target.read_bytes())
+
+    def test_invalid_language_row_cannot_change_game_or_create_a_backup(self):
+        """The conservative gate rejects changed empty-field serialization."""
+        previous = self.target.read_bytes()
+        source = self.project / 'LEKMOD/Override/CIV5Units_Mongol.xml'
+        source.write_text(source.read_text().replace('<Text>new</Text>', '<Text />'), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'paired tags'):
+            apply_game(self.project, self.game, self.installed.name, self.home)
+        self.assertEqual(self.target.read_bytes(), previous)
+        self.assertFalse((self.home / 'localization/workspace/game-backups').exists())
+
+    def test_corrected_apply_recovers_a_previous_bad_language_file(self):
+        """A previously rejected XML is backed up, repaired and repeatable."""
+        broken = self.target.read_text().replace('<Text>old</Text>', '<Text />')
+        self.target.write_text(broken, encoding='utf-8')
+        result = apply_game(self.project, self.game, self.installed.name, self.home)
+        self.assertEqual(Path(result['backup']).read_text(), broken)
+        self.assertIn('<Text>new</Text>', self.target.read_text())
+        self.assertEqual(result['validated_locales'], ['en_US'])
+        self.assertFalse(apply_game(self.project, self.game, self.installed.name, self.home)['changed'])
+
+    def test_game_diagnostics_reads_loaded_keys_without_rewriting_cache_or_text(self):
+        """Real cache contents, not our model, reveal a failed or stale game load."""
+        profile = self.home / 'profile'
+        cache = profile / 'cache/Localization-Merged.db'
+        cache.parent.mkdir(parents=True)
+        key = 'TXT_KEY_LEKMOD_MENU_DISCORD'
+        # The installed XML says DISCORD, but this game cache has no such key.
+        self.target.write_text(self.target.read_text().replace('TXT_KEY_TEST', key), encoding='utf-8')
+        with closing(sqlite3.connect(cache)) as database:
+            database.execute('CREATE TABLE Language_en_US(Tag TEXT PRIMARY KEY, Text TEXT NOT NULL)')
+            database.execute('INSERT INTO Language_en_US VALUES (?,?)', ('TXT_KEY_OTHER', 'private text'))
+            database.commit()
+        (profile / 'Logs').mkdir()
+        (profile / 'Logs/Database.log').write_text(
+            'loader: CIV5Units_Mongol.xml rejected\nunrelated private message\n', encoding='utf-8')
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in (cache, self.target)}
+        report = game_diagnostics(self.project, self.game, profile=profile)
+        row = report['databases'][0]['languages']['en_us']['keys'][key]
+        self.assertFalse(row['present'])
+        self.assertFalse(row['matches_installed'])
+        self.assertTrue(row['expected_known'])
+        self.assertFalse(report['xml']['same_file'])
+        self.assertNotIn('private text', json.dumps(report))
+        self.assertNotIn('unrelated private message', json.dumps(report))
+        self.assertIn('CIV5Units_Mongol.xml', report['loader_messages'][0]['lines'][0])
+        for path, (data, stamp) in before.items():
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(path.stat().st_mtime_ns, stamp)
+        with closing(sqlite3.connect(cache)) as database:
+            database.execute('INSERT INTO Language_en_US VALUES (?,?)', (key, 'old'))
+            database.commit()
+        self.assertTrue(game_diagnostics(self.project, self.game, profile=profile)[
+            'databases'][0]['languages']['en_us']['keys'][key]['matches_installed'])
+
+    def test_game_diagnostics_reports_bad_and_missing_caches_without_creating_them(self):
+        """Diagnostics must remain useful on a fresh client or damaged cache."""
+        profile = self.home / 'profile'
+        self.assertEqual(game_diagnostics(self.project, self.game, profile=profile)['databases'], [])
+        self.assertFalse(profile.exists())
+        cache = profile / 'cache/Civ5DebugLocalizationDatabase.db'
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b'not a SQLite database')
+        report = game_diagnostics(self.project, self.game, profile=profile)
+        self.assertIn('not a database', report['databases'][0]['error'])
+
+    def test_diagnostics_reads_localizedtext_languages_without_views(self):
+        """The merged cache routes language values separately from table names."""
+        profile = self.home / 'profile'
+        cache = profile / 'cache/Localization-Merged.db'
+        cache.parent.mkdir(parents=True)
+        key = 'TXT_KEY_LEKMOD_MENU_DISCORD'
+        xml = ('<GameData><Rules><Row Id="1"/></Rules><Language_en_US>'
+               f'<Row Tag="{key}"><Text>DISCORD</Text></Row></Language_en_US>'
+               '<Language_RU_RU>'
+               f'<Replace Tag="{key}"><Text>ДИСКОРД</Text></Replace>'
+               '</Language_RU_RU></GameData>')
+        self.target.write_text(xml, encoding='utf-8')
+        with closing(sqlite3.connect(cache)) as database:
+            database.execute('CREATE TABLE LocalizedText(Language TEXT, Tag TEXT, Text TEXT, '
+                             'PRIMARY KEY(Language,Tag))')
+            database.executemany('INSERT INTO LocalizedText VALUES (?,?,?)',
+                                 [('en_US', key, 'DISCORD'), ('ru_RU', key, 'ДИСКОРД'),
+                                  ('de_DE', key, 'private unrelated text')])
+            database.commit()
+        (profile / 'config.ini').write_text('Language = ru_RU\nSteamUser = private account\n',
+                                            encoding='utf-8')
+        before = cache.read_bytes()
+        report = game_diagnostics(self.project, self.game, profile=profile)
+        languages = report['databases'][0]['languages']
+        self.assertTrue(report['databases'][0]['has_language_storage'])
+        self.assertTrue(languages['en_us']['keys'][key]['matches_installed'])
+        self.assertTrue(languages['ru_ru']['keys'][key]['matches_installed'])
+        self.assertFalse(languages['de_de']['keys'][key]['expected_known'])
+        self.assertEqual(languages['ru_ru']['data_source'], 'LocalizedText')
+        self.assertEqual(report['configured_languages'], {'config.ini': {'Language': 'ru_RU'}})
+        self.assertNotIn('private account', json.dumps(report))
+        self.assertNotIn('private unrelated text', json.dumps(report))
+        self.assertEqual(cache.read_bytes(), before)
 
     def test_game_folder_must_contain_game_and_matching_lekmod(self):
         """A selected Downloads folder or broken DLC must never enable Apply."""
