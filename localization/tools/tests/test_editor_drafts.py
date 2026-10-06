@@ -291,7 +291,8 @@ class EditorDraftTests(unittest.TestCase):
         self.assertEqual(self.finish()['state'], 'complete')
         self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
         current = self.editor.drafts.get(original['entry']['slot'])
-        self.save(text='Second [ICON_CULTURE]', revision=current['revision'])
+        self.save(text='Second [ICON_CULTURE]', revision=current['revision'],
+                  base=self.editor.drafts.baselines()[original['entry']['slot']]['base'])
         self.editor.start_apply()
         self.assertEqual(self.finish()['state'], 'complete')
         self.editor.drafts.replay(undo=True)

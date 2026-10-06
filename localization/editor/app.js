@@ -340,6 +340,8 @@ function renderFilterChoices() {
     select.append(new Option(item, item));
   el("filter-kind-title").textContent = developer() ? "Operation" : "Type";
   el("filter-status-label").hidden = false;
+  for (const option of el("filter-status").options)
+    option.hidden = developer() && !["", "draft", "applied"].includes(option.value);
   el("filter-date-field").querySelector('option[value="translation_updated_at"]').hidden = developer();
   select.value = filters.kind;
   el("filter-status").value = filters.status;

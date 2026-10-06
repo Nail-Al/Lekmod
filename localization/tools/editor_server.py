@@ -357,7 +357,8 @@ class Editor:
         if self.ready:
             english_base(REPO_ROOT)
             self.drafts = DraftStore(WORKSPACE / 'editor-drafts.sqlite3')
-            self.migrate_legacy_drafts()
+            if (DEFAULT_EDITOR_OUTPUT / 'manifest.json').is_file():
+                self.migrate_legacy_drafts()
             self.vanilla_index = read_reference()['english']
         self.version_changes, self.version_info = change_map(REPO_ROOT, release_version(REPO_ROOT)) if self.ready else ({}, {'available': [], 'synced': [], 'upgrade_versions': []})
         self.read_events()
@@ -999,6 +1000,12 @@ class Editor:
     def row_sync(self, item: dict, installed: dict | None, *, developer: bool) -> None:
         """Represent equality to each destination, rather than the last button clicked."""
         local = bool(item.get('has_local_draft'))
+        if developer:
+            item['entity_status'] = 'draft' if local else 'applied'
+        if installed is None:
+            item['synced_to'] = {'project': not local, 'game': None}
+            item['game_value'] = None
+            return
         locale = 'en_us' if developer else item['locale'].casefold()
         current = installed.get(locale, {}).get(item['key']) if installed is not None else None
         if developer:
@@ -1500,7 +1507,9 @@ class Editor:
                 raise CatalogError(inspected.get('error') or 'Connect one matching Lekmod game installation first')
         entries = self.drafts.entries()
         if not entries and not game:
-            return {'state': 'complete', 'applied_count': 0, **self.drafts.status()}
+            self.apply_state = {'state': 'complete', 'target': target, 'count': 0,
+                'applied_count': 0, **self.drafts.status()}
+            return self.apply_state.copy()
         self.apply_state = {'state': 'running', 'id': secrets.token_hex(12), 'count': len(entries), 'phase': 'Checking saved drafts', 'target': target}
         self.save_state = {'state': 'running', 'kind': 'apply'}
 

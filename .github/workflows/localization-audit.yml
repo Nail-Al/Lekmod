@@ -45,6 +45,12 @@ jobs:
           python -B localization/tools/sync_primary_english.py --write
           python -B localization/tools/build_shipped_localization.py --vanilla-reference localization/reference/vanilla-fingerprints.json.gz --write
 
+      - name: Verify editor keyboard, Save and destination controls
+        run: |
+          node --check localization/editor/app.js
+          npm install --prefix "$RUNNER_TEMP/lle-ui" --no-save jsdom@26.1.0
+          NODE_PATH="$RUNNER_TEMP/lle-ui/node_modules" node localization/tools/tests/editor_ui.cjs
+
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci
 
