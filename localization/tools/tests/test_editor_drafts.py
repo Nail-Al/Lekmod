@@ -371,6 +371,18 @@ class EditorDraftTests(unittest.TestCase):
             self.assertEqual(current['translation'], 'Replacement [ICON_CULTURE]')
             self.assertEqual(current['translation_status'], 'applied')
 
+    def test_running_game_blocks_merge_before_source_changes(self):
+        from lekmod_localization.game_process import GameRunningError
+        self.editor.handoff_data = b'reviewed package'
+        self.editor.handoff_preview = {'target_sha256': 'a' * 64}
+        self.editor.handoff_id = 'reviewed'
+        with patch('editor_server.require_game_closed', side_effect=GameRunningError(['CivilizationV_DX11.exe'])), \
+             patch('editor_server.review_merge') as merge:
+            with self.assertRaises(GameRunningError):
+                self.editor.apply_handoff({'handoff_id': 'reviewed', 'choices': {}, 'destination': 'project_game'})
+            merge.assert_not_called()
+        self.assertEqual(self.editor.handoff_data, b'reviewed package')
+
     def test_deleting_an_approved_translation_is_not_a_discarded_empty_draft(self):
         approved = dict(key='TXT_KEY_ONE', source_fingerprint='a'*64,
             text='Old [ICON_CULTURE]', gender='', plurality='', translator_note='', updated_at='')

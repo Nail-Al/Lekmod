@@ -871,6 +871,7 @@ class Editor:
         if destination not in ('project', 'project_game'):
             raise CatalogError('invalid merge destination')
         if destination == 'project_game':
+            require_game_closed()
             prefs = settings()
             game_info = inspect_game(Path(prefs['game_path']), REPO_ROOT)
             if game_info['state'] != 'installed':
@@ -895,6 +896,8 @@ class Editor:
             except (ValueError, OSError) as error:
                 # The reviewed source stays saved even if the external game copy is locked.
                 report['game_error'] = str(error)
+                report['game_error_code'] = getattr(error, 'code', '')
+                report['game_processes'] = getattr(error, 'processes', [])
         self.clear_handoff()
         return {**report, **self.history_state()}
 

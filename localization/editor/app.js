@@ -67,7 +67,7 @@ function rememberFailedSaves() {
 }
 let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
 let applyControlsBefore = new Map(), checkpointPending = false, historyPending = false;
-let blockedGameTarget = "game";
+let blockedGameTarget = "game", blockedGameRetry = null;
 let historyQueue = Promise.resolve(), historyQueued = 0;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
@@ -1533,10 +1533,12 @@ el("merge-apply").addEventListener("click", async () => {
     inMerge = false;
     meta = await api("/api/meta"); updateHistory(meta); renderConnections();
     await load();
-    if (result.game_error) message("Project saved; game copy failed: " + result.game_error, true);
+    if (result.game_error_code === "game_running") showGameRunning("game", result.game_processes);
+    else if (result.game_error) message("Project saved; game copy failed: " + result.game_error, true);
     else message(result.applied ? (result.game_result ? "Merged into project and installed game. Restart Civilization V." : "Merged into the connected project and rebuilt its XML. Review the project diff.") :
       "Review complete. No rows needed changing.");
   } catch (error) { sectionMessage("merge", error.message, "error"); message(error.message, true);
+    if (error.code === "game_running") showGameRunning("all", error.processes, () => el("merge-apply").click());
     button.disabled = false;
   } finally {
     mergeApplying = false;
@@ -1693,8 +1695,9 @@ async function pollApply() {
     applyTimer = setTimeout(pollApply, 2000);
   }
 }
-function showGameRunning(target, processes = []) {
+function showGameRunning(target, processes = [], retry = null) {
   blockedGameTarget = target;
+  blockedGameRetry = retry;
   el("game-running-detail").textContent = "Close Civilization V before applying localization." +
     (processes.length ? " Running: " + processes.join(", ") + "." : "");
   el("game-running-status").textContent = "";
@@ -1729,7 +1732,12 @@ el("game-running-retry").addEventListener("click", async () => {
       el("game-running-status").textContent = "Civilization V is still running. Close it, then retry.";
       return;
     }
-    await applyDrafts(blockedGameTarget);
+    if (blockedGameRetry) {
+      const retry = blockedGameRetry;
+      blockedGameRetry = null;
+      el("game-running-dialog").close();
+      await retry();
+    } else await applyDrafts(blockedGameTarget);
   } catch (error) { el("game-running-status").textContent = error.message; }
   finally { el("game-running-retry").disabled = false; }
 });
