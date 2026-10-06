@@ -1826,6 +1826,11 @@ async function performReplayLocal(name) {
       }
       const key = version?.mode === "developer" ? version.edit.identifier : version?.key;
       if (key && !(window.currentRows || []).some(row => row.draft_slot === result.slot)) {
+        // The affected row may be outside the current category or filters.
+        filters = emptyFilters();
+        await preference({[filtersPreference()]: filters, ...(version.mode === "translator" ? {category: "all"} : {})});
+        if (version.mode === "translator") el("category").value = "all";
+        renderFilterChoices();
         el("search-input").value = key; offset = 0;
       }
       await load();

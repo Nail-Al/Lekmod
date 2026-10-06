@@ -20,7 +20,7 @@ function status(){return {draft_count:Object.values(values).filter(v=>v.text||v.
   checkpoint_saved_at:savedAt,checkpoint_dirty:JSON.stringify(values)!==JSON.stringify(checkpoint)};}
 function rows(developer=false){
  return keys.map((key,i)=>{const value=values[key]||blank(), english="English "+(i+1), edited=!!(value.text||value.note);
-  return {key,index:i,kind:"Row",text:english,characters:english.length,entity_status:"applied",
+  return {key,category:i<2?"menus":"buildings",index:i,kind:"Row",text:english,characters:english.length,entity_status:"applied",
    source_file:"localization/en_US/primary.xml",source_line:i+3,english_edited_at:"",changed_in:[],
    classification:"lekmod_new",lekmod_en_US:english,lekmod_en_US_characters:String(english.length),
    lekmod_en_US_gender:"",lekmod_en_US_plurality:"",vanilla_en_US:"",vanilla_target:"",lekmod_target:"",
@@ -35,7 +35,7 @@ function rows(developer=false){
 }
 function metadata(){return {ready:true,project:{version:"v35.4.003"},release:"v35.4",included_source:false,
  game:connected?{path:"game",state:"installed",selected_mod:"LEKMOD_v35.4",mods:[{name:"LEKMOD_v35.4",version:"v35.4.003",release:"v35.4"}],error:""}:{path:"",state:"missing_game",mods:[],error:""},
- preferences:{...prefs},locales:{RU_RU:["menus"]},vanilla_counts:{},version_history:{upgrade_versions:[],synced:[],available:[]},
+ preferences:{...prefs},locales:{RU_RU:["menus","buildings"]},vanilla_counts:{},version_history:{upgrade_versions:[],synced:[],available:[]},
  config:{checks:{},build:{shipped:true}},editor_version:"0.25",server_instance:"ui-test",apply_state:{state:"idle"},...status()};}
 async function response(url,options={}){
  const u=new URL(url,"http://localhost/"), body=options.body?JSON.parse(options.body):{};
@@ -45,7 +45,8 @@ async function response(url,options={}){
  else if(u.pathname==="/api/preferences"){Object.assign(prefs,body);result={preferences:{...prefs}};}
  else if(u.pathname==="/api/rows"||u.pathname==="/api/primary"){
   const all=rows(u.pathname==="/api/primary"),q=u.searchParams.get("q")||"";
-  const found=all.filter(x=>!q||x.key.includes(q));result={total:found.length,rows:found};
+  const category=u.searchParams.get("category")||"all";
+  const found=all.filter(x=>(!q||x.key.includes(q))&&(category==="all"||x.category===category));result={total:found.length,rows:found};
  } else if(u.pathname==="/api/draft"){
   const before={...(values[body.key]||blank())};values[body.key]={...body.edit};
   history.splice(cursor);history.push({key:body.key,before,after:{...body.edit}});cursor=history.length;revision++;
@@ -98,11 +99,17 @@ async function wait(fn,label){
  e("save").click();await wait(()=>savedAt&&!e("save").disabled,"explicit Save");
  select(1);input("Второй");await wait(()=>values[keys[1]]?.text==="Второй"&&e("draft-state").textContent.includes("Saved locally"),"second autosave");
  select(2);input("Третий");await wait(()=>values[keys[2]]?.text==="Третий"&&e("draft-state").textContent.includes("Saved locally"),"third autosave");
+ e("category").value="menus";e("category").dispatchEvent(new w.Event("change",{bubbles:true}));
+ await wait(()=>w.currentRows?.length===2&&e("table-loading").hidden,"switch category before Undo");
  hotkey("z");hotkey("z");
  await wait(()=>cursor===1&&e("table-loading").hidden&&!e("undo").disabled,"two rapid Ctrl+Z actions");
  assert(!values[keys[1]].text&&!values[keys[2]].text);
+ assert.equal(e("category").value,"all","Undo reveals a row outside the current category");
+ assert.equal(e("selected").textContent,keys[1]);
  hotkey("y");await wait(()=>cursor===2&&e("table-loading").hidden,"Ctrl+Y");
  hotkey("z");await wait(()=>cursor===1&&e("table-loading").hidden,"undo before branching");
+ e("search-input").value="";e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
+ await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"return to all rows");
  select(3);input("Новая ветка");await wait(()=>values[keys[3]]?.text==="Новая ветка"&&e("draft-state").textContent.includes("Saved locally"),"branch");
  assert.equal(cursor,history.length);assert(e("redo").disabled);
  e("discard").click();assert(e("discard-description").textContent.includes("both modes"));
