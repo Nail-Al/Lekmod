@@ -53,9 +53,9 @@ let gameStatusRequest = false;
 let editorUpdateTimer, editorUpdateStarted = 0, editorUpdateVersion = "", editorRestartStarted = 0;
 let editorUpdateLocked = false, settingsControlsBeforeUpdate = new Map();
 let editorUpdateInstance = "", editorIntegrity = null, latestEditorInfo = null;
-let savedDraft = null, pendingNavigation = null, committedSearch = "", guardSaving = false;
+let savedDraft = null, committedSearch = "";
 let pendingColumns = null;
-let savePending = null, failedSaves = [];
+let failedSaves = [];
 try { failedSaves = JSON.parse(sessionStorage.getItem("failed-translation-drafts") || "[]"); }
 catch (error) { failedSaves = []; }
 if (!Array.isArray(failedSaves)) failedSaves = [];
@@ -64,7 +64,8 @@ function rememberFailedSaves() {
   catch (error) { message("Could not preserve failed drafts in browser storage.", true); }
   el("restore-failed").hidden = !failedSaves.length;
 }
-let saveCompletion = null, resolveSaveCompletion = null;
+let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
+let applyControlsBefore = new Map();
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
 function emptyFilters() {
@@ -124,10 +125,18 @@ function pageSize() { return prefs.page_size || "100"; }
 function pageStep() { return pageSize() === "all" ? total : Number(pageSize()); }
 async function preference(values) {
   const result = await api("/api/preferences", values);
-  prefs = result.preferences;
+  // Another tab can use a different mode; adopt only the controls changed here.
+  prefs = {...prefs, ...Object.fromEntries(Object.keys(values).map(key => [key, result.preferences[key]]))};
 }
 function developer() { return prefs.mode === "developer"; }
-function activeColumns() { return developer() ? developerColumns : translatorColumns; }
+function orderPreference() { return developer() ? "developer_column_order" : "translator_column_order"; }
+function activeColumns() {
+  const columns = developer() ? developerColumns : translatorColumns;
+  const order = prefs[orderPreference()] || [];
+  const known = new Map(columns);
+  return [...order.filter(field => known.has(field)).map(field => [field, known.get(field)]),
+    ...columns.filter(([field]) => !order.includes(field))];
+}
 function columnsPreference() { return developer() ? "developer_visible_columns" : "translator_visible_columns"; }
 function savedColumns() {
   if (prefs[columnsPreference()].length) return prefs[columnsPreference()];
@@ -153,53 +162,26 @@ function captureDraft() {
     gender: grammarValue("gender"), plurality: grammarValue("plurality"),
     note: el("note").value, identifier: developer() ? el("identifier").value : ""});
 }
-function hasUnsaved() { return !!chosen && savedDraft !== null && captureDraft() !== savedDraft; }
-function markDraft() {
-  el("discard").disabled = !hasUnsaved();
-  el("save").disabled = !hasUnsaved() || !!savePending;
+function hasUnsaved() {
+  return !!chosen && savedDraft !== null && (captureDraft() !== savedDraft ||
+    (selectionContext?.textTouched && !el("prefill").checked &&
+      el("translation").value !== selectionContext.textBaseline));
 }
-function restoreDraft() {
-  if (!savedDraft) return;
-  const draft = JSON.parse(savedDraft);
-  el("translation").value = draft.text;
-  setGrammar("gender", draft.gender);
-  setGrammar("plurality", draft.plurality);
-  el("note").value = draft.note;
-  el("identifier").value = draft.identifier;
-  countText(); markDraft();
+function markDraft() {
+  const dirty = hasUnsaved();
+  el("discard").disabled = applyPending || (!dirty && !chosen?.has_local_draft);
+  el("save").disabled = !dirty || !!draftWrite;
+  clearTimeout(autoSaveTimer);
+  if (dirty) {
+    el("draft-state").textContent = "Saving locally…";
+    autoSaveTimer = setTimeout(() => saveCurrent(false), 350);
+  }
 }
 async function guardNavigation(action) {
-  if (!hasUnsaved()) return action();
-  if (el("unsaved-dialog").open) return;
-  pendingNavigation = action;
-  el("unsaved-dialog").showModal();
-}
-async function continueNavigation(save) {
-  if (guardSaving) return;
-  if (save) {
-    guardSaving = true;
-    for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = true;
-    el("unsaved-save").classList.add("busy-action");
-    let saved;
-    try {
-      if (saveCompletion) {
-        message("Waiting for the previous row to finish saving…");
-        await saveCompletion;
-      }
-      saved = await saveCurrent();
-    }
-    finally {
-      guardSaving = false;
-      for (const id of ["unsaved-save", "unsaved-discard", "unsaved-keep"]) el(id).disabled = false;
-      el("unsaved-save").classList.remove("busy-action");
-    }
-    if (!saved) return;
-  }
-  if (!save) restoreDraft();
-  const next = pendingNavigation;
-  pendingNavigation = null;
-  el("unsaved-dialog").close();
-  if (next) await next();
+  clearTimeout(autoSaveTimer);
+  if (draftWrite) await draftWrite;
+  if (hasUnsaved() && !await saveCurrent(false)) return;
+  return action();
 }
 function countText() {
   const value = el("translation").value;
@@ -223,8 +205,14 @@ async function copyText(value) {
   catch (error) { message("Clipboard access was denied by the browser.", true); }
 }
 function updateHistory(state) {
-  el("undo").disabled = !!savePending || !state.undo_available;
-  el("redo").disabled = !!savePending || !state.redo_available;
+  el("undo").disabled = applyPending || !state.draft_undo_available;
+  el("redo").disabled = applyPending || !state.draft_redo_available;
+  if (state.draft_count !== undefined) meta.draft_count = state.draft_count;
+  if (state.draft_undo_available !== undefined) meta.draft_undo_available = state.draft_undo_available;
+  if (state.draft_redo_available !== undefined) meta.draft_redo_available = state.draft_redo_available;
+  el("project-apply").disabled = applyPending || !meta.ready || !meta.draft_count;
+  el("discard").disabled = applyPending || (!hasUnsaved() && !chosen?.has_local_draft);
+  el("local-drafts").textContent = (meta.draft_count || 0) + " local drafts";
 }
 function renderConnections() {
   const project = meta.project;
@@ -245,7 +233,8 @@ function renderConnections() {
   el("game-badge").classList.toggle("missing", !matches);
   const changedGameFolder = el("settings-dialog").open &&
     el("game-path").value !== (prefs.game_path || game.path);
-  el("game-apply").disabled = !!savePending || !matches || !meta.ready || changedGameFolder;
+  el("game-apply").disabled = applyPending || !matches || !meta.ready || changedGameFolder;
+  el("project-apply").disabled = applyPending || !meta.ready || !meta.draft_count;
   el("workspace").hidden = !meta.ready || inLogs || inMerge;
   el("merge-view").hidden = !meta.ready || inLogs || !inMerge;
   el("no-source").hidden = meta.ready || inLogs || inMerge;
@@ -283,9 +272,9 @@ function changeMode() {
   el("run-checks").hidden = !developer();
   translationHeading();
   el("text-help").textContent = developer()
-    ? "Saved in primary.xml; changes make previous translations stale."
-    : "Saved in the language CSV; the project's game XML is rebuilt.";
-  el("save").textContent = "Save and apply";
+    ? "Auto-saved locally. Apply to Lekmod project updates primary.xml and resets outdated translations."
+    : "Auto-saved locally. Apply to Lekmod project updates CSV and game XML in one batch.";
+  el("save").textContent = "Save";
   el("share").hidden = developer();
   el("share-english").hidden = !developer();
   updateBaselineNotice();
@@ -389,7 +378,8 @@ function renderColumnChoices() {
 }
 function colWidth(field) {
   return widths[field] || (field === "key" ? 255 :
-    ["lekmod_en_US", "lekmod_target", "text"].includes(field) ? 490 : 245);
+    ["lekmod_en_US", "lekmod_target", "text"].includes(field) ? 490 :
+      ["vanilla_en_US", "vanilla_target"].includes(field) ? 429 : 245);
 }
 function renderTable(rows) {
   window.currentRows = rows;
@@ -404,7 +394,44 @@ function renderTable(rows) {
     col.style.width = colWidth(field) + "px";
     group.append(col);
     const th = document.createElement("th");
-    th.textContent = columnTitle(field, title);
+    th.dataset.field = field;
+    const label = document.createElement("span");
+    label.className = "column-label"; label.draggable = true;
+    label.textContent = columnTitle(field, title);
+    label.title = "Drag this heading to reorder columns. Use the right edge to resize.";
+    label.tabIndex = 0;
+    label.addEventListener("dragstart", event => {
+      event.dataTransfer.setData("text/plain", field);
+      event.dataTransfer.effectAllowed = "move";
+      th.classList.add("dragging-column");
+    });
+    label.addEventListener("dragend", () => head.querySelectorAll("th").forEach(item =>
+      item.classList.remove("dragging-column", "column-drop")));
+    async function moveColumn(from, before, after = false) {
+      if (from === before || !activeColumns().some(([key]) => key === from)) return;
+      const order = activeColumns().map(([key]) => key).filter(key => key !== from);
+      order.splice(order.indexOf(before) + (after ? 1 : 0), 0, from);
+      await preference({[orderPreference()]: order});
+      renderTable(window.currentRows || []);
+      logUI("columns-changed", "order");
+    }
+    th.addEventListener("dragover", event => { event.preventDefault(); th.classList.add("column-drop"); });
+    th.addEventListener("dragleave", () => th.classList.remove("column-drop"));
+    th.addEventListener("drop", event => {
+      event.preventDefault();
+      const bounds = th.getBoundingClientRect();
+      moveColumn(event.dataTransfer.getData("text/plain"), field, event.clientX > bounds.left + bounds.width / 2)
+        .catch(error => message(error.message, true));
+    });
+    label.addEventListener("keydown", event => {
+      if (!event.altKey || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const order = activeColumns().map(([key]) => key), index = order.indexOf(field);
+      const other = order[index + (event.key === "ArrowLeft" ? -1 : 1)];
+      if (other) (event.key === "ArrowLeft" ? moveColumn(field, other) : moveColumn(other, field))
+        .catch(error => message(error.message, true));
+    });
+    th.append(label);
     const handle = document.createElement("span");
     handle.className = "resizer";
     handle.setAttribute("role", "separator");
@@ -433,11 +460,6 @@ function renderTable(rows) {
   head.append(header);
   for (const row of rows) {
     const tr = document.createElement("tr");
-    if (savePending && savePending.key === row.key &&
-        savePending.locale === el("locale").value && !developer()) {
-      tr.classList.add("saving"); tr.setAttribute("aria-busy", "true");
-      tr.title = "This row is saving; you can edit other rows.";
-    }
     for (const [field] of cols) {
       const td = document.createElement("td");
       const value = String(row[field] ?? "");
@@ -462,17 +484,10 @@ function renderTable(rows) {
       }
       tr.append(td);
     }
-    tr.addEventListener("click", () => {
-      if (tr.classList.contains("saving")) return;
-      if (!hasUnsaved()) { selectRow(row, tr); return; }
-      guardNavigation(async () => {
-        await load();
-        const index = (window.currentRows || []).findIndex(item => item.key === row.key);
-        if (index >= 0) selectRow(window.currentRows[index],
-          el("table").querySelectorAll("tbody tr")[index]);
-        else message("That row is no longer visible. Select it again from the table.");
-      });
-    });
+    if (row.has_local_draft) { tr.classList.add("local-draft"); tr.title = "Saved locally; not applied to the project yet."; }
+    if (chosen && chosen.draft_slot === row.draft_slot) tr.classList.add("selected");
+    tr.addEventListener("click", () => guardNavigation(() => selectRow(row,
+      el("table").querySelectorAll("tbody tr")[(window.currentRows || []).indexOf(row)] || tr)));
     body.append(tr);
   }
   tableWidth(cols);
@@ -481,10 +496,12 @@ function tableWidth(cols) {
   el("table").style.width = cols.reduce((sum, [field]) => sum + colWidth(field), 0) + "px";
 }
 function selectRow(row, tr) {
-  if (savePending && !developer() && row.key === savePending.key &&
-      el("locale").value === savePending.locale) return;
   logUI("row-selected");
   chosen = row;
+  selectionContext = {mode: prefs.mode, locale: el("locale").value,
+    category: row.category || el("category").value,
+    textTouched: false, textBaseline: developer() ? row.text : row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "",
+    group: Date.now().toString(36) + Math.random().toString(36).slice(2)};
   document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
   tr.classList.add("selected");
   const locale = el("locale").value;
@@ -496,7 +513,7 @@ function selectRow(row, tr) {
   for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer() || sourceBlocked;
   if (el("prefill").checked) {
     el("translation").value = developer() ? row.text
-      : row.translation || row.lekmod_target || "";
+      : row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "";
   } else {
     el("translation").value = "";
   }
@@ -506,6 +523,7 @@ function selectRow(row, tr) {
   el("identifier").value = developer() ? row.key : "";
   countText();
   savedDraft = captureDraft();
+  el("draft-state").textContent = row.has_local_draft ? "Saved locally · awaiting Apply" : "";
   markDraft();
   if (developer()) {
     el("context").textContent = "English edited: " + (localEditTime(row.english_edited_at) || "unknown") +
@@ -572,6 +590,9 @@ async function load() {
   }
 }
 function clearSelection() {
+  clearTimeout(autoSaveTimer);
+  selectionContext = null;
+  el("draft-state").textContent = "";
   chosen = null;
   savedDraft = null;
   el("selected").textContent = "Select a row";
@@ -686,7 +707,7 @@ el("source-check").addEventListener("click", () => {
 });
 setInterval(() => refreshSourceVersions(), 600000);
 async function refreshGameConnection() {
-  if (!meta?.ready || gameStatusRequest || editorUpdateLocked || savePending || mergeApplying) return;
+  if (!meta?.ready || gameStatusRequest || editorUpdateLocked || applyPending || mergeApplying) return;
   gameStatusRequest = true;
   try {
     const game = await api("/api/game-status");
@@ -786,6 +807,9 @@ async function refresh() {
   select.value = locales[prefs.locale] ? prefs.locale : Object.keys(locales)[0] || "";
   categories();
   updateHistory(meta);
+  if (meta.apply_state?.state === "running" && !applyPending) {
+    setApplyLock(true); pollApply();
+  }
   if (meta.ready) changeMode();
   if (!prefs.onboarded && !el("settings-dialog").open) {
     el("settings-dialog").showModal(); fillSettings();
@@ -1102,6 +1126,7 @@ el("prefill-keep").addEventListener("click", () => {
   el("prefill-dialog").close(); message("Auto-fill off; your text was kept.");
 });
 el("prefill-clear").addEventListener("click", () => {
+  if (selectionContext) selectionContext.textTouched = true;
   el("translation").value = ""; countText(); markDraft(); el("prefill-dialog").close();
   message("Auto-fill off; edit box cleared.");
 });
@@ -1112,7 +1137,10 @@ for (const name of ["gender", "plurality"]) el(name).addEventListener("change", 
   if (!custom.hidden) custom.focus();
   markDraft();
 });
-el("translation").addEventListener("input", () => { countText(); markDraft(); });
+el("translation").addEventListener("input", () => {
+  if (selectionContext) selectionContext.textTouched = true;
+  countText(); markDraft();
+});
 for (const name of ["gender", "gender-custom", "plurality", "plurality-custom", "note", "identifier"])
   el(name).addEventListener("input", markDraft);
 el("prev").addEventListener("click", () => guardNavigation(() => {
@@ -1191,11 +1219,70 @@ el("filters-reset").addEventListener("click", () => {
 el("discard").addEventListener("click", () => { if (chosen) el("discard-dialog").showModal(); });
 el("discard-cancel").addEventListener("click", () => el("discard-dialog").close());
 el("discard-confirm").addEventListener("click", () => {
-  if (chosen) {
-    restoreDraft(); logUI("discard"); message("Unsaved edits discarded; saved files unchanged.");
-  }
-  el("discard-dialog").close();
+  clearTimeout(autoSaveTimer);
+  (async () => {
+    if (draftWrite) await draftWrite;
+    if (!chosen) return;
+    try {
+      const slot = chosen.draft_slot;
+      const result = await api("/api/draft-discard", {slot, revision: chosen.draft_revision || 0});
+      chosen = null; savedDraft = null;
+      updateHistory(result); await load();
+      const index = (window.currentRows || []).findIndex(row => row.draft_slot === slot);
+      if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
+      logUI("discard"); message("Local draft discarded. Project files are unchanged.");
+      el("discard-dialog").close();
+    } catch (error) { message(error.message, true); }
+  })();
 });
+el("local-drafts").addEventListener("click", () => guardNavigation(async () => {
+  try {
+    const result = await api("/api/drafts");
+    const list = el("draft-list"); list.replaceChildren();
+    if (!result.entries.length) list.textContent = "No pending local drafts.";
+    for (const entry of result.entries) {
+      const item = document.createElement("div"), title = document.createElement("strong");
+      item.className = "draft-entry";
+      title.textContent = (entry.payload.mode === "developer" ? "EN" : entry.payload.locale) + " · " + entry.payload.key;
+      const text = document.createElement("pre"); text.textContent = entry.payload.edit.text;
+      const reviewButton = document.createElement("button"); reviewButton.textContent = "Review current project";
+      reviewButton.addEventListener("click", async () => {
+        try {
+          const review = await api("/api/draft-review", {slot: entry.slot});
+          const comparison = document.createElement("pre");
+          comparison.textContent = "Current English:\n" + review.english_text + "\n\nCurrent project text:\n" + (review.project_text || "(empty)");
+          const explanation = document.createElement("p"); explanation.className = "hint";
+          explanation.textContent = "After reviewing the meaning and tokens, you can keep your draft against this source. Project files change only at Apply.";
+          const accept = document.createElement("button"); accept.textContent = "Keep my draft against this source";
+          accept.addEventListener("click", async () => {
+            try {
+              const status = await api("/api/draft-rebase", {slot: entry.slot, revision: review.entry.revision, base: review.base});
+              updateHistory(status); accept.disabled = true; await load();
+              message("Draft baseline updated. Review its text, then Apply when ready.");
+            } catch (error) { message(error.message, true); }
+          });
+          reviewButton.replaceWith(comparison, explanation, accept);
+        } catch (error) { message(error.message, true); }
+      });
+      const remove = document.createElement("button"); remove.textContent = "Discard this draft";
+      remove.addEventListener("click", async () => {
+        const confirm = document.createElement("button"); confirm.textContent = "Confirm discard";
+        remove.replaceWith(confirm);
+        confirm.addEventListener("click", async () => {
+          try {
+            const status = await api("/api/draft-discard", {slot: entry.slot, revision: entry.revision});
+            updateHistory(status); item.remove(); await load();
+            message("Local draft discarded. Project files are unchanged.");
+          } catch (error) { message(error.message, true); }
+        });
+      });
+      item.append(title, text, reviewButton, remove); list.append(item);
+    }
+    el("drafts-dialog").showModal();
+  } catch (error) { message(error.message, true); }
+}));
+for (const id of ["drafts-x", "drafts-close"]) el(id).addEventListener("click", () => el("drafts-dialog").close());
+el("drafts-backup").addEventListener("click", () => { location.href = "/api/draft-backup"; });
 function fillExchange() {
   el("exchange-title").textContent = developer() ? "Import/Export English source" : "Import/Export translations";
   el("exchange-help").textContent = developer()
@@ -1309,7 +1396,7 @@ function updateMergeSummary() {
     (mergeReview.source_commit && mergeReview.current_commit &&
      mergeReview.source_commit !== mergeReview.current_commit ?
       " Source revisions differ; each English row was checked." : "");
-  el("merge-apply").disabled = !!pending || !!savePending || mergeApplying || mergeChecking;
+  el("merge-apply").disabled = !!pending || applyPending || !!meta.draft_count || mergeApplying || mergeChecking;
   for (const id of ["merge-clear", "merge-back", "merge-prev", "merge-next", "mode", "settings-button", "logs-button", "merge-button"])
     if (mergeChecking) el(id).disabled = true;
     else if (!mergeApplying) el(id).disabled = id === "merge-prev" ? mergePage === 0 :
@@ -1394,141 +1481,152 @@ el("merge-apply").addEventListener("click", async () => {
     button.classList.remove("busy-action");
   }
 });
-el("unsaved-keep").addEventListener("click", () => {
-  pendingNavigation = null; el("unsaved-dialog").close();
-});
-el("unsaved-dialog").addEventListener("cancel", event => {
-  if (guardSaving) event.preventDefault();
-  else pendingNavigation = null;
-});
-el("unsaved-discard").addEventListener("click", () => continueNavigation(false));
-el("unsaved-save").addEventListener("click", () => continueNavigation(true));
 window.addEventListener("beforeunload", event => {
-  if (hasUnsaved() || failedSaves.length || savePending) {
+  if (hasUnsaved() && selectionContext) {
+    fetch("/api/draft", {method: "POST", keepalive: true,
+      headers: {"Content-Type": "application/json", "X-Editor-Token": token},
+      body: JSON.stringify(draftPayload(chosen, selectionContext, captureDraft()))}).catch(() => {});
+  }
+  if (hasUnsaved() || failedSaves.length || draftWrite) {
     event.preventDefault(); event.returnValue = "";
   }
 });
-function setSaveLock(active) {
-  for (const id of ["mode", "settings-button", "exports-button", "merge-button",
-                    "game-apply", "run-checks", "create-key", "locale", "category",
-                    "undo", "redo"]) {
-    el(id).disabled = active || (id === "merge-button" && !mergeReview?.items.length);
-  }
-  const status = el("save-state");
-  status.hidden = !active;
-  status.className = "section-status busy";
-  status.textContent = active ? "Saving " + savePending.key +
-    " and rebuilding the project. You may edit other rows while this finishes." : "";
-  if (!active) {
-    updateHistory(meta);
-    renderConnections();
-    markDraft();
+document.addEventListener("visibilitychange", () => { if (document.hidden && hasUnsaved()) saveCurrent(false); });
+function draftPayload(row, context, form) {
+  const edit = JSON.parse(form);
+  // With filling disabled, an untouched empty box is a view preference,
+  // not a request to erase the saved text while editing its note or key.
+  if (!el("prefill").checked && !context.textTouched)
+    edit.text = context.mode === "developer" ? row.text :
+      row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "";
+  return {mode: context.mode, locale: context.mode === "developer" ? "" : context.locale,
+    key: row.draft_key || row.key, index: row.index ?? -1,
+    slot: row.draft_slot, revision: row.draft_revision || 0, base: row.draft_base,
+    source_fingerprint: row.source_fingerprint, create: !!row.draft_create,
+    group: context.group, edit,
+    reverted: !row.draft_create && JSON.stringify(edit) === JSON.stringify(row.applied_edit)};
+}
+function reflectDraft(row, edit, result, context) {
+  row.draft_revision = result.entry?.revision || 0;
+  row.draft_slot = result.entry?.slot || row.draft_slot;
+  row.has_local_draft = !!result.entry?.payload;
+  if (result.entry?.payload) row.draft_base = result.entry.payload.base;
+  if (context.mode === "developer") {
+    row.draft_key = result.entry?.payload?.key || row.draft_key || row.key;
+    row.draft_create = !!result.entry?.payload?.create;
+    row.key = edit.identifier; row.text = edit.text;
+    row.characters = Array.from(edit.text).length;
   } else {
+    row.translation = edit.text; row.translation_gender = edit.gender;
+    row.translation_plurality = edit.plurality; row.translator_note = edit.note;
+    row.translation_characters = String(Array.from(edit.text).length);
+    row.translation_status = row.has_local_draft ? "draft" : edit.text ? "applied" : "missing";
+  }
+}
+async function saveCurrent(notify = true) {
+  clearTimeout(autoSaveTimer);
+  if (draftWrite) {
+    await draftWrite;
+    if (!hasUnsaved()) return true;
+  }
+  if (!chosen || !hasUnsaved()) return true;
+  const row = chosen, context = {...selectionContext}, form = captureDraft(), previousForm = savedDraft;
+  const data = draftPayload(row, context, form);
+  draftWrite = (async () => {
+    el("draft-state").textContent = "Saving locally…";
     el("save").disabled = true;
-  }
-}
-function updateSavedRow(pending, result) {
-  const rows = window.currentRows || [];
-  if (el("locale").value === pending.locale) {
-    for (const row of rows) {
-      row.approved_sha256 = result.approved_sha256;
-      if (row.key === pending.key && (el("category").value === pending.category || el("category").value === "all")) {
-        row.translation = pending.translation;
-        row.translation_gender = pending.translation_gender;
-        row.translation_plurality = pending.translation_plurality;
-        row.translator_note = pending.translator_note;
-        row.translation_updated_at = result.translation_updated_at;
-        row.translation_characters = String(Array.from(pending.translation).length);
-        row.translation_status = pending.translation ?
-          (result.applied_to_game ? "applied" : "saved") : "missing";
-      }
-    }
-    if (chosen) chosen.approved_sha256 = result.approved_sha256;
-    renderTable(rows);
-    if (chosen) {
-      const index = rows.findIndex(row => row === chosen);
-      if (index >= 0) el("table").querySelectorAll("tbody tr")[index].classList.add("selected");
-    }
-  }
-}
-async function saveCurrent() {
-  if (!chosen || !hasUnsaved() || savePending) return false;
-  if (developer()) {
-    savePending = {key: chosen.key, locale: "", developer: true};
-    setSaveLock(true);
-    el("table-loading").hidden = false;
-    message("Saving English and rebuilding…");
     try {
-      const newKey = el("identifier").value;
-      const result = await api(newKey === chosen.key ? "/api/primary" : "/api/rename-primary",
-        {index: chosen.index, key: chosen.key, old_text: chosen.text,
-          text: el("translation").value, ...(newKey === chosen.key ? {} : {new_key: newKey})});
-      meta.undo_available = result.undo_available;
-      meta.redo_available = result.redo_available;
-      updateHistory(result); await load();
-      el("table-loading").hidden = false;
-      try {
-        const checked = await api("/api/check", {});
-        message("English source saved and rebuilt. " + checked.summary);
-      } catch (error) { message("English saved; checks failed: " + error.message, true); }
+      let result = await api("/api/draft", data);
+      if (result.conflict) {
+        // Apply may have rebased this same draft while its form stayed open.
+        const equalEdit = (left, right) => left && right &&
+          ["text", "gender", "plurality", "note", "identifier"].every(field => left[field] === right[field]);
+        const sameEdit = equalEdit(result.entry?.payload?.edit, JSON.parse(previousForm));
+        const justApplied = equalEdit(result.applied?.edit, JSON.parse(previousForm));
+        if (!sameEdit && !justApplied) throw new Error("This draft changed in another view. Your text remains here; reload the row before saving.");
+        data.revision = result.entry?.revision || 0;
+        data.base = result.entry?.payload?.base || result.applied.base;
+        if (data.mode === "developer" && justApplied) { data.key = data.base.key; data.create = false; }
+        result = await api("/api/draft", data);
+        if (result.conflict) throw new Error("The draft changed again; keep this form open and retry Save.");
+      }
+      reflectDraft(row, data.edit, result, context);
+      if (result.entry?.payload) row.draft_base = result.entry.payload.base;
+      updateHistory(result);
+      if (chosen === row) {
+        savedDraft = form;
+        selectionContext.textBaseline = data.edit.text;
+        el("draft-state").textContent = row.has_local_draft ? "Saved locally · awaiting Apply" : "Matches the project";
+        renderTable(window.currentRows || []);
+      }
+      if (notify) message("Saved locally. Apply updates the mod files when you are ready.");
       return true;
-    } catch (error) { message(error.message, true); markDraft(); return false; }
-    finally {
-      savePending = null; setSaveLock(false);
-      el("table-loading").hidden = true;
+    } catch (error) {
+      el("draft-state").textContent = "Local save failed. Your text is still here; retry Save.";
+      message(error.message, true);
+      return false;
     }
-  }
-  const pending = {locale: el("locale").value, category: chosen.category || el("category").value,
-    key: chosen.key, source_fingerprint: chosen.source_fingerprint,
-    english_source_sha256: chosen.english_source_sha256,
-    approved_sha256: chosen.approved_sha256, translation: el("translation").value,
-    translation_gender: grammarValue("gender"), translation_plurality: grammarValue("plurality"),
-    translator_note: el("note").value};
-  savePending = pending;
-  saveCompletion = new Promise(resolve => { resolveSaveCompletion = resolve; });
-  setSaveLock(true);
-  let completed = false;
+  })();
+  const success = await draftWrite;
+  draftWrite = null;
+  // Do not retry errors endlessly, or wipe text entered during an earlier write.
+  if (success) markDraft();
+  else { el("save").disabled = !hasUnsaved(); el("discard").disabled = false; }
+  return success;
+}
+el("save").addEventListener("click", () => saveCurrent(true));
+async function pollApply() {
   try {
-    const started = await api("/api/translate-async", pending);
-    const jobId = started.id;
-    clearSelection();
-    renderTable(window.currentRows || []);
-    let status = started;
-    while (status.state === "running") {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      status = await api("/api/save-status");
-      if (status.id !== jobId) throw new Error("Another save replaced this row's result.");
-    }
-    if (status.state !== "complete") throw new Error(status.error || "Translation save failed.");
-    savePending = null;
-    updateSavedRow(pending, status);
-    meta.undo_available = status.undo_available;
-    meta.redo_available = status.redo_available;
-    setSaveLock(false);
-    failedSaves = failedSaves.filter(draft => draft.locale !== pending.locale ||
-      draft.category !== pending.category || draft.key !== pending.key);
-    rememberFailedSaves();
-    message(status.applied_to_game === false ? "Saved. XML generation is Off in config.json." :
-      "Saved to the project CSV and generated game XML.");
-    completed = true;
-    return true;
+    const state = await api("/api/apply-status");
+    setApplyLock(state.state === "running");
+    const target = el("save-state");
+    target.hidden = !applyPending && state.state !== "error";
+    target.className = "section-status " + (applyPending ? "busy" : "error");
+    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " Your local drafts are retained." :
+      state.phase + " · " + state.count + " saved drafts. You can keep editing.";
+    updateHistory(state); renderConnections();
+    if (applyPending) { applyTimer = setTimeout(pollApply, 700); return; }
+    // Finish saving any newer typing before refreshing the table's baseline.
+    await guardNavigation(async () => {
+      const selectedSlot = chosen?.draft_slot;
+      await load();
+      const index = (window.currentRows || []).findIndex(row => row.draft_slot === selectedSlot);
+      if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
+    });
+    if (state.state === "error") message("Apply failed: " + state.error + " Local drafts are retained.", true);
+    else message("Applied " + state.applied_count + " drafts to the Lekmod project." +
+      (state.game_result ? " Installed game updated; restart Civilization V to test." : ""));
   } catch (error) {
-    savePending = null;
-    failedSaves = failedSaves.filter(draft => draft.locale !== pending.locale ||
-      draft.category !== pending.category || draft.key !== pending.key);
-    failedSaves.push(pending);
-    rememberFailedSaves();
-    setSaveLock(false);
-    renderTable(window.currentRows || []);
-    message("Save failed: " + error.message + " Your text is available through Restore translation.", true);
-    return false;
-  } finally {
-    resolveSaveCompletion(completed);
-    saveCompletion = null;
-    resolveSaveCompletion = null;
+    message("Could not read Apply progress. Your saved drafts remain on disk. " + error.message, true);
+    applyTimer = setTimeout(pollApply, 2000);
   }
 }
-el("save").addEventListener("click", saveCurrent);
+async function applyDrafts(game = false) {
+  return guardNavigation(async () => {
+    if (applyPending) return;
+    try {
+      const state = await api("/api/apply-project", {game});
+      setApplyLock(state.state === "running");
+      updateHistory(state); renderConnections();
+      if (applyPending) pollApply();
+      else message("The project already matches your saved drafts.");
+    } catch (error) { message(error.message, true); }
+  });
+}
+function setApplyLock(active) {
+  if (active === applyPending) return;
+  const ids = ["settings-save", "history-sync", "snapshot-cloud", "snapshot-file", "snapshot-import", "update-install", "editor-quit", "run-checks",
+    "share", "share-english", "handoff-file", "handoff-preview"];
+  if (active) {
+    applyControlsBefore = new Map(ids.map(id => [el(id), el(id).disabled]));
+    for (const control of applyControlsBefore.keys()) control.disabled = true;
+  } else {
+    for (const [control, disabled] of applyControlsBefore) control.disabled = disabled;
+    applyControlsBefore.clear();
+  }
+  applyPending = active;
+}
+el("project-apply").addEventListener("click", () => applyDrafts(false));
 el("restore-failed").addEventListener("click", () => guardNavigation(async () => {
   if (!failedSaves.length) return;
   const draft = failedSaves[0];
@@ -1542,6 +1640,7 @@ el("restore-failed").addEventListener("click", () => guardNavigation(async () =>
   if (index < 0) { message("The saved draft's key is no longer in the source.", true); return; }
   selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
   el("translation").value = draft.translation;
+  if (selectionContext) selectionContext.textTouched = true;
   setGrammar("gender", draft.translation_gender);
   setGrammar("plurality", draft.translation_plurality);
   el("note").value = draft.translator_note;
@@ -1551,8 +1650,8 @@ el("restore-failed").addEventListener("click", () => guardNavigation(async () =>
 }));
 for (const name of ["undo", "redo"]) el(name).addEventListener("click", async () => {
   guardNavigation(async () => {
-    try { const result = await api("/api/" + name, {}); updateHistory(result); await load();
-      message(name === "undo" ? "Last saved change undone." : "Saved change restored.");
+    try { const result = await api("/api/draft-" + name, {}); updateHistory(result); await load();
+      message(name === "undo" ? "Local edit undone. Project files are unchanged." : "Local edit restored.");
     } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
   });
 });
@@ -1576,14 +1675,18 @@ el("create-confirm").addEventListener("click", async () => {
   for (const name of ["create-confirm", "create-x", "create-cancel"]) el(name).disabled = true;
   button.classList.add("busy-action");
   try {
-    sectionMessage("create", "Creating the key and rebuilding the project…", "busy");
-    const result = await api("/api/create-primary", {
-      key: el("create-identifier").value.trim(), text: el("create-text").value,
-      operation: el("create-operation").value});
+    sectionMessage("create", "Saving the new key locally…", "busy");
+    const key = el("create-identifier").value.trim();
+    if (!/^TXT_KEY_[A-Za-z0-9_]+$/.test(key) || !el("create-text").value.trim())
+      throw new Error("Enter a TXT_KEY identifier and English text.");
+    const result = await api("/api/draft", {mode: "developer", locale: "", key, index: -1,
+      slot: "N:" + key, revision: 0, base: {}, create: true,
+      edit: {identifier: key, text: el("create-text").value, gender: "", plurality: "", note: ""}});
+    if (result.conflict) throw new Error("A local draft already uses that identifier.");
     el("create-key-dialog").close();
-    el("search-input").value = result.key;
+    el("search-input").value = key;
     updateHistory(result); offset = 0; await load();
-    message("Text key created. Add a gameplay reference to use it in game.");
+    message("New key saved locally. Apply adds it to primary.xml; add a gameplay reference to use it in game.");
   } catch (error) { sectionMessage("create", error.message, "error"); message(error.message, true); }
   finally {
     for (const name of ["create-confirm", "create-x", "create-cancel"]) el(name).disabled = false;
@@ -1593,17 +1696,7 @@ el("create-confirm").addEventListener("click", async () => {
 el("create-key-dialog").addEventListener("cancel", event => {
   if (el("create-confirm").disabled) event.preventDefault();
 });
-el("game-apply").addEventListener("click", async () => {
-  guardNavigation(async () => {
-    el("game-apply").disabled = true; el("game-apply").classList.add("busy-action");
-    try {
-      const result = await api("/api/apply-game", {});
-      message(result.changed ? "Installed game XML updated. Backup: " + result.backup +
-        ". Restart Civilization V to test." : "Installed game XML already matches this project.");
-    } catch (error) { message(error.message, true); }
-    finally { el("game-apply").classList.remove("busy-action"); renderConnections(); }
-  });
-});
+el("game-apply").addEventListener("click", () => applyDrafts(true));
 el("run-checks").addEventListener("click", async () => {
   guardNavigation(async () => {
     el("run-checks").disabled = true; el("run-checks").classList.add("busy-action");
@@ -1613,7 +1706,22 @@ el("run-checks").addEventListener("click", async () => {
     finally { el("run-checks").disabled = false; el("run-checks").classList.remove("busy-action"); }
   });
 });
-el("share").addEventListener("click", () => guardNavigation(() => {
+async function downloadExport(path, filename, button) {
+  button.disabled = true; button.classList.add("busy-action");
+  try {
+    const response = await fetch(path);
+    if (!response.ok) throw new Error((await response.json()).error || "Export failed");
+    const address = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a"); link.href = address; link.download = filename;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(address), 1000);
+    sectionMessage("exchange", "ZIP includes your valid local drafts; the project files are unchanged.");
+  } catch (error) {
+    sectionMessage("exchange", error.message + " Your drafts remain saved; a draft backup can include unfinished text.", "error");
+    message(error.message, true);
+  } finally { button.disabled = applyPending; button.classList.remove("busy-action"); }
+}
+el("share").addEventListener("click", () => guardNavigation(async () => {
   const selected = Array.from(el("exchange-locales").querySelectorAll("input:checked"),
     input => input.value);
   if (!selected.length) {
@@ -1621,14 +1729,12 @@ el("share").addEventListener("click", () => guardNavigation(() => {
     return;
   }
   logUI("translation-export");
-  location.href = "/api/export?locales=" + encodeURIComponent(selected.join(","));
-  message("ZIP download started for " + selected.join(", ") +
-    ". A recipient can import it using Import/Export → Preview merge.");
+  await downloadExport("/api/export?locales=" + encodeURIComponent(selected.join(",")),
+    "lekmod-translations.zip", el("share"));
 }));
-el("share-english").addEventListener("click", () => guardNavigation(() => {
+el("share-english").addEventListener("click", () => guardNavigation(async () => {
   logUI("english-export");
-  location.href = "/api/export-english";
-  message("English source ZIP download started. Send it to a developer for review.");
+  await downloadExport("/api/export-english", "lekmod-english-source.zip", el("share-english"));
 }));
 function setEditorUpdateLock(locked) {
   if (locked === editorUpdateLocked) return;

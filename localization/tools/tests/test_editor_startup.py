@@ -51,7 +51,7 @@ class StartupTests(unittest.TestCase):
             return result
         with tempfile.TemporaryDirectory() as directory, \
              patch('editor_server.APP_HOME', Path(directory)), \
-             patch('editor_server.HTTPServer', side_effect=server), \
+             patch('editor_server.ThreadingHTTPServer', side_effect=server), \
              patch('editor_server.validate_project', return_value={'version': 'v35.4'}), \
              patch('editor_server.manage.migrate_workspace'), \
              patch('editor_server.manage.prepare'), \
@@ -99,7 +99,7 @@ class StartupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch('editor_server.APP_HOME', Path(directory)), \
              patch('editor_server.Editor.__init__', slow_prepare), \
-             patch('editor_server.HTTPServer', side_effect=server), \
+             patch('editor_server.ThreadingHTTPServer', side_effect=server), \
              patch('builtins.print'), \
              patch.object(sys, 'argv', ['editor_server.py', '--no-browser']):
             worker = threading.Thread(target=editor_server.main)

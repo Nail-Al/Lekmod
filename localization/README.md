@@ -9,7 +9,7 @@ LLE edits Lekmod English and translations. It is a contributor tool; players onl
 3. Click **Save connections**. The editor shows a loading screen while preparing the project, then opens in **Translator** mode on first use.
 4. Optional: expand **Vanilla reference**, keep the prefilled encrypted Dropbox link (or restore it with **Use team link**), enter the snapshot encryption password supplied by the maintainer, and click **Download, decrypt and verify**. This is not your Dropbox account password. The link and verified snapshot are retained; the password is not saved. An empty link displays a gray example only; choose **Use team link** to fill the actual address.
 
-Keep the complete extracted editor folder. **Settings → Editor updates → Download and update editor** updates it in place. The wrench checks missing or changed app files; **Fix version** repairs them. Updates replace only packaged application files and retain connected projects, saved English, translations, snapshot, preferences, column widths and pending Merge reviews. An unsaved row prompts **Save and continue / Discard and continue / Keep editing**. Installation shows its current stage on the same browser address; each reconnect request has a timeout. The new server opens before its project is prepared, so a loading screen is expected during preparation.
+Keep the complete extracted editor folder. **Settings → Editor updates → Download and update editor** updates it in place. The wrench checks missing or changed app files; **Fix version** repairs them. Updates replace only packaged application files and retain connected projects, saved English, translations, snapshot, preferences, column widths/order, local drafts and pending Merge reviews. Edited rows are auto-saved locally before reconnecting. Installation shows its current stage on the same browser address; each reconnect request has a timeout. The new server opens before its project is prepared, so a loading screen is expected during preparation.
 
 Only one editor server runs from each installation folder; double-clicking its EXE reopens that server and retains your current form. Older releases may have left extra processes running after their browser tabs were closed. The downloaded updater now closes verified idle copies from that same folder automatically, keeping the session that requested the update. It refuses to interrupt another copy's save, download or update. A serverless leftover older than two minutes can be retired; a newly starting copy is kept. After acknowledged shutdown, a stuck bootloader is terminated using its original process handle. Editors in other installation folders are untouched. Save text in any other open legacy editor tabs before updating: an old server cannot report text held only in those tabs.
 
@@ -19,12 +19,17 @@ A blocked file stops installation; only files actually replaced are restored, an
 
 ## Translate, save and test
 
-Choose a language and category, or **All categories**. Select a row, edit **My translation text**, then **Save and apply**. The editor writes that row to the connected project's `localization/translations/<LANGUAGE>.csv` and rebuilds its game XML according to `config.json`. It does not replace the whole language with just your row, commit to Git, or update the installed game automatically.
+Choose a language and category, or **All categories**. Select a row and edit **My translation text**. Text, grammar and notes auto-save to a private local draft after a short typing pause and before changing rows, searches, languages or modes. **Save** flushes that draft immediately. It does not rebuild XML or change project CSVs. Incomplete text, including missing formatting tokens, can be saved and finished later.
+
+**Apply to Lekmod project** validates all pending English and translation drafts and rebuilds once according to `config.json`. English applies first; old translations become stale unless a matching new translation is in the same batch. **Apply to installed game** does the same project batch and then copies it to the verified matching game. Only those Apply actions change the mod files. While a batch builds, keep editing: newer drafts stay pending for the next Apply.
+
+Drafts survive restarts and editor updates in the connected project's ignored `localization/workspace/editor-drafts.sqlite3`. **Local drafts** shows pending work, including keys removed in a newer mod, and downloads a backup of incomplete drafts. SQLite is built into the EXE; no database installation is needed. A failed local save keeps the form open and shows Retry Save rather than losing text.
 
 **My translation · RU**, **DE**, etc. names the language you are editing; the form shows the same language. **Vanilla EN** and **Vanilla <selected language>** show official reference sentences from the imported snapshot. Enable the optional translation column in **Visible columns**. The shared baseline contains English and all nine supported translation languages: DE, ES, FR, IT, JA, KO, PL, RU and Traditional Chinese (ZH-Hant-HK). A new Lekmod key may have no vanilla counterpart.
 
 | Status | Meaning |
 | --- | --- |
+| `draft` | Saved locally; not yet applied to the project or game. |
 | `missing` | No saved translation for this English source. |
 | `stale` | English changed. Your old CSV text is retained, but the game uses the updated English until you translate again. |
 | `applied` | Saved translation is in the project's generated XML. |
@@ -33,7 +38,9 @@ Choose a language and category, or **All categories**. Select a row, edit **My t
 
 Icons, colors, `[NEWLINE]` and `{1_Name}` are game formatting tokens. Keep their names and counts; click a token chip to copy it. Character counts do not limit text length. Gender and Plurality accept listed or custom values. Translator notes stay in the CSV and do not appear in game.
 
-Resize columns at their right edge, change page size, and collapse the selected-row panel on small displays. Settings survive editor updates. Translator and Developer each retain their own filters across mode changes and restarts; **Clear filter** clears only the current mode. While a translation saves, its row and conflicting actions are locked; you can edit other rows. Failed saves retain a recoverable draft. Undo/redo reverse saved changes in the current session; the trash icon discards the current unsaved form. Leaving edited text prompts before it is lost.
+Drag column headings to change their order; use the separate right-edge handle to resize. Alt+Left/Right on a focused heading also reorders it. Default order is unchanged; saved order is separate for Translator and Developer. Vanilla columns start wider, without overriding your custom widths. Change page size and collapse the row panel on small displays. Settings and mode-specific filters survive updates; **Clear filter** clears only the current mode.
+
+Undo/redo changes local drafts without a rebuild. Consecutive typing on one selected row is one undo step; it remains available after restarting. The trash icon confirms before discarding that row's local draft. After Apply, its batch leaves local undo history; Git and private `workspace/draft-apply-backups/` retain the applied source history. Actual same-row IDE conflicts stop Apply and preserve drafts: open **Local drafts → Review current project**, compare source and draft, then explicitly keep the draft against that baseline. Different-row IDE edits are preserved automatically.
 
 Edit dates and activity logs use your computer's time zone, displayed as `dd.mm.yyyy / HH:mm`; hover an edit date for the time zone. Date filters use your local calendar days, including daylight-saving changes. Files and exported logs keep their original ISO timestamps/offsets, so importing an Argentine translator's edit shows its corresponding local time to a contributor in Prague. Records without a time zone are identified rather than guessed.
 
@@ -41,7 +48,7 @@ For a game test, first install the **same Lekmod release** using the [official l
 
 ## Upgrade Lekmod and find new work
 
-In **Settings → Get a compatible Lekmod version**, choose the new release and download it. Keep **Carry saved translations when switching projects** checked, then **Save connections**. Unsaved text must be saved, discarded, or kept in the old project before switching. Existing destination translations take priority; conflicting and removed old rows remain available in the old project and private `workspace/carried-translations/` archives. Developer English changes and unfinished Merge reviews stay with their original project; export them for review rather than replacing a new release's English wholesale.
+In **Settings → Get a compatible Lekmod version**, choose the new release and download it. Keep **Carry saved translations when switching projects** checked, then **Save connections**. Current forms auto-save locally before switching. Checked transfer also copies local drafts without deleting the old copies; changed English or conflicting project rows require review before Apply. Existing destination translations take priority; conflicting and removed old rows remain available in the old project and private `workspace/carried-translations/` archives. Unfinished Merge reviews stay with their original project. Local English drafts keep their old per-row baseline: a mod update cannot silently overwrite changed upstream English. Export them for review when appropriate.
 
 The new project copies eligible saved rows with their original English fingerprints. Unchanged rows keep their translations; changed rows become `stale` and use new English in the generated XML. A different vanilla reference stops automatic transfer, except the reviewed EN/RU-to-ten-language extension, which preserves all existing English and Russian data. The previous project is not deleted or overwritten.
 
@@ -51,7 +58,7 @@ The reviewed index covers v35.0–v35.4; complete downloadable projects currentl
 
 ## Import/Export and Merge
 
-**Translator → Import/Export** exports only checked languages. Only the currently selected language starts checked. A ZIP contains all saved rows for those languages, with source fingerprints, notes and timestamps; it excludes private vanilla text. Send it to a maintainer, or commit the saved CSV and generated XML from your connected Git checkout.
+**Translator → Import/Export** exports only checked languages. Only the currently selected language starts checked. A ZIP includes applied rows and valid local drafts for those languages, with source fingerprints, notes and timestamps; it excludes private vanilla text. Required local English edits are included in the same package so dependent translations can be reviewed in order. Invalid/incomplete drafts remain saved; finish them or use **Local drafts → Download draft backup** instead of a merge package. Send it to a maintainer, or commit the saved CSV and generated XML from your connected Git checkout.
 
 **Developer → Import/Export** exports/imports canonical English. The source is `localization/en_US/primary.xml` (`en_US`, not `en_en`). English exports include a baseline of per-key hashes so unchanged sender rows cannot overwrite another developer's independent edits. Older exports without that baseline require explicit conflict review.
 
@@ -59,13 +66,13 @@ Import ZIPs with **Preview merge**. Separate English and translation imports joi
 
 Review current/incoming text, status and **Translations reset**. Check **Include** to accept a row; uncheck to retain team text. Source-mismatched translations cannot be included. English applies first; matching incoming translations apply afterwards. A row labelled **English first** depends on the selected English change. If that English is skipped, its new translation becomes unavailable. Reset language labels identify old translations that fall back to English; their CSV text is kept for later revision.
 
-Choose **Project folder** or **Project and installed game**, then **Apply reviewed changes**. The project is always saved and rebuilt first; the game option additionally verifies and updates the matching installation. A game-only copy would leave the project's source outdated and get overwritten at the next build. A failed project rebuild restores source/CSVs/XML from backups. If the later game copy fails, the reviewed project remains saved and the editor explains that the game needs another apply. Files changed by an IDE after preview require a fresh review.
+Apply your local drafts before applying an imported review; neither is silently overwritten by the other. Choose **Project folder** or **Project and installed game**, then **Apply reviewed changes**. The project is always saved and rebuilt first; the game option additionally verifies and updates the matching installation. A game-only copy would leave the project's source outdated and get overwritten at the next build. A failed project rebuild restores source/CSVs/XML from backups. If the later game copy fails, the reviewed project remains saved and the editor explains that the game needs another apply. Files changed by an IDE after preview require a fresh review.
 
 New text keys can be added in Developer mode. A new key needs a gameplay XML/SQL/Lua reference before it appears in game. Renaming a referenced key, deleting keys, or changing non-text selectors requires a reviewed IDE migration; a source ZIP cannot silently perform it.
 
 ## Developers using Git or an IDE
 
-Use a Git checkout. Each contributor should use their own checkout/branch; avoid simultaneous IDE/editor writes to the same files. The browser edits the connected project, while CLI tools operate on their own checkout. Git contributors review conflicts and commit source/translation changes together with generated XML. English is edited in `primary.xml`; the game file's generated language sections are not edited directly.
+Use a Git checkout. Each contributor should use their own checkout/branch; avoid simultaneous IDE/editor writes to the same files. The browser first edits private drafts; **Apply to Lekmod project** updates the connected checkout. Apply before committing or using CLI exports, because Git intentionally ignores drafts. CLI tools read canonical files in their own checkout. Git contributors review conflicts and commit source/translation changes together with generated XML. English is edited in `primary.xml`; the game file's generated language sections are not edited directly.
 
 After direct edits, run from the repository root:
 
@@ -77,7 +84,7 @@ git diff --check
 
 `config.json` explains each `On`/`Off` switch under `_help`. CI checks committed outputs; it cannot update a contributor's files automatically. **Run checks** uses the full suite in a Git checkout with Python and Git. A portable project runs applicable source/XML checks and names the skipped Git/test gates.
 
-Every Windows build runs a separate updater regression gate before publication: real EXE/HTML file locks, bounded rollback and reopening on the same URL, duplicate launch, and preservation of saved translations, English, preferences and the snapshot. Run that gate locally on Windows with `python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip --locks-only`.
+Every Windows build runs a separate updater regression gate before publication: real EXE/HTML file locks, bounded rollback and reopening on the same URL, duplicate launch, and preservation of applied translations, English, local draft database, column order, preferences and the snapshot. The fast-save regression also runs on Windows: 100 local saves perform no catalog/XML builds; batch Apply, typing during a build and rollback are checked. Run that gate locally on Windows with `python -B localization/tools/test_windows_updater.py --archive dist/LekmodLocalizationEditor-Windows.zip --locks-only`.
 
 To receive one or more ZIPs, preview them together, then repeat the same reviewed choices with `--apply`. English is validated/applied before translations. Replace these example filenames with the received files; omit `$english` if there is no English ZIP:
 

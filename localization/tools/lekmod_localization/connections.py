@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
 import zipfile
@@ -21,6 +22,7 @@ import xml.etree.ElementTree as ET
 APP_HOME = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
             else Path(__file__).resolve().parents[3])
 SETTINGS_FILE = APP_HOME / "localization" / "workspace" / "editor-settings.json"
+SETTINGS_LOCK = threading.RLock()
 TEAM_SNAPSHOT_URL = (
     "https://www.dropbox.com/scl/fi/998d6o71w2og8x9facylu/vanilla-snapshot-complete.enc"
     "?rlkey=ex0bn7c9hjecmu6ayy7qpxaip&dl=1"
@@ -30,6 +32,7 @@ DEFAULTS = {
     "mode": "translator", "prefill": True, "wrap": True, "panel_expanded": True, "locale": "RU_RU",
     "category": "", "visible_columns": [], "translator_visible_columns": [],
     "developer_visible_columns": [], "column_widths": {},
+    "translator_column_order": [], "developer_column_order": [],
     "snapshot_url": TEAM_SNAPSHOT_URL, "snapshot_url_cleared": False,
     "page_size": "100",
     "translator_filters": {}, "developer_filters": {},
@@ -49,7 +52,7 @@ def table_filters(values: dict, *, developer: bool = False) -> dict:
         "", "lekmod_new", "vanilla_modified", "source_conflict")
     if (any(not isinstance(value, str) or len(value) > 64 for value in result.values()) or
             result['kind'] not in kinds or result['status'] not in (
-                "", "missing", "stale", "applied", "saved", "needs_source_review") or
+                "", "missing", "stale", "applied", "saved", "draft", "needs_source_review") or
             result['date_field'] not in ("english_edited_at", "translation_updated_at") or
             result['needs_translation'] not in ("", "true")):
         raise ValueError("invalid table filter selection")
@@ -104,10 +107,12 @@ def settings(home: Path = APP_HOME) -> dict:
         result["mode"] = raw["mode"]
     if raw.get("page_size") in ("25", "50", "100", "250", "500", "1000", "all"):
         result["page_size"] = raw["page_size"]
-    for name in ("visible_columns", "translator_visible_columns", "developer_visible_columns"):
+    for name in ("visible_columns", "translator_visible_columns", "developer_visible_columns",
+                 "translator_column_order", "developer_column_order"):
         if isinstance(raw.get(name), list):
             result[name] = [x for x in raw[name]
                             if isinstance(x, str) and len(x) < 64][:40]
+            result[name] = list(dict.fromkeys(result[name]))
     if isinstance(raw.get("column_widths"), dict):
         result["column_widths"] = {k: v for k, v in raw["column_widths"].items()
                                    if isinstance(k, str) and type(v) is int
@@ -125,6 +130,12 @@ def settings(home: Path = APP_HOME) -> dict:
 
 
 def save_settings(values: dict, home: Path = APP_HOME) -> dict:
+    """Merge concurrent preference writes so resizing cannot erase a language change."""
+    with SETTINGS_LOCK:
+        return _save_settings(values, home)
+
+
+def _save_settings(values: dict, home: Path) -> dict:
     """Atomically keep browser preferences outside the tracked source tree."""
     current = settings(home)
     if set(values) - set(DEFAULTS):
@@ -146,11 +157,14 @@ def save_settings(values: dict, home: Path = APP_HOME) -> dict:
     if (any(not isinstance(candidate[name], list) or any(
         not isinstance(x, str) or len(x) > 64 for x in candidate[name])
             for name in ("visible_columns", "translator_visible_columns",
-                         "developer_visible_columns")) or
+                         "developer_visible_columns", "translator_column_order", "developer_column_order")) or
         not isinstance(candidate["column_widths"], dict) or
         any(not isinstance(k, str) or type(v) is not int or not 100 <= v <= 1500
             for k, v in candidate["column_widths"].items())):
         raise ValueError("invalid table preferences")
+    for name in ('translator_column_order', 'developer_column_order'):
+        if len(candidate[name]) > 40 or len(set(candidate[name])) != len(candidate[name]):
+            raise ValueError('invalid column order')
     candidate["snapshot_url"] = migrate_snapshot_link(candidate["snapshot_url"])
     for name in ('translator_filters', 'developer_filters'):
         candidate[name] = table_filters(candidate[name], developer=name == 'developer_filters')

@@ -17,6 +17,7 @@ from test_windows_updater import start, stop, token_at, wait_for
 from test_portable_editor import source_fixture, REPOSITORY, get
 from merge_localization import candidate_sources
 from merge_translation_handoff import encoded_records
+from lekmod_localization.drafts import DraftStore
 
 
 def main() -> int:
@@ -42,7 +43,8 @@ def main() -> int:
                 "localization/editor/index.html", "localization/editor/app.js",
                 "localization/editor/version.json")}
         preferences = {"project_path": "C:/Lekmod source", "mode": "translator",
-                       "column_widths": {"key": 515}, "snapshot_url": "https://example.invalid"}
+                       "column_widths": {"key": 515}, "snapshot_url": "https://example.invalid",
+                       'translator_column_order': ['translation', 'key', 'lekmod_en_US']}
         connected_files = {}
         previous_reference = None
         if args.connected_project:
@@ -69,6 +71,14 @@ def main() -> int:
                 (project / 'localization/reference/vanilla-fingerprints.json.gz').write_bytes(previous_reference)
         workspace = root / "localization/workspace"
         workspace.mkdir(parents=True)
+        draft_path = (project / 'localization/workspace/editor-drafts.sqlite3'
+                      if args.connected_project else workspace / 'editor-drafts.sqlite3')
+        DraftStore(draft_path).put('T:DE_DE:TXT_KEY_BUILDING_ALCAZABA_PEDIA', {
+            'mode': 'translator', 'locale': 'DE_DE', 'key': 'TXT_KEY_BUILDING_ALCAZABA_PEDIA',
+            'index': -1, 'create': False, 'base': {'approval': None}, 'source_fingerprint': 'a' * 64,
+            'edit': {'text': 'Unapplied local translation; keep across update and repair',
+                     'gender': '', 'plurality': '', 'note': 'Local-only work', 'identifier': ''}}, 0)
+        draft_bytes = draft_path.read_bytes()
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
         (workspace / "vanilla-snapshot.json.gz").write_bytes(b"private snapshot fixture")
         translation = root / "localization/translations/RU_RU.csv"
@@ -150,6 +160,10 @@ def main() -> int:
                 assert any(event['action'] == 'vanilla-reference-migration'
                            for event in json.loads(get(base + '/api/logs'))['events'])
         assert metadata["preferences"]["column_widths"] == {"key": 515}
+        assert metadata['preferences']['translator_column_order'] == ['translation', 'key', 'lekmod_en_US']
+        assert draft_path.read_bytes() == draft_bytes, 'updater modified unapplied local drafts'
+        if args.connected_project:
+            assert metadata['draft_count'] == 1
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
         for name, expected in expected_ui.items():
             assert (root / name).read_bytes() == expected, f"editor kept an old {name}"

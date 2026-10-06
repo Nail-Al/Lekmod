@@ -80,6 +80,16 @@
     .exchange-section h3 { margin: 0; font-size: .95rem; color: #315477; }
     .resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
     .resizer:hover { background: #79a3cf66; }
+    .column-label { display: block; cursor: grab; padding-right: 5px; }
+    #table-scroll[aria-busy="true"] table { pointer-events: none; opacity: .55; }
+    .column-label:active { cursor: grabbing; }
+    th.dragging-column { opacity: .5; }
+    th.column-drop { box-shadow: inset 4px 0 #1767a5; }
+    tbody tr.local-draft:not(.selected) { background: #fff9e8; }
+    #draft-state { min-height: 1.1em; }
+    #draft-list { max-height: 50vh; overflow: auto; display: grid; gap: 10px; }
+    .draft-entry { border: 1px solid var(--divider); padding: 10px; border-radius: 6px; overflow-wrap: anywhere; }
+    .draft-entry pre { white-space: pre-wrap; margin: 6px 0; max-height: 100px; overflow: auto; }
     .nowrap td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .cell { display: flex; align-items: flex-start; gap: 4px; }
     .cell-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -252,8 +262,9 @@
         <div class="tokens" id="tokens"></div>
       </div>
       <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
-      <label><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Saved in this project's language CSV; game XML is rebuilt after saving.</small><textarea id="translation" disabled></textarea></label>
+      <label><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Auto-saved locally. Apply updates the project CSV and game XML.</small><textarea id="translation" disabled></textarea></label>
       <p id="characters" class="hint">Characters: 0 · spaces: 0</p>
+      <p id="draft-state" class="hint" role="status" aria-live="polite"></p>
       <label class="inline compact-check"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
       <div id="grammar" class="fields">
         <label>Gender<span class="select-custom"><select id="gender" disabled><option value="">None</option><option value="feminine">feminine</option><option value="masculine">masculine</option><option value="neuter:the">neuter:the</option><option value="neuter:an">neuter:an</option><option value="__custom__">Custom…</option></select><input id="gender-custom" placeholder="Custom gender" hidden disabled></span></label>
@@ -263,11 +274,13 @@
       <p class="hint" id="note-help">The note is stored in the approved language CSV for reviewers; it is not shown in the game.</p>
       <div class="quick">
         <button id="create-key" hidden>Create new key</button>
-        <button id="save" class="primary" disabled>Save and apply</button>
+        <button id="save" class="primary" disabled>Save</button>
         <button id="discard" class="icon-control" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
         <button id="undo" class="icon" aria-label="Undo saved edit" title="Undo saved edit" disabled>↶</button>
         <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
+        <button id="project-apply" disabled>Apply to Lekmod project</button>
         <button id="game-apply" disabled>Apply to installed game</button>
+        <button id="local-drafts" title="Review saved local drafts">0 local drafts</button>
         <button id="run-checks" hidden>Run checks</button>
         <button id="exports-button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg> Import/Export</button>
       </div>
@@ -288,8 +301,8 @@
 </main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>
-<dialog id="discard-dialog"><section><h2>Discard unsaved changes?</h2><p>Restore the selected row's saved text, grammar and note? Changes already saved in project files remain; use Undo to reverse a saved edit.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Discard changes</button></div></section></dialog>
-<dialog id="unsaved-dialog"><section><h2>Unsaved changes</h2><p id="unsaved-description">Save this row before leaving it?</p><div class="foot"><button id="unsaved-keep">Keep editing</button><button id="unsaved-discard">Discard and continue</button><button id="unsaved-save" class="primary">Save and continue</button></div></section></dialog>
+<dialog id="discard-dialog"><section><h2>Discard this local draft?</h2><p>Restore this row from the project and remove its local text, grammar and note changes? The project and installed game files remain unchanged. Undo can restore the discarded draft before the next Apply.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Discard changes</button></div></section></dialog>
+<dialog id="drafts-dialog"><section><div class="dialog-heading"><h2>Saved local drafts</h2><button id="drafts-x" class="icon-control" title="Close" aria-label="Close local drafts">×</button></div><p class="hint">These edits stay on disk across restarts and editor updates. Apply checks the current English and project translations before rebuilding once. A backup includes incomplete drafts too.</p><div id="draft-list"></div><div class="foot"><button id="drafts-backup">Download draft backup</button><button id="drafts-close">Done</button></div></section></dialog>
 <dialog id="settings-dialog">
   <section>
     <div class="settings-group"><h2>Connections and settings</h2>
@@ -297,7 +310,7 @@
       <p id="source-status" class="section-status" role="status" aria-live="polite"></p>
       <div class="row"><label>Lekmod project folder<input id="project-path" placeholder="Choose a compatible project folder"></label><button id="project-browse">Browse…</button></div>
       <label class="inline"><input id="carry-translations" type="checkbox" checked> Carry saved translations when switching projects</label>
-      <p class="hint">The earlier project is kept. Matching translations continue working; changed English falls back until translated again. Unsaved edits must be saved or discarded before switching.</p>
+      <p class="hint">The earlier project and its local drafts are kept. Matching translations continue working; changed English falls back until translated again. Local drafts are carried with saved translations and checked against the new source at Apply.</p>
       <div class="row"><label>Get a compatible Lekmod version<select id="project-version"><option value="" disabled selected>Loading available versions…</option></select></label><button id="source-check" type="button" class="icon-control" title="Check latest Lekmod version" aria-label="Check latest Lekmod version">⟳</button><button id="project-download">Download/Update</button></div>
       <p id="source-version-status" class="section-status" role="status" aria-live="polite"></p>
       <div id="project-progress-group" class="progress-group" hidden><progress id="project-progress"></progress><p id="project-progress-text" class="hint"></p><button id="project-cancel" type="button">Cancel download</button></div>
@@ -338,7 +351,7 @@
   </section>
 </dialog>
 <dialog id="columns-dialog"><section><div class="dialog-heading"><h2>Visible columns</h2><button id="columns-x" type="button" class="icon-control" aria-label="Close visible columns" title="Close">×</button></div><div id="column-choices" class="column-groups"></div><div class="foot"><button id="columns-close">Done</button></div></section></dialog>
-<dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option><option value="needs_source_review">Needs source review</option></select></label><div class="filter-dates"><label>Changed in Lekmod version<select id="filter-version"><option value="">Any version</option></select></label><label class="inline"><input id="filter-needs" type="checkbox"> Needs localization only</label></div><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
+<dialog id="filters-dialog"><section><div class="dialog-heading"><h2>Filter rows</h2><button id="filters-x" type="button" class="icon-control" aria-label="Close filters without applying" title="Close without applying">×</button></div><div class="filters-grid"><label id="filter-kind-label"><span id="filter-kind-title">Type</span><select id="filter-kind"></select></label><label id="filter-status-label">Status<select id="filter-status"><option value="">Any</option><option>missing</option><option>stale</option><option>applied</option><option>saved</option><option value="draft">Local draft</option><option value="needs_source_review">Needs source review</option></select></label><div class="filter-dates"><label>Changed in Lekmod version<select id="filter-version"><option value="">Any version</option></select></label><label class="inline"><input id="filter-needs" type="checkbox"> Needs localization only</label></div><div class="filter-dates"><label id="filter-date-label" class="date-field">Date field<select id="filter-date-field"><option value="english_edited_at">English edited</option><option value="translation_updated_at">Translation edited</option></select></label><label>Edited from<input id="filter-from" type="date"></label><label>Edited to<input id="filter-to" type="date"></label></div></div><div class="foot"><button id="filters-reset">Clear filters</button><button id="filters-close" class="primary">Apply filters</button></div></section></dialog>
 <dialog id="create-key-dialog"><section><div class="dialog-heading"><h2>Create new English text key</h2><button id="create-x" type="button" class="icon-control" aria-label="Close without creating a key" title="Close without creating">×</button></div><p class="hint">Creates a new Row in the primary English source. The key appears in game only when gameplay XML, SQL or Lua refers to it.</p><label>Create TXT_KEY identifier<input id="create-identifier" placeholder="TXT_KEY_MY_NEW_DESCRIPTION" autocomplete="off"></label><label>English source text<textarea id="create-text"></textarea></label><div class="fields"><label>Source file<input id="create-source" disabled></label><label>Line<input id="create-line" disabled></label><label>Operation<select id="create-operation" disabled><option>Row</option></select></label></div><p id="create-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="create-cancel">Cancel</button><button id="create-confirm" class="primary">Create key</button></div></section></dialog>
 <dialog id="exports-dialog"><section>
   <div class="dialog-heading"><h2 id="exchange-title">Import/Export translations</h2><button id="exports-x" type="button" class="icon-control" aria-label="Close import/export" title="Close">×</button></div>

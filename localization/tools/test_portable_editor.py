@@ -245,21 +245,65 @@ def main() -> int:
                     break
             if row is None:
                 raise RuntimeError("no eligible row in connected project")
-            result = post(base, token, "/api/translate", {
-                "locale": "RU_RU", "category": category, "key": row["key"],
-                "source_fingerprint": row["source_fingerprint"],
-                "english_source_sha256": row["english_source_sha256"],
-                "approved_sha256": row["approved_sha256"],
-                "translation": "Portable editor smoke test", "translation_gender": "",
-                "translation_plurality": "", "translator_note": "",
-            })
-            assert result["applied_to_game"]
-            assert hashlib.sha256(game.read_bytes()).digest() != before
-            assert post(base, token, "/api/undo", {})["redo_available"]
+            csv_path = project / 'localization/translations/RU_RU.csv'
+            original_csv = csv_path.read_bytes()
+            data = {'mode': 'translator', 'locale': 'RU_RU', 'key': row['key'],
+                    'slot': row['draft_slot'], 'revision': row['draft_revision'], 'base': row['draft_base'],
+                    'source_fingerprint': row['source_fingerprint'], 'group': 'smoke-typing',
+                    'edit': {'text': 'Portable local draft', 'gender': '', 'plurality': '',
+                             'note': 'Local contributor work', 'identifier': ''}}
+            started = time.monotonic()
+            for number in range(20):
+                data['edit']['text'] = f'Portable local draft {number}'
+                result = post(base, token, '/api/draft', data)
+                assert not result.get('conflict'), result
+                data['revision'] = result['entry']['revision']
+            duration = time.monotonic() - started
+            assert duration < 10, f'20 local saves took {duration:.1f}s; must not rebuild XML'
             assert hashlib.sha256(game.read_bytes()).digest() == before
+            assert csv_path.read_bytes() == original_csv
+            assert post(base, token, '/api/draft-undo', {})['draft_redo_available']
+            assert not json.loads(get(base + '/api/drafts'))['entries']
+            post(base, token, '/api/draft-redo', {})
+            with zipfile.ZipFile(io.BytesIO(get(base + '/api/export?locales=RU_RU'))) as package:
+                assert b'Portable local draft 19' in package.read('translations/RU_RU.csv')
+                assert 'translations/DE_DE.csv' not in package.namelist()
+
+            def apply_pending():
+                post(base, token, '/api/apply-project', {})
+                for _ in range(600):
+                    state = json.loads(get(base + '/api/apply-status'))
+                    if state['state'] != 'running': break
+                    time.sleep(.1)
+                assert state['state'] == 'complete', state
+                return state
+
+            assert apply_pending()['applied_count'] == 1
+            assert hashlib.sha256(game.read_bytes()).digest() != before
+            assert b'Portable local draft 19' in csv_path.read_bytes()
+            # Test the actual frozen generator's English-first fingerprints,
+            # rather than substituting a hand-written fingerprint in a unit test.
+            post(base, token, '/api/preferences', {'mode': 'developer'})
+            english = next(item for item in json.loads(get(base + '/api/primary?' + urlencode(
+                {'q': row['key'], 'limit': 'all'})))['rows'] if item['key'] == row['key'])
+            post(base, token, '/api/draft', {'mode': 'developer', 'locale': '', 'key': english['key'],
+                'index': english['index'], 'slot': english['draft_slot'], 'revision': english['draft_revision'],
+                'base': english['draft_base'], 'edit': {'text': english['text'] + ' [ICON_CULTURE]',
+                    'identifier': english['key'], 'gender': '', 'plurality': '', 'note': ''}})
+            post(base, token, '/api/preferences', {'mode': 'translator'})
+            fresh = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                'locale': 'RU_RU', 'category': category, 'q': row['key']})))['rows'] if item['key'] == row['key'])
+            assert '[ICON_CULTURE]' in fresh['lekmod_en_US']
+            post(base, token, '/api/draft', {**data, 'revision': fresh['draft_revision'],
+                'base': fresh['draft_base'], 'source_fingerprint': fresh['source_fingerprint'],
+                'edit': {'text': 'Updated translation [ICON_CULTURE]', 'gender': '', 'plurality': '',
+                         'note': '', 'identifier': ''}})
+            assert apply_pending()['applied_count'] == 2
+            assert b'Updated translation [ICON_CULTURE]' in csv_path.read_bytes()
             logs = json.loads(get(base + "/api/logs"))["events"]
-            assert any(event["action"] == "translate" for event in logs)
-            print("Portable editor source gate, mode switch, save, undo and log passed.")
+            assert any(event["action"] == "draft-apply" for event in logs)
+            print(f'Portable editor: 20 local saves in {duration:.2f}s; project unchanged before Apply.')
+            print('Frozen batch Apply, English-first translation, local undo/redo and draft export passed.')
         except Exception:
             print((root / "connected-launch.log").read_text(
                 encoding="utf-8", errors="replace")[-8000:])

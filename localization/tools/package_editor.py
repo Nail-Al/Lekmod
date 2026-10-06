@@ -19,6 +19,8 @@ START = """Lekmod Localization Editor for Windows
 3. In Settings, select a complete compatible Lekmod project folder or click
    Download. Progress and destination are shown. A plain Civilization V installation is not a
    project. Save connections, then select a language and translate.
+   Text auto-saves locally. Save is immediate; Apply to Lekmod project
+   validates and rebuilds all saved drafts once, when you are ready.
 4. For in-game testing, connect to the Civilization V installation in
    Settings and click Find / verify game, then Apply to installed game after
    saving. One matching Lekmod DLC must be installed; the XML is backed up.
@@ -32,7 +34,8 @@ START = """Lekmod Localization Editor for Windows
    version > Download and update. The wrench button checks app files against
    the published release; Fix version repairs missing or changed app files.
    The app shows download progress and reloads this tab after checking the
-   new EXE. Saved translations, settings, projects and the snapshot remain.
+   new EXE. Local drafts, applied translations, settings, projects,
+   column order/widths and the snapshot remain.
    A legacy EXE with a broken updater can be repaired once from a current
    project checkout with localization/tools/repair_editor.py --editor-root
    "<folder containing your old LekmodLocalizationEditor.exe>". Close the
