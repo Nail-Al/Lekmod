@@ -68,6 +68,7 @@ function rememberFailedSaves() {
 let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
 let applyControlsBefore = new Map(), checkpointPending = false, historyPending = false;
 let blockedGameTarget = "game";
+let historyQueue = Promise.resolve(), historyQueued = 0;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
 function emptyFilters() {
@@ -176,7 +177,7 @@ function hasUnsaved() {
 function markDraft() {
   const dirty = hasUnsaved();
   el("discard").disabled = applyPending || (!dirty && !meta?.checkpoint_dirty);
-  el("save").disabled = !meta?.ready || !!draftWrite || checkpointPending;
+  el("save").disabled = !meta?.ready || !!draftWrite || checkpointPending || historyPending;
   el("undo").disabled = applyPending || historyPending || (!dirty && !meta?.draft_undo_available);
   clearTimeout(autoSaveTimer);
   if (dirty) {
@@ -232,11 +233,11 @@ function renderApplyActions() {
   const primary = available[prefs?.apply_target] ? prefs.apply_target : fallback;
   el("apply-primary").textContent = applyNames[primary];
   el("apply-primary").dataset.target = primary;
-  el("apply-primary").disabled = applyPending || !available[primary];
-  el("apply-toggle").disabled = applyPending || !meta?.ready;
+  el("apply-primary").disabled = applyPending || historyPending || !available[primary];
+  el("apply-toggle").disabled = applyPending || historyPending || !meta?.ready;
   for (const target of ["all", "project", "game"]) {
     const button = el(target + "-apply");
-    button.disabled = applyPending || !available[target];
+    button.disabled = applyPending || historyPending || !available[target];
     button.hidden = target === primary;
     button.title = available[target] ? "Apply the current LLE version to " +
       (target === "all" ? "both project and installed game" : target) :
@@ -249,8 +250,8 @@ function updateHistory(state) {
     if (state[key] !== undefined) meta[key] = state[key];
   el("undo").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.draft_undo_available);
   el("redo").disabled = applyPending || historyPending || !meta.draft_redo_available;
-  el("discard").disabled = applyPending || (!hasUnsaved() && !meta.checkpoint_dirty);
-  el("save").disabled = !meta.ready || !!draftWrite || checkpointPending;
+  el("discard").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.checkpoint_dirty);
+  el("save").disabled = !meta.ready || !!draftWrite || checkpointPending || historyPending;
   el("save").title = "Record one restore point for this project's local work · Ctrl+S" +
     (meta.checkpoint_saved_at ? " · Last Save: " + localEditTime(meta.checkpoint_saved_at) : "");
   el("discard").title = meta.checkpoint_saved_at ? "Restore all local work to Save · " + localEditTime(meta.checkpoint_saved_at) :
@@ -657,8 +658,8 @@ function clearSelection() {
   el("translation").value = "";
   el("identifier").value = "";
   el("note").value = "";
-  el("save").disabled = !meta?.ready || checkpointPending;
-  el("discard").disabled = applyPending || !meta?.checkpoint_dirty;
+  el("save").disabled = !meta?.ready || checkpointPending || historyPending;
+  el("discard").disabled = applyPending || historyPending || !meta?.checkpoint_dirty;
   el("identifier").disabled = true;
   el("translation").disabled = true;
   for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
@@ -1652,7 +1653,7 @@ async function saveCurrent(notify = true) {
   return success;
 }
 el("save").addEventListener("click", async () => {
-  if (checkpointPending) return;
+  if (checkpointPending || historyPending) return;
   checkpointPending = true;
   try {
     if (!await saveCurrent(false)) return;
@@ -1789,9 +1790,20 @@ el("restore-failed").addEventListener("click", () => guardNavigation(async () =>
   failedSaves.shift(); rememberFailedSaves();
   message("Your text was restored. Review and save it again.");
 }));
-async function replayLocal(name) {
-  if (historyPending || applyPending) return;
+function replayLocal(name) {
+  if (applyPending || checkpointPending) return Promise.resolve();
+  historyQueued++;
   historyPending = true;
+  updateHistory(meta);
+  const action = historyQueue.then(async () => {
+    try { await performReplayLocal(name); }
+    finally { historyPending = --historyQueued > 0; updateHistory(meta); }
+  });
+  historyQueue = action.catch(() => {});
+  return action;
+}
+async function performReplayLocal(name) {
+  if (!hasUnsaved() && !meta["draft_" + name + "_available"]) return;
   try {
     await guardNavigation(async () => {
       const result = await api("/api/draft-" + name, {});
@@ -1812,7 +1824,6 @@ async function replayLocal(name) {
       message(name === "undo" ? "Local edit undone." : "Local edit restored.");
     });
   } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
-  finally { historyPending = false; updateHistory(meta); }
 }
 for (const name of ["undo", "redo"]) el(name).addEventListener("click", () => replayLocal(name));
 document.addEventListener("keydown", event => {

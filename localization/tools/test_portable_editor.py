@@ -6,6 +6,7 @@ import hashlib
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -370,7 +371,7 @@ def main() -> int:
                         try:
                             post(base, token, '/api/apply-project', {'target': destination})
                             raise AssertionError('Apply accepted an open game')
-                        except urllib.error.HTTPError as error:
+                        except HTTPError as error:
                             detail = json.loads(error.read())
                             assert detail['error_code'] == 'game_running', detail
                     assert before_blocked == (target.read_bytes(), game.read_bytes(), csv_path.read_bytes())

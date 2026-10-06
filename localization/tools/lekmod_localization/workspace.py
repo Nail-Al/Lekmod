@@ -422,14 +422,6 @@ def merge_editor_edits(
     }
 
     for identity, edit in edits.items():
-        if identity not in rows_by_identity:
-            locale, key = identity
-            raise CatalogError(
-                "existing editor translation is no longer in the "
-                f"generated workspace: {locale}/{key}"
-            )
-
-        row = rows_by_identity[identity]
         old_target_was_present = (
             edit["lekmod_target_status"] == "present"
         )
@@ -454,6 +446,20 @@ def merge_editor_edits(
                 )
             )
 
+        if identity not in rows_by_identity:
+            # A removed English key can leave an untouched generated CSV row.
+            # Keep protecting real personal edits and notes from silent loss.
+            if translation_was_default and not edit["translator_note"] and (
+                edit["translation_source_fingerprint"] == edit["source_fingerprint"]
+            ):
+                continue
+            locale, key = identity
+            raise CatalogError(
+                "existing editor translation is no longer in the "
+                f"generated workspace: {locale}/{key}"
+            )
+
+        row = rows_by_identity[identity]
         if edit["translator_note"] or not translation_was_default or (
             edit["translation_source_fingerprint"] != edit["source_fingerprint"]
         ):

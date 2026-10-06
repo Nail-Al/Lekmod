@@ -98,8 +98,9 @@ async function wait(fn,label){
  e("save").click();await wait(()=>savedAt&&!e("save").disabled,"explicit Save");
  select(1);input("Второй");await wait(()=>values[keys[1]]?.text==="Второй"&&e("draft-state").textContent.includes("Saved locally"),"second autosave");
  select(2);input("Третий");await wait(()=>values[keys[2]]?.text==="Третий"&&e("draft-state").textContent.includes("Saved locally"),"third autosave");
- hotkey("z");await wait(()=>cursor===2&&e("table-loading").hidden&&!e("undo").disabled,"Ctrl+Z");
- hotkey("z");await wait(()=>cursor===1&&e("table-loading").hidden&&!e("undo").disabled,"second Ctrl+Z");
+ hotkey("z");hotkey("z");
+ await wait(()=>cursor===1&&e("table-loading").hidden&&!e("undo").disabled,"two rapid Ctrl+Z actions");
+ assert(!values[keys[1]].text&&!values[keys[2]].text);
  hotkey("y");await wait(()=>cursor===2&&e("table-loading").hidden,"Ctrl+Y");
  hotkey("z");await wait(()=>cursor===1&&e("table-loading").hidden,"undo before branching");
  select(3);input("Новая ветка");await wait(()=>values[keys[3]]?.text==="Новая ветка"&&e("draft-state").textContent.includes("Saved locally"),"branch");
