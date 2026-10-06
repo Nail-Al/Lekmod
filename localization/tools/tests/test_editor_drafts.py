@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import io
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -25,6 +26,36 @@ def edit(text, identifier=''):
 
 
 class DraftStoreTests(unittest.TestCase):
+    def test_v024_cleared_draft_history_survives_version_migration(self):
+        """Old NULL draft rows still have useful Undo/Redo actions."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'drafts.sqlite3'
+            payload = {'mode': 'translator', 'locale': 'RU_RU', 'key': 'TXT_KEY_ONE',
+                       'index': -1, 'create': False, 'base': {'approval': None},
+                       'source_fingerprint': 'a' * 64, 'edit': edit('Legacy edit')}
+            with sqlite3.connect(path) as db:
+                db.executescript('''
+                    CREATE TABLE state (id INTEGER PRIMARY KEY, revision INTEGER, cursor INTEGER);
+                    INSERT INTO state VALUES (1, 2, 2);
+                    CREATE TABLE drafts (slot TEXT PRIMARY KEY, revision INTEGER, payload TEXT, updated_at TEXT);
+                    CREATE TABLE history (id INTEGER PRIMARY KEY, slot TEXT, before TEXT, after TEXT, edit_group TEXT);
+                ''')
+                slot = 'T:RU_RU:TXT_KEY_ONE'
+                db.execute('INSERT INTO drafts VALUES (?,2,NULL,?)', (slot, '2026-10-06'))
+                db.execute('INSERT INTO history VALUES (1,?,NULL,?,?)', (slot, json.dumps(payload), 'first'))
+                db.execute('INSERT INTO history VALUES (2,?,?,NULL,?)', (slot, json.dumps(payload), 'clear'))
+            store = DraftStore(path)
+            self.assertEqual(store.entries(), [])
+            store.replay(undo=True)
+            self.assertEqual(store.entries()[0]['payload']['edit']['text'], 'Legacy edit')
+            store.replay(undo=True)
+            self.assertEqual(store.entries(), [])
+            store.replay(undo=False)
+            self.assertEqual(store.entries()[0]['payload']['edit']['text'], 'Legacy edit')
+            store.replay(undo=False)
+            self.assertEqual(store.entries(), [])
+            self.assertFalse(DraftStore(path).status()['draft_redo_available'])
+
     def test_restart_undo_revision_and_discard_are_durable(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'drafts.sqlite3'
@@ -142,7 +173,10 @@ class EditorDraftTests(unittest.TestCase):
         for number in range(100):
             result = self.save(text=f'incomplete draft {number}', revision=revision, group='typing')
             revision = result['entry']['revision']
-        self.assertLess(time.monotonic() - started, 5, 'Local Save regressed to a rebuild-like delay')
+        # Windows CI includes antivirus/filesystem sync jitter. The budget still
+        # gives each durable autosave less than half of the 350 ms typing debounce.
+        budget = 15 if sys.platform == 'win32' else 5
+        self.assertLess(time.monotonic() - started, budget, 'Local Save regressed to a rebuild-like delay')
         self.prepare.assert_not_called(); self.candidates.assert_not_called()
         self.assertEqual({path: path.read_bytes() for path in files}, originals)
         restored = DraftStore(self.editor.drafts.path)
@@ -257,6 +291,203 @@ class EditorDraftTests(unittest.TestCase):
         self.editor.start_apply(); result = self.finish()
         self.assertIn('English changed', result['error'])
         self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
+
+
+    def test_save_survives_history_pruning_branching_restart_and_overwrite(self):
+        first = self.save(text='Saved [ICON_CULTURE]')
+        self.editor.drafts.save_checkpoint()
+        revision = first['entry']['revision']
+        for index in range(120):
+            revision = self.save(text=f'Edit {index} [ICON_CULTURE]', revision=revision,
+                                 group=f'action-{index}')['entry']['revision']
+        self.assertEqual(self.editor.drafts.status()['history_count'], 100)
+        for _ in range(10):
+            self.editor.drafts.replay(undo=True)
+        current = self.editor.drafts.get(first['entry']['slot'])
+        self.save(text='New branch [ICON_CULTURE]', revision=current['revision'], group='action-109')
+        self.assertFalse(self.editor.drafts.status()['draft_redo_available'])
+        restored = DraftStore(self.editor.drafts.path)
+        restored.restore_checkpoint()
+        self.assertEqual(restored.entries()[0]['payload']['edit']['text'], 'Saved [ICON_CULTURE]')
+        self.assertFalse(restored.status()['checkpoint_dirty'])
+        self.assertEqual(restored.status()['history_count'], 0)
+        current = restored.entries()[0]
+        self.save(text='Second Save [ICON_CULTURE]', revision=current['revision'])
+        restored.save_checkpoint()
+        restored.replay(undo=True)
+        restored.restore_checkpoint()
+        self.assertEqual(restored.entries()[0]['payload']['edit']['text'], 'Second Save [ICON_CULTURE]')
+
+    def test_undo_and_save_restore_after_project_apply_are_local_versions(self):
+        original = self.save(text='First [ICON_CULTURE]')
+        self.editor.drafts.save_checkpoint()
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+        current = self.editor.drafts.get(original['entry']['slot'])
+        self.save(text='Second [ICON_CULTURE]', revision=current['revision'],
+                  base=self.editor.drafts.baselines()[original['entry']['slot']]['base'])
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.editor.drafts.replay(undo=True)
+        pending = self.editor.drafts.entries()[0]['payload']
+        self.assertEqual(pending['edit']['text'], 'First [ICON_CULTURE]')
+        self.assertEqual(pending['base']['approval']['text'], 'Second [ICON_CULTURE]')
+        self.assertIn('Second [ICON_CULTURE]', (self.translations / 'RU_RU.csv').read_text())
+        self.editor.drafts.replay(undo=True)
+        self.editor.drafts.restore_checkpoint()
+        self.assertEqual(self.editor.drafts.entries()[0]['payload']['edit']['text'], 'First [ICON_CULTURE]')
+
+    def test_old_csv_translation_never_returns_after_local_clear_or_replacement(self):
+        from lekmod_localization.workspace import EDITOR_FIELDNAMES
+        path = self.root / 'editor-menus.csv'
+        row = dict.fromkeys(EDITOR_FIELDNAMES, '')
+        row.update(key='TXT_KEY_ONE', classification='lekmod_new',
+            source_fingerprint='a'*64, translation_source_fingerprint='a'*64,
+            lekmod_en_US='One [ICON_CULTURE]', required_format_tokens='{"[ICON_CULTURE]":1}',
+            translation='Ghost [ICON_CULTURE]', translation_status='draft')
+        path.write_bytes(encoded_csv([row], EDITOR_FIELDNAMES))
+        self.editor.manifest = lambda: {'locales': {'RU_RU': {'files': {'menus.csv': {}}}}}
+        self.editor.path = lambda *args: path
+        self.editor.english_dates = {}
+        self.editor.version_changes = {}
+        self.editor.version_info = {'upgrade_versions': []}
+        with patch.object(self.editor, 'game_texts', return_value=None):
+            self.assertEqual(self.editor.rows('RU_RU', 'menus', '', 0)['rows'][0]['translation'], '')
+            self.editor.migrate_legacy_drafts()
+            legacy = self.editor.rows('RU_RU', 'menus', '', 0)['rows'][0]
+            self.assertTrue(legacy['has_local_draft'])
+            self.assertEqual(legacy['translation'], 'Ghost [ICON_CULTURE]')
+            result = self.save(text='', revision=legacy['draft_revision'])
+            self.assertEqual(result['draft_count'], 0)
+            self.editor.start_apply()
+            self.assertEqual(self.finish()['state'], 'complete')
+            self.editor.migrate_legacy_drafts()
+            current = self.editor.rows('RU_RU', 'menus', '', 0)['rows'][0]
+            self.assertEqual(current['translation'], '')
+            self.assertEqual(current['translation_status'], 'missing')
+            self.assertFalse(current.get('has_local_draft'))
+            result = self.save(text='Replacement [ICON_CULTURE]', revision=current['draft_revision'])
+            self.editor.start_apply()
+            self.assertEqual(self.finish()['state'], 'complete')
+            current = self.editor.rows('RU_RU', 'menus', '', 0)['rows'][0]
+            self.assertEqual(current['translation'], 'Replacement [ICON_CULTURE]')
+            self.assertEqual(current['translation_status'], 'applied')
+
+    def test_running_game_blocks_merge_before_source_changes(self):
+        from lekmod_localization.game_process import GameRunningError
+        self.editor.handoff_data = b'reviewed package'
+        self.editor.handoff_preview = {'target_sha256': 'a' * 64}
+        self.editor.handoff_id = 'reviewed'
+        with patch('editor_server.require_game_closed', side_effect=GameRunningError(['CivilizationV_DX11.exe'])), \
+             patch('editor_server.review_merge') as merge:
+            with self.assertRaises(GameRunningError):
+                self.editor.apply_handoff({'handoff_id': 'reviewed', 'choices': {}, 'destination': 'project_game'})
+            merge.assert_not_called()
+        self.assertEqual(self.editor.handoff_data, b'reviewed package')
+
+    def test_deleting_an_approved_translation_is_not_a_discarded_empty_draft(self):
+        approved = dict(key='TXT_KEY_ONE', source_fingerprint='a'*64,
+            text='Old [ICON_CULTURE]', gender='', plurality='', translator_note='', updated_at='')
+        path = self.translations / 'RU_RU.csv'
+        path.write_bytes(encoded_csv([approved], APPROVAL_FIELDS))
+        self.save(text='', base={'approval': approved, 'source_fingerprint': 'a'*64})
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.assertNotIn('TXT_KEY_ONE', path.read_text())
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+        self.editor.drafts.replay(undo=True)
+        self.assertEqual(self.editor.drafts.entries()[0]['payload']['edit']['text'], 'Old [ICON_CULTURE]')
+
+    def test_game_only_build_does_not_modify_project_or_clear_history(self):
+        # Exercise Windows line endings on every CI platform, not just Windows.
+        self.source.write_bytes(self.source.read_text().replace('\n', '\r\n').encode('utf-8'))
+        self.save()
+        originals = {path: path.read_bytes() for path in [self.source, self.game, self.translations / 'RU_RU.csv']}
+        with patch('editor_server.settings', return_value={'game_path': str(self.root / 'game')}), \
+             patch('editor_server.inspect_game', return_value={'state': 'installed', 'mods': [{'name': 'LEKMOD_v35.4'}]}), \
+             patch('editor_server.sync_primary_english.synchronize'), \
+             patch('editor_server.build_shipped_localization.build_candidate') as build, \
+             patch('editor_server.apply_game', return_value={'changed': True}) as copy:
+            def candidate(snapshot, **paths):
+                self.assertIn('Translated [ICON_CULTURE]', (paths['approvals'] / 'RU_RU.csv').read_text())
+                self.assertEqual(paths['english_source'].read_text(), self.source.read_text())
+                return '<GameData>local candidate</GameData>', {}
+            build.side_effect = candidate
+            self.editor.start_apply(target='game')
+            result = self.finish()
+            self.assertEqual(result['state'], 'complete', result)
+            self.assertEqual(result['target'], 'game')
+            self.assertEqual(copy.call_args.kwargs['content'], b'<GameData>local candidate</GameData>')
+        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
+        self.assertTrue(self.editor.drafts.status()['draft_undo_available'])
+        self.prepare.assert_not_called()
+        self.assertFalse(list((self.root / 'localization/workspace').glob('game-version-*')))
+
+    def test_created_entity_can_be_undone_after_project_apply(self):
+        self.mode = 'developer'
+        self.save('TXT_KEY_CREATED', 'New', locale='', index=-1, create=True,
+            base={}, edit=edit('New', 'TXT_KEY_CREATED'), slot='N:TXT_KEY_CREATED')
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.assertIn('TXT_KEY_CREATED', self.source.read_text())
+        self.editor.drafts.replay(undo=True)
+        pending = self.editor.drafts.entries()[0]['payload']
+        self.assertTrue(pending['delete'])
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.assertNotIn('TXT_KEY_CREATED', self.source.read_text())
+        self.editor.drafts.replay(undo=False)
+        self.assertTrue(self.editor.drafts.entries()[0]['payload']['create'])
+
+    def test_sync_chips_compare_current_content_instead_of_last_apply_target(self):
+        item = {'locale': 'RU_RU', 'key': 'TXT_KEY_ONE', 'lekmod_en_US': 'One [ICON_CULTURE]',
+            'required_format_tokens': '{"[ICON_CULTURE]":1}', 'source_fingerprint': 'a'*64,
+            'translation': 'New [ICON_CULTURE]', 'translation_gender': '', 'translation_plurality': '',
+            'has_local_draft': True}
+        installed = {'ru_ru': {'TXT_KEY_ONE': {'Text': 'New [ICON_CULTURE]', 'Gender': '', 'Plurality': ''}}}
+        self.editor.row_sync(item, installed, developer=False)
+        self.assertEqual(item['synced_to'], {'project': False, 'game': True})
+        item['translation'] = ''
+        self.editor.row_sync(item, installed, developer=False)
+        self.assertFalse(item['synced_to']['game'])
+        installed['ru_ru']['TXT_KEY_ONE']['Text'] = item['lekmod_en_US']
+        self.editor.row_sync(item, installed, developer=False)
+        self.assertTrue(item['synced_to']['game'])
+        self.editor.row_sync(item, None, developer=False)
+        self.assertIsNone(item['synced_to']['game'])
+
+
+    def test_same_text_can_be_reapproved_against_changed_english(self):
+        approved = dict(key='TXT_KEY_ONE', source_fingerprint='a'*64,
+            text='Same [ICON_CULTURE]', gender='', plurality='', translator_note='', updated_at='')
+        path = self.translations / 'RU_RU.csv'
+        path.write_bytes(encoded_csv([approved], APPROVAL_FIELDS))
+        self.candidates.return_value['TXT_KEY_ONE']['source_fingerprint'] = 'c'*64
+        result = self.save(text=approved['text'], source_fingerprint='c'*64,
+                           base={'approval': approved, 'source_fingerprint': 'c'*64})
+        self.assertEqual(result['draft_count'], 1)
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        with path.open(encoding='utf-8-sig', newline='') as handle:
+            self.assertEqual(next(csv.DictReader(handle))['source_fingerprint'], 'c'*64)
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+
+
+    def test_open_game_blocks_all_before_changing_project_or_starting_job(self):
+        from lekmod_localization.game_process import GameRunningError
+        self.save()
+        before = self.source.read_bytes(), (self.translations / 'RU_RU.csv').read_bytes()
+        with patch('editor_server.require_game_closed', side_effect=GameRunningError(['CivilizationV.exe'])):
+            for target in ('game', 'all'):
+                with self.assertRaises(GameRunningError):
+                    self.editor.start_apply(target=target)
+        self.assertEqual(before, (self.source.read_bytes(), (self.translations / 'RU_RU.csv').read_bytes()))
+        self.assertEqual(self.editor.save_state['state'], 'idle')
+        self.prepare.assert_not_called()
+
 
 
 if __name__ == '__main__':

@@ -48,6 +48,24 @@ jobs:
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci
 
+
+  editor-ui:
+    name: Verify editor Save, history and Apply controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            localization/editor
+            localization/tools/tests/editor_ui.cjs
+          sparse-checkout-cone-mode: false
+      - name: Test actual browser interface
+        run: |
+          node --check localization/editor/app.js
+          npm install --prefix "$RUNNER_TEMP/lle-ui" --no-save jsdom@26.1.0
+          NODE_PATH="$RUNNER_TEMP/lle-ui/node_modules" node localization/tools/tests/editor_ui.cjs
+
   snapshot-collector:
     name: Verify snapshot collection on Windows
     runs-on: windows-latest

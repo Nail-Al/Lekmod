@@ -23,7 +23,7 @@ from lekmod_localization.vanilla_snapshot import read_snapshot, write_snapshot
 from lekmod_localization.vanilla_reference import reference_from_snapshot, write_reference
 from lekmod_localization.fallback import fallback_entries, preview_files, write_preview
 from lekmod_localization.shipped import approved_entries, install_candidate, read_approvals
-from lekmod_localization.workspace import build_editor_rows, editor_source_fingerprint
+from lekmod_localization.workspace import build_editor_rows, editor_source_fingerprint, merge_editor_edits
 import xml.etree.ElementTree as ET
 
 
@@ -971,6 +971,26 @@ WHERE Tag IN ('TXT_KEY_SQL');
             "TXT_KEY_BUILDING_CONFLICT",
             documents["buildings"]["subcategories"]["names"],
         )
+
+    def test_removed_keys_prune_only_untouched_generated_cells(self):
+        """Undoing a created key removes defaults without losing personal work."""
+        edit = {
+            "lekmod_target_status": "not_in_lekmod", "lekmod_target": "",
+            "lekmod_target_gender": "", "lekmod_target_plurality": "",
+            "translation": "", "translation_gender": "", "translation_plurality": "",
+            "translator_note": "", "source_fingerprint": "a" * 64,
+            "translation_source_fingerprint": "a" * 64,
+        }
+        merge_editor_edits({}, {("RU_RU", "TXT_KEY_REMOVED"): edit})
+        native = {**edit, "lekmod_target_status": "present",
+                  "lekmod_target": "Native text", "translation": "Native text"}
+        merge_editor_edits({}, {("RU_RU", "TXT_KEY_REMOVED"): native})
+        for change in ({"translation": "Personal text"}, {"translator_note": "Keep this note"},
+                       {"translation_source_fingerprint": "b" * 64}):
+            with self.subTest(change=change), self.assertRaisesRegex(
+                catalog_builder.CatalogError, "no longer in the generated workspace"
+            ):
+                merge_editor_edits({}, {("RU_RU", "TXT_KEY_REMOVED"): {**edit, **change}})
 
     def test_editor_csv_preserves_edits_and_detects_stale_sources(self):
         """Preserve drafts and mark them stale after English changes."""

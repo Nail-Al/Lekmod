@@ -1,7 +1,10 @@
 {
-  "version": "0.24",
-  "release_tag": "editor-v0.24",
-  "compatible_releases": ["v35.3", "v35.4"],
+  "version": "0.25",
+  "release_tag": "editor-v0.25",
+  "compatible_releases": [
+    "v35.3",
+    "v35.4"
+  ],
   "release_sources": {
     "v35.4": "201df6c56b41cc353ec01b2523bf852733d922e8"
   }

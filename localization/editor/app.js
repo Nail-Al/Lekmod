@@ -8,12 +8,13 @@ const translatorColumns = [
   ["vanilla_target", "Vanilla translation"], ["lekmod_en_US", "Lekmod EN"],
   ["lekmod_en_US_characters", "Lekmod EN characters"],
   ["lekmod_target", "Existing Lekmod translation"], ["translation", "My translation"],
-  ["translation_status", "Status"], ["translation_characters", "My characters"],
+  ["translation_status", "Status"], ["synced_to", "Synced to"], ["translation_characters", "My characters"],
   ["english_edited_at", "English edited"], ["translation_updated_at", "Translation edited"],
   ["translator_note", "Translator note"], ["changed_in", "Changed in Lekmod"]
 ];
 const developerColumns = [["key", "Key"], ["kind", "Operation"],
   ["text", "English text"], ["characters", "Characters"],
+  ["entity_status", "Status"], ["synced_to", "Synced to"],
   ["english_edited_at", "English edited"], ["source_file", "Source file"],
   ["source_line", "Line"], ["changed_in", "Changed in Lekmod"]];
 const copyFields = new Set(["key", "vanilla_en_US", "vanilla_target",
@@ -65,7 +66,9 @@ function rememberFailedSaves() {
   el("restore-failed").hidden = !failedSaves.length;
 }
 let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
-let applyControlsBefore = new Map();
+let applyControlsBefore = new Map(), checkpointPending = false, historyPending = false;
+let blockedGameTarget = "game", blockedGameRetry = null;
+let historyQueue = Promise.resolve(), historyQueued = 0;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
 function emptyFilters() {
@@ -86,7 +89,11 @@ async function api(path, body, timeoutMs = 0) {
   try {
     const response = await fetch(path, options);
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Request failed");
+    if (!response.ok) {
+      const error = new Error(result.error || "Request failed");
+      error.code = result.error_code; error.processes = result.processes || [];
+      throw error;
+    }
     return result;
   } finally {
     if (timer) clearTimeout(timer);
@@ -169,8 +176,9 @@ function hasUnsaved() {
 }
 function markDraft() {
   const dirty = hasUnsaved();
-  el("discard").disabled = applyPending || (!dirty && !chosen?.has_local_draft);
-  el("save").disabled = !dirty || !!draftWrite;
+  el("discard").disabled = applyPending || historyPending || (!dirty && !meta?.checkpoint_dirty);
+  el("save").disabled = !meta?.ready || !!draftWrite || checkpointPending || historyPending;
+  el("undo").disabled = applyPending || historyPending || (!dirty && !meta?.draft_undo_available);
   clearTimeout(autoSaveTimer);
   if (dirty) {
     el("draft-state").textContent = "Saving locally…";
@@ -204,15 +212,52 @@ async function copyText(value) {
   try { await navigator.clipboard.writeText(value); logUI("copy"); message("Copied to clipboard."); }
   catch (error) { message("Clipboard access was denied by the browser.", true); }
 }
+function gameAvailable() {
+  return meta?.ready && meta.game?.state === "installed" && !(el("settings-dialog").open &&
+    el("game-path").value !== (prefs.game_path || meta.game.path));
+}
+function syncPreference() { return developer() ? "developer_sync_column" : "translator_sync_column"; }
+function applySyncDefaults() {
+  const setting = prefs[syncPreference()] || "auto";
+  if (setting === "show" || (setting === "auto" && gameAvailable())) visible.add("synced_to");
+  else visible.delete("synced_to");
+  if (developer()) {
+    if (prefs.developer_status_column !== "hide") visible.add("entity_status");
+    else visible.delete("entity_status");
+  }
+}
+const applyNames = {all: "Apply to all", project: "Apply to Lekmod project", game: "Apply to installed game"};
+function renderApplyActions() {
+  const available = {project: !!meta?.ready, game: !!gameAvailable(), all: !!gameAvailable()};
+  const fallback = available.all ? "all" : available.project ? "project" : available.game ? "game" : "all";
+  const primary = available[prefs?.apply_target] ? prefs.apply_target : fallback;
+  el("apply-primary").textContent = applyNames[primary];
+  el("apply-primary").dataset.target = primary;
+  el("apply-primary").disabled = applyPending || historyPending || !available[primary];
+  el("apply-toggle").disabled = applyPending || historyPending || !meta?.ready;
+  for (const target of ["all", "project", "game"]) {
+    const button = el(target + "-apply");
+    button.disabled = applyPending || historyPending || !available[target];
+    button.hidden = target === primary;
+    button.title = available[target] ? "Apply the current LLE version to " +
+      (target === "all" ? "both project and installed game" : target) :
+      target === "project" ? "Connect a source project first" : "Connect a matching installed game first";
+  }
+  if (applyPending) closeApplyMenu();
+}
 function updateHistory(state) {
-  el("undo").disabled = applyPending || !state.draft_undo_available;
-  el("redo").disabled = applyPending || !state.draft_redo_available;
-  if (state.draft_count !== undefined) meta.draft_count = state.draft_count;
-  if (state.draft_undo_available !== undefined) meta.draft_undo_available = state.draft_undo_available;
-  if (state.draft_redo_available !== undefined) meta.draft_redo_available = state.draft_redo_available;
-  el("project-apply").disabled = applyPending || !meta.ready || !meta.draft_count;
-  el("discard").disabled = applyPending || (!hasUnsaved() && !chosen?.has_local_draft);
+  for (const key of ["draft_count", "draft_undo_available", "draft_redo_available", "checkpoint_saved_at", "checkpoint_dirty"])
+    if (state[key] !== undefined) meta[key] = state[key];
+  el("undo").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.draft_undo_available);
+  el("redo").disabled = applyPending || historyPending || !meta.draft_redo_available;
+  el("discard").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.checkpoint_dirty);
+  el("save").disabled = !meta.ready || !!draftWrite || checkpointPending || historyPending;
+  el("save").title = "Record one restore point for this project's local work · Ctrl+S" +
+    (meta.checkpoint_saved_at ? " · Last Save: " + localEditTime(meta.checkpoint_saved_at) : "");
+  el("discard").title = meta.checkpoint_saved_at ? "Restore all local work to Save · " + localEditTime(meta.checkpoint_saved_at) :
+    "Discard all local edits and restore the original working version";
   el("local-drafts").textContent = (meta.draft_count || 0) + " local drafts";
+  renderApplyActions();
 }
 function renderConnections() {
   const project = meta.project;
@@ -231,10 +276,8 @@ function renderConnections() {
     : game.state === "multiple" ? "Game: multiple Lekmod copies"
     : game.path ? "Game: invalid folder" : "Game: disconnected";
   el("game-badge").classList.toggle("missing", !matches);
-  const changedGameFolder = el("settings-dialog").open &&
-    el("game-path").value !== (prefs.game_path || game.path);
-  el("game-apply").disabled = applyPending || !matches || !meta.ready || changedGameFolder;
-  el("project-apply").disabled = applyPending || !meta.ready || !meta.draft_count;
+  renderApplyActions();
+  applySyncDefaults();
   el("workspace").hidden = !meta.ready || inLogs || inMerge;
   el("merge-view").hidden = !meta.ready || inLogs || !inMerge;
   el("no-source").hidden = meta.ready || inLogs || inMerge;
@@ -271,9 +314,7 @@ function changeMode() {
   el("note-help").hidden = developer();
   el("run-checks").hidden = !developer();
   translationHeading();
-  el("text-help").textContent = developer()
-    ? "Auto-saved locally. Apply to Lekmod project updates primary.xml and resets outdated translations."
-    : "Auto-saved locally. Apply to Lekmod project updates CSV and game XML in one batch.";
+  el("text-help").textContent = "Edits are auto-saved locally. Save records a restore point. Apply updates the selected destination.";
   el("save").textContent = "Save";
   el("share").hidden = developer();
   el("share-english").hidden = !developer();
@@ -293,6 +334,7 @@ function changeMode() {
       visible.delete("vanilla_target");
     }
   }
+  applySyncDefaults();
   renderColumnChoices();
   renderFilterChoices();
   load();
@@ -303,7 +345,9 @@ function renderFilterChoices() {
   for (const item of (developer() ? ["Row", "Replace"] : ["lekmod_new", "vanilla_modified", "source_conflict"]))
     select.append(new Option(item, item));
   el("filter-kind-title").textContent = developer() ? "Operation" : "Type";
-  el("filter-status-label").hidden = developer();
+  el("filter-status-label").hidden = false;
+  for (const option of el("filter-status").options)
+    option.hidden = developer() && !["", "draft", "applied"].includes(option.value);
   el("filter-date-field").querySelector('option[value="translation_updated_at"]').hidden = developer();
   select.value = filters.kind;
   el("filter-status").value = filters.status;
@@ -337,12 +381,12 @@ function renderColumnChoices() {
   const container = el("column-choices");
   container.replaceChildren();
   const groups = developer()
-    ? [["English source", ["key", "kind", "text", "characters"]],
+    ? [["English source", ["key", "kind", "text", "characters", "entity_status", "synced_to"]],
        ["File and history", ["source_file", "source_line", "english_edited_at", "changed_in"]]]
     : [["Identity", ["key", "classification"]],
        ["Vanilla reference", ["vanilla_en_US", "vanilla_en_US_characters", "vanilla_target"]],
        ["Lekmod source", ["lekmod_en_US", "lekmod_en_US_characters", "lekmod_target"]],
-       ["Translation and review", ["translation", "translation_status", "translation_characters",
+       ["Translation and review", ["translation", "translation_status", "synced_to", "translation_characters",
          "english_edited_at", "translation_updated_at", "translator_note", "changed_in"]]];
   const fields = new Map(activeColumns());
   for (const [heading, names] of groups) {
@@ -463,7 +507,20 @@ function renderTable(rows) {
     for (const [field] of cols) {
       const td = document.createElement("td");
       const value = String(row[field] ?? "");
-      if (value && copyFields.has(field)) {
+      if (field === "synced_to") {
+        for (const [target, label] of [["project", "Project"], ["game", "Game"]]) {
+          const synced = row.synced_to?.[target];
+          const chip = document.createElement("span");
+          chip.className = "sync-chip " + (synced === null ? "unavailable" : synced ? "synced" : "unsynced");
+          chip.dataset.target = target;
+          chip.textContent = label + ": " + (synced === null ? "—" : synced ? "✓" : "✕");
+          chip.title = synced === null ? "No verified installed game is connected." :
+            "The current LLE row " + (synced ? "matches " : "differs from ") +
+            (target === "project" ? "the Source project." : "the installed game's localization XML. Restart Civilization V after Apply.") +
+            (row.draft_delete ? " This version removes the entity." : "");
+          td.append(chip);
+        }
+      } else if (value && copyFields.has(field)) {
         const content = document.createElement("div");
         content.className = "cell";
         const span = document.createElement("span");
@@ -484,7 +541,7 @@ function renderTable(rows) {
       }
       tr.append(td);
     }
-    if (row.has_local_draft) { tr.classList.add("local-draft"); tr.title = "Saved locally; not applied to the project yet."; }
+    if (row.has_local_draft) { tr.classList.add("local-draft"); tr.title = row.draft_delete ? "Local removal · awaiting Apply" : "Local working version differs from the project. See Synced to for each destination."; }
     if (chosen && chosen.draft_slot === row.draft_slot) tr.classList.add("selected");
     tr.addEventListener("click", () => guardNavigation(() => selectRow(row,
       el("table").querySelectorAll("tbody tr")[(window.currentRows || []).indexOf(row)] || tr)));
@@ -500,7 +557,7 @@ function selectRow(row, tr) {
   chosen = row;
   selectionContext = {mode: prefs.mode, locale: el("locale").value,
     category: row.category || el("category").value,
-    textTouched: false, textBaseline: developer() ? row.text : row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "",
+    textTouched: false, textBaseline: developer() ? row.text : row.translation ?? "",
     group: Date.now().toString(36) + Math.random().toString(36).slice(2)};
   document.querySelectorAll("tbody tr").forEach(item => item.classList.remove("selected"));
   tr.classList.add("selected");
@@ -508,12 +565,11 @@ function selectRow(row, tr) {
   el("selected").textContent = row.key + (developer() ? " · English source" : " · " + locale);
   const sourceBlocked = !developer() && row.classification === "source_conflict";
   el("translation").disabled = sourceBlocked;
-  el("discard").disabled = true;
   el("identifier").disabled = !developer();
   for (const field of ["gender", "plurality", "note"]) el(field).disabled = developer() || sourceBlocked;
   if (el("prefill").checked) {
     el("translation").value = developer() ? row.text
-      : row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "";
+      : row.translation ?? "";
   } else {
     el("translation").value = "";
   }
@@ -602,8 +658,8 @@ function clearSelection() {
   el("translation").value = "";
   el("identifier").value = "";
   el("note").value = "";
-  el("save").disabled = true;
-  el("discard").disabled = true;
+  el("save").disabled = !meta?.ready || checkpointPending || historyPending;
+  el("discard").disabled = applyPending || historyPending || !meta?.checkpoint_dirty;
   el("identifier").disabled = true;
   el("translation").disabled = true;
   for (const field of ["gender", "plurality", "note", "gender-custom", "plurality-custom"])
@@ -1185,7 +1241,9 @@ el("columns-button").addEventListener("click", () => {
 el("columns-close").addEventListener("click", async () => {
   if (!pendingColumns) return;
   try {
-    await preference({[columnsPreference()]: Array.from(pendingColumns)});
+    await preference({[columnsPreference()]: Array.from(pendingColumns),
+      [syncPreference()]: pendingColumns.has("synced_to") ? "show" : "hide",
+      ...(developer() ? {developer_status_column: pendingColumns.has("entity_status") ? "show" : "hide"} : {})});
     visible = pendingColumns; pendingColumns = null;
     renderTable(window.currentRows || []);
     logUI("columns-changed"); el("columns-dialog").close();
@@ -1220,21 +1278,25 @@ el("filters-reset").addEventListener("click", () => {
     await load(); message("Filters cleared.");
   });
 });
-el("discard").addEventListener("click", () => { if (chosen) el("discard-dialog").showModal(); });
+el("discard").addEventListener("click", () => {
+  el("discard-description").textContent = meta.checkpoint_saved_at ?
+    "Restore all local work in this project, across both modes and all languages, to Save from " + localEditTime(meta.checkpoint_saved_at) + "? Changes since that Save and Undo/Redo history will be discarded." :
+    "Discard all local work in this project, across both modes and all languages, and restore the original working version? No explicit Save has been recorded yet.";
+  el("discard-dialog").showModal();
+});
 el("discard-cancel").addEventListener("click", () => el("discard-dialog").close());
 el("discard-confirm").addEventListener("click", () => {
   clearTimeout(autoSaveTimer);
   (async () => {
     if (draftWrite) await draftWrite;
-    if (!chosen) return;
     try {
-      const slot = chosen.draft_slot;
-      const result = await api("/api/draft-discard", {slot, revision: chosen.draft_revision || 0});
+      const slot = chosen?.draft_slot;
+      const result = await api("/api/draft-restore", {});
       chosen = null; savedDraft = null;
       updateHistory(result); await load();
       const index = (window.currentRows || []).findIndex(row => row.draft_slot === slot);
       if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
-      logUI("discard"); message("Local draft discarded. Project files are unchanged.");
+      logUI("discard"); message(meta.checkpoint_saved_at ? "Working version restored to Save. Apply updates your destinations." : "Local edits discarded. Original working version restored.");
       el("discard-dialog").close();
     } catch (error) { message(error.message, true); }
   })();
@@ -1405,15 +1467,15 @@ function updateMergeSummary() {
     if (mergeChecking) el(id).disabled = true;
     else if (!mergeApplying) el(id).disabled = id === "merge-prev" ? mergePage === 0 :
       id === "merge-next" ? (mergePage + 1) * 100 >= mergeReview.items.length : false;
-  const gameAvailable = meta.game.state === "installed" && !el("game-apply").disabled;
-  el("merge-destination").querySelector('option[value="project_game"]').disabled = !gameAvailable;
-  if (!gameAvailable) el("merge-destination").value = "project";
+  const gameReady = gameAvailable();
+  el("merge-destination").querySelector('option[value="project_game"]').disabled = !gameReady;
+  if (!gameReady) el("merge-destination").value = "project";
 }
 function openMerge() {
   if (!mergeReview?.items.length) return;
   if (inLogs) closeLogs();
   inMerge = true; mergePage = 0;
-  el("merge-destination").value = !el("game-apply").disabled ? "project_game" : "project";
+  el("merge-destination").value = gameAvailable() ? "project_game" : "project";
   renderConnections(); renderMerge();
 }
 function closeMerge() {
@@ -1471,10 +1533,12 @@ el("merge-apply").addEventListener("click", async () => {
     inMerge = false;
     meta = await api("/api/meta"); updateHistory(meta); renderConnections();
     await load();
-    if (result.game_error) message("Project saved; game copy failed: " + result.game_error, true);
+    if (result.game_error_code === "game_running") showGameRunning("game", result.game_processes);
+    else if (result.game_error) message("Project saved; game copy failed: " + result.game_error, true);
     else message(result.applied ? (result.game_result ? "Merged into project and installed game. Restart Civilization V." : "Merged into the connected project and rebuilt its XML. Review the project diff.") :
       "Review complete. No rows needed changing.");
   } catch (error) { sectionMessage("merge", error.message, "error"); message(error.message, true);
+    if (error.code === "game_running") showGameRunning("all", error.processes, () => el("merge-apply").click());
     button.disabled = false;
   } finally {
     mergeApplying = false;
@@ -1502,7 +1566,7 @@ function draftPayload(row, context, form) {
   // not a request to erase the saved text while editing its note or key.
   if (!el("prefill").checked && !context.textTouched)
     edit.text = context.mode === "developer" ? row.text :
-      row.has_local_draft ? row.translation : row.translation || row.lekmod_target || "";
+      row.translation ?? "";
   return {mode: context.mode, locale: context.mode === "developer" ? "" : context.locale,
     key: row.draft_key || row.key, index: row.index ?? -1,
     slot: row.draft_slot, revision: row.draft_revision || 0, base: row.draft_base,
@@ -1511,6 +1575,7 @@ function draftPayload(row, context, form) {
     reverted: !row.draft_create && JSON.stringify(edit) === JSON.stringify(row.applied_edit)};
 }
 function reflectDraft(row, edit, result, context) {
+  const gameKey = row.game_key ?? row.key;
   row.draft_revision = result.entry?.revision || 0;
   row.draft_slot = result.entry?.slot || row.draft_slot;
   row.has_local_draft = !!result.entry?.payload;
@@ -1520,12 +1585,21 @@ function reflectDraft(row, edit, result, context) {
     row.draft_create = !!result.entry?.payload?.create;
     row.key = edit.identifier; row.text = edit.text;
     row.characters = Array.from(edit.text).length;
+    row.entity_status = row.has_local_draft ? "draft" : "applied";
   } else {
     row.translation = edit.text; row.translation_gender = edit.gender;
     row.translation_plurality = edit.plurality; row.translator_note = edit.note;
     row.translation_characters = String(Array.from(edit.text).length);
     row.translation_status = row.has_local_draft ? "draft" : edit.text ? "applied" : "missing";
+    row.translation_source_fingerprint = result.entry?.payload?.source_fingerprint || row.source_fingerprint;
   }
+  const expectedText = context.mode === "developer" ? edit.text : edit.text || row.lekmod_en_US;
+  const current = row.game_value;
+  row.game_key = gameKey;
+  row.synced_to = {project: !row.has_local_draft, game: row.synced_to?.game === null ? null :
+    !!(current && gameKey === row.key && current.Text === (expectedText.trim() ? expectedText : "\u00a0") &&
+      (context.mode === "developer" || ((current.Gender || "") === (edit.text ? edit.gender : row.lekmod_en_US_gender || "") &&
+        (current.Plurality || "") === (edit.text ? edit.plurality : row.lekmod_en_US_plurality || ""))))};
 }
 async function saveCurrent(notify = true) {
   clearTimeout(autoSaveTimer);
@@ -1534,7 +1608,10 @@ async function saveCurrent(notify = true) {
     if (!hasUnsaved()) return true;
   }
   if (!chosen || !hasUnsaved()) return true;
-  const row = chosen, context = {...selectionContext}, form = captureDraft(), previousForm = savedDraft;
+  const row = chosen;
+  if (selectionContext.lastSavedAt && Date.now() - selectionContext.lastSavedAt > 2000)
+    selectionContext.group = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const context = {...selectionContext}, form = captureDraft(), previousForm = savedDraft;
   const data = draftPayload(row, context, form);
   draftWrite = (async () => {
     el("draft-state").textContent = "Saving locally…";
@@ -1560,6 +1637,7 @@ async function saveCurrent(notify = true) {
       if (chosen === row) {
         savedDraft = form;
         selectionContext.textBaseline = data.edit.text;
+        selectionContext.lastSavedAt = Date.now();
         el("draft-state").textContent = row.has_local_draft ? "Saved locally · awaiting Apply" : "Matches the project";
         renderTable(window.currentRows || []);
       }
@@ -1578,7 +1656,17 @@ async function saveCurrent(notify = true) {
   else { el("save").disabled = !hasUnsaved(); el("discard").disabled = false; }
   return success;
 }
-el("save").addEventListener("click", () => saveCurrent(true));
+el("save").addEventListener("click", async () => {
+  if (checkpointPending || historyPending) return;
+  checkpointPending = true;
+  try {
+    if (!await saveCurrent(false)) return;
+    updateHistory(await api("/api/draft-checkpoint", {}));
+    if (selectionContext) selectionContext.group = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    message("Save recorded. Trash restores this version across both modes and all languages.");
+  } catch (error) { message("Save could not be recorded: " + error.message, true); }
+  finally { checkpointPending = false; updateHistory(meta); }
+});
 async function pollApply() {
   try {
     const state = await api("/api/apply-status");
@@ -1586,7 +1674,7 @@ async function pollApply() {
     const target = el("save-state");
     target.hidden = !applyPending && state.state !== "error";
     target.className = "section-status " + (applyPending ? "busy" : "error");
-    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " Your local drafts are retained." :
+    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " See Synced to for the state of each destination." :
       state.phase + " · " + state.count + " saved drafts. You can keep editing.";
     updateHistory(state); renderConnections();
     if (applyPending) { applyTimer = setTimeout(pollApply, 700); return; }
@@ -1597,26 +1685,62 @@ async function pollApply() {
       const index = (window.currentRows || []).findIndex(row => row.draft_slot === selectedSlot);
       if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
     });
-    if (state.state === "error") message("Apply failed: " + state.error + " Local drafts are retained.", true);
-    else message("Applied " + state.applied_count + " drafts to the Lekmod project." +
+    if (state.state === "error" && state.error_code === "game_running") showGameRunning(state.target, state.processes);
+    else if (state.state === "error") message("Apply failed: " + state.error + " See Synced to for destination state.", true);
+    else message(state.target === "game" ? "Installed game updated. The source project is unchanged; restart Civilization V to test." :
+      "Applied " + state.applied_count + " drafts to the Lekmod project." +
       (state.game_result ? " Installed game updated; restart Civilization V to test." : ""));
   } catch (error) {
     message("Could not read Apply progress. Your saved drafts remain on disk. " + error.message, true);
     applyTimer = setTimeout(pollApply, 2000);
   }
 }
-async function applyDrafts(game = false) {
+function showGameRunning(target, processes = [], retry = null) {
+  blockedGameTarget = target;
+  blockedGameRetry = retry;
+  el("game-running-detail").textContent = "Close Civilization V before applying localization." +
+    (processes.length ? " Running: " + processes.join(", ") + "." : "");
+  el("game-running-status").textContent = "";
+  if (!el("game-running-dialog").open) el("game-running-dialog").showModal();
+}
+async function applyDrafts(target = "all") {
   return guardNavigation(async () => {
-    if (applyPending) return;
+    if (applyPending) return false;
     try {
-      const state = await api("/api/apply-project", {game});
+      const state = await api("/api/apply-project", {target});
+      if (el("game-running-dialog").open) el("game-running-dialog").close();
       setApplyLock(state.state === "running");
       updateHistory(state); renderConnections();
       if (applyPending) pollApply();
       else message("The project already matches your saved drafts.");
-    } catch (error) { message(error.message, true); }
+      return true;
+    } catch (error) {
+      if (error.code === "game_running") showGameRunning(target, error.processes);
+      else if (el("game-running-dialog").open) el("game-running-status").textContent = error.message;
+      else message(error.message, true);
+      return false;
+    }
   });
 }
+el("game-running-cancel").addEventListener("click", () => el("game-running-dialog").close());
+el("game-running-retry").addEventListener("click", async () => {
+  el("game-running-retry").disabled = true;
+  el("game-running-status").textContent = "Checking game processes…";
+  try {
+    const result = await api("/api/game-process");
+    if (result.processes.length) {
+      el("game-running-status").textContent = "Civilization V is still running. Close it, then retry.";
+      return;
+    }
+    if (blockedGameRetry) {
+      const retry = blockedGameRetry;
+      blockedGameRetry = null;
+      el("game-running-dialog").close();
+      await retry();
+    } else await applyDrafts(blockedGameTarget);
+  } catch (error) { el("game-running-status").textContent = error.message; }
+  finally { el("game-running-retry").disabled = false; }
+});
 function setApplyLock(active) {
   if (active === applyPending) return;
   const ids = ["settings-save", "history-sync", "snapshot-cloud", "snapshot-file", "snapshot-import", "update-install", "editor-quit", "run-checks",
@@ -1630,7 +1754,31 @@ function setApplyLock(active) {
   }
   applyPending = active;
 }
-el("project-apply").addEventListener("click", () => applyDrafts(false));
+function closeApplyMenu() {
+  el("apply-menu").hidden = true;
+  el("apply-toggle").setAttribute("aria-expanded", "false");
+}
+el("apply-primary").addEventListener("click", () => applyDrafts(el("apply-primary").dataset.target));
+el("apply-toggle").addEventListener("click", () => {
+  const open = el("apply-menu").hidden;
+  el("apply-menu").hidden = !open;
+  el("apply-toggle").setAttribute("aria-expanded", String(open));
+  if (open) el("apply-menu").querySelector("button:not([hidden]):not(:disabled)")?.focus();
+});
+for (const target of ["all", "project", "game"]) el(target + "-apply").addEventListener("click", async () => {
+  closeApplyMenu();
+  try { await preference({apply_target: target}); renderApplyActions(); await applyDrafts(target); }
+  catch (error) { message(error.message, true); }
+});
+document.addEventListener("click", event => { if (!event.target.closest(".apply-split")) closeApplyMenu(); });
+el("apply-menu").addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); closeApplyMenu(); el("apply-toggle").focus(); }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const options = [...el("apply-menu").querySelectorAll("button:not([hidden]):not(:disabled)")];
+  const index = options.indexOf(document.activeElement), step = event.key === "ArrowUp" ? -1 : 1;
+  options[event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : (index + step + options.length) % options.length]?.focus();
+});
 el("restore-failed").addEventListener("click", () => guardNavigation(async () => {
   if (!failedSaves.length) return;
   const draft = failedSaves[0];
@@ -1652,12 +1800,56 @@ el("restore-failed").addEventListener("click", () => guardNavigation(async () =>
   failedSaves.shift(); rememberFailedSaves();
   message("Your text was restored. Review and save it again.");
 }));
-for (const name of ["undo", "redo"]) el(name).addEventListener("click", async () => {
-  guardNavigation(async () => {
-    try { const result = await api("/api/draft-" + name, {}); updateHistory(result); await load();
-      message(name === "undo" ? "Local edit undone. Project files are unchanged." : "Local edit restored.");
-    } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
+function replayLocal(name) {
+  if (applyPending || checkpointPending) return Promise.resolve();
+  historyQueued++;
+  historyPending = true;
+  updateHistory(meta);
+  const action = historyQueue.then(async () => {
+    try { await performReplayLocal(name); }
+    finally { historyPending = --historyQueued > 0; updateHistory(meta); }
   });
+  historyQueue = action.catch(() => {});
+  return action;
+}
+async function performReplayLocal(name) {
+  if (!hasUnsaved() && !meta["draft_" + name + "_available"]) return;
+  try {
+    await guardNavigation(async () => {
+      const result = await api("/api/draft-" + name, {});
+      updateHistory(result);
+      const version = result.version;
+      if (version && (prefs.mode !== version.mode || (version.mode === "translator" && el("locale").value !== version.locale))) {
+        await preference({mode: version.mode, ...(version.mode === "translator" ? {locale: version.locale, category: "all"} : {})});
+        if (version.mode === "translator") { el("locale").value = version.locale; categories(); }
+        changeMode();
+      }
+      const key = version?.mode === "developer" ? version.edit.identifier : version?.key;
+      if (key && !(window.currentRows || []).some(row => row.draft_slot === result.slot)) {
+        // The affected row may be outside the current category or filters.
+        filters = emptyFilters();
+        await preference({[filtersPreference()]: filters, ...(version.mode === "translator" ? {category: "all"} : {})});
+        if (version.mode === "translator") el("category").value = "all";
+        renderFilterChoices();
+        el("search-input").value = key; offset = 0;
+      }
+      await load();
+      const index = (window.currentRows || []).findIndex(row => row.draft_slot === result.slot || row.key === key);
+      if (index >= 0) selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
+      message(name === "undo" ? "Local edit undone." : "Local edit restored.");
+    });
+  } catch (error) { message(error.message, true); updateHistory(await api("/api/meta")); }
+}
+for (const name of ["undo", "redo"]) el(name).addEventListener("click", () => replayLocal(name));
+document.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing ||
+      document.querySelector("dialog[open]") || el("workspace").hidden) return;
+  const key = event.key.toLowerCase();
+  if (key === "s") { event.preventDefault(); el("save").click(); }
+  if (key === "z" || key === "y") {
+    event.preventDefault();
+    replayLocal(key === "y" || event.shiftKey ? "redo" : "undo");
+  }
 });
 el("create-key").addEventListener("click", () => guardNavigation(async () => {
   try {
@@ -1700,7 +1892,7 @@ el("create-confirm").addEventListener("click", async () => {
 el("create-key-dialog").addEventListener("cancel", event => {
   if (el("create-confirm").disabled) event.preventDefault();
 });
-el("game-apply").addEventListener("click", () => applyDrafts(true));
+
 el("run-checks").addEventListener("click", async () => {
   guardNavigation(async () => {
     el("run-checks").disabled = true; el("run-checks").classList.add("busy-action");

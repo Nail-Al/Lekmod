@@ -6,6 +6,7 @@ import hashlib
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -275,8 +276,8 @@ def main() -> int:
                 assert b'Portable local draft 19' in package.read('translations/RU_RU.csv')
                 assert 'translations/DE_DE.csv' not in package.namelist()
 
-            def apply_pending(*, installed=False):
-                post(base, token, '/api/apply-project', {'game': installed})
+            def apply_pending(*, installed=False, target=None):
+                post(base, token, '/api/apply-project', {'target': target} if target else {'game': installed})
                 for _ in range(600):
                     state = json.loads(get(base + '/api/apply-status'))
                     if state['state'] != 'running': break
@@ -339,6 +340,119 @@ def main() -> int:
                 assert menu[locale][KEYS[0]] == 'DISCORD' and menu[locale][KEYS[1]] == 'GITHUB'
             assert '[COLOR_POSITIVE_TEXT]' in menu['RU_RU'][KEYS[-1]]
             assert not apply_pending(installed=True)['game_result']['changed']
+            # Exercise independent destinations and deletion with the real frozen EXE.
+            checking = KEYS[2]
+            def menu_entry():
+                return next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': 'RU_RU', 'category': 'all', 'q': checking})))['rows'] if item['key'] == checking)
+            def change_menu(text):
+                item = menu_entry()
+                return post(base, token, '/api/draft', {'mode': 'translator', 'locale': 'RU_RU',
+                    'key': checking, 'slot': item['draft_slot'], 'revision': item['draft_revision'],
+                    'base': item['draft_base'], 'source_fingerprint': item['source_fingerprint'],
+                    'edit': {'text': text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            # A benign renamed command interpreter proves the frozen process check.
+            if os.name == 'nt':
+                fake_folder = root / 'process-check'
+                fake_folder.mkdir()
+                fake_game = fake_folder / 'CivilizationV.exe'
+                shutil.copy2(Path(os.environ['SystemRoot']) / 'System32/cmd.exe', fake_game)
+                fake_process = subprocess.Popen([str(fake_game), '/d', '/q', '/k'],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                try:
+                    for _ in range(30):
+                        if json.loads(get(base + '/api/game-process'))['processes']:
+                            break
+                        time.sleep(.1)
+                    assert json.loads(get(base + '/api/game-process'))['processes']
+                    before_blocked = target.read_bytes(), game.read_bytes(), csv_path.read_bytes()
+                    for destination in ('game', 'all'):
+                        try:
+                            post(base, token, '/api/apply-project', {'target': destination})
+                            raise AssertionError('Apply accepted an open game')
+                        except HTTPError as error:
+                            detail = json.loads(error.read())
+                            assert detail['error_code'] == 'game_running', detail
+                    assert before_blocked == (target.read_bytes(), game.read_bytes(), csv_path.read_bytes())
+                finally:
+                    fake_process.communicate(b'exit\n', timeout=10)
+                assert not json.loads(get(base + '/api/game-process'))['processes']
+            post(base, token, '/api/draft-checkpoint', {})
+            original_project = {path: path.read_bytes() for path in (game, csv_path, project / 'localization/en_US/primary.xml')}
+            change_menu(RUSSIAN[0] + ' Test')
+            apply_pending(target='game')
+            assert {path: path.read_bytes() for path in original_project} == original_project
+            item = menu_entry()
+            assert item['synced_to'] == {'project': False, 'game': True}, item
+            assert item['has_local_draft'] and item['translation_status'] == 'draft'
+            installed_before = target.read_bytes()
+            apply_pending(target='project')
+            assert target.read_bytes() == installed_before, 'Project-only Apply modified installed game'
+            assert menu_entry()['synced_to'] == {'project': True, 'game': True}
+            change_menu('')
+            apply_pending(target='game')
+            item = menu_entry()
+            assert item['translation'] == '' and item['synced_to'] == {'project': False, 'game': True}, item
+            apply_pending(target='project')
+            item = menu_entry()
+            assert item['translation'] == '' and item['translation_status'] == 'missing', item
+            assert item['synced_to'] == {'project': True, 'game': True}
+            post(base, token, '/api/draft-restore', {})
+            assert menu_entry()['translation'] == RUSSIAN[0], 'Save was lost across Apply/deletion'
+            apply_pending(target='all')
+            # Every non-English locale can delete a translation without reviving CSV content.
+            english_checking = menu_entry()['lekmod_en_US']
+            for locale in LOCALES:
+                if locale.casefold() == 'en_us' or locale == 'RU_RU':
+                    continue
+                item = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': locale, 'category': 'all', 'q': checking})))['rows'] if item['key'] == checking)
+                post(base, token, '/api/draft', {'mode': 'translator', 'locale': locale, 'key': checking,
+                    'slot': item['draft_slot'], 'revision': item['draft_revision'], 'base': item['draft_base'],
+                    'source_fingerprint': item['source_fingerprint'],
+                    'edit': {'text': english_checking + ' Test', 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            apply_pending(target='all')
+            for locale in LOCALES:
+                if locale.casefold() == 'en_us' or locale == 'RU_RU':
+                    continue
+                item = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': locale, 'category': 'all', 'q': checking})))['rows'] if item['key'] == checking)
+                post(base, token, '/api/draft', {'mode': 'translator', 'locale': locale, 'key': checking,
+                    'slot': item['draft_slot'], 'revision': item['draft_revision'], 'base': item['draft_base'],
+                    'source_fingerprint': item['source_fingerprint'],
+                    'edit': {'text': '', 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            apply_pending(target='all')
+            for locale in LOCALES:
+                if locale.casefold() != 'en_us' and locale != 'RU_RU':
+                    item = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                        'locale': locale, 'category': 'all', 'q': checking})))['rows'] if item['key'] == checking)
+                    assert item['translation'] == '' and item['translation_status'] == 'missing', item
+            # A newly created entity can go to game before project, and can be undone after Apply.
+            post(base, token, '/api/preferences', {'mode': 'developer'})
+            new_key = 'TXT_KEY_LLE_PORTABLE_CREATED'
+            source_path = project / 'localization/en_US/primary.xml'
+            source_before = source_path.read_bytes()
+            post(base, token, '/api/draft', {'mode': 'developer', 'locale': '', 'key': new_key,
+                'index': -1, 'slot': 'N:' + new_key, 'revision': 0, 'base': {}, 'create': True,
+                'edit': {'identifier': new_key, 'text': 'Portable new entity', 'gender': '', 'plurality': '', 'note': ''}})
+            apply_pending(target='game')
+            assert source_path.read_bytes() == source_before
+            created = json.loads(get(base + '/api/primary?' + urlencode({'q': new_key})))['rows'][0]
+            assert created['entity_status'] == 'draft' and created['synced_to'] == {'project': False, 'game': True}, created
+            installed_before = target.read_bytes()
+            apply_pending(target='project')
+            assert target.read_bytes() == installed_before
+            created = json.loads(get(base + '/api/primary?' + urlencode({'q': new_key})))['rows'][0]
+            assert created['draft_slot'] == 'N:' + new_key
+            assert created['synced_to'] == {'project': True, 'game': True}, created
+            post(base, token, '/api/draft-undo', {})
+            apply_pending(target='all')
+            assert new_key.encode() not in source_path.read_bytes()
+            post(base, token, '/api/draft-redo', {})
+            apply_pending(target='all')
+            assert new_key.encode() in source_path.read_bytes()
+            print('Frozen Save/restore, independent Project/Game Apply, deletion in all nine target locales and new entity Undo/Redo passed.')
             diagnostics = json.loads(get(base + '/api/game-diagnostics'))
             assert diagnostics['xml']['same_file']
             assert set(diagnostics['xml']['installed']['counts']) == set(LOCALES)

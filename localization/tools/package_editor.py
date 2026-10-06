@@ -19,11 +19,17 @@ START = """Lekmod Localization Editor for Windows
 3. In Settings, select a complete compatible Lekmod project folder or click
    Download. Progress and destination are shown. A plain Civilization V installation is not a
    project. Save connections, then select a language and translate.
-   Text auto-saves locally. Save is immediate; Apply to Lekmod project
-   validates and rebuilds all saved drafts once, when you are ready.
+   Text auto-saves locally. Save (Ctrl+S) records one restore point; the trash
+   icon restores it across every language and both modes. Undo/redo uses
+   Ctrl+Z/Ctrl+Y with up to 100 local steps and keeps Save separate.
+   The Apply arrow menu chooses All, Project or Game; the last choice stays
+   on the main button. Project and Game can be updated independently.
 4. For in-game testing, connect to the Civilization V installation in
-   Settings and click Find / verify game, then Apply to installed game after
-   saving. One matching Lekmod DLC must be installed; the XML is backed up.
+   Settings and click Find / verify game, then close Civilization V and
+   choose Apply to installed game. One matching Lekmod DLC must be installed;
+   the XML is backed up. If the game is running, close it and choose Retry.
+   Game-only Apply keeps source files unchanged; Synced to compares each row
+   with the project and game independently.
    Install the matching complete Lekmod release separately first.
 5. To compare original vanilla sentences in all ten languages, expand
    Settings > Vanilla reference. Keep the prefilled encrypted link, enter
