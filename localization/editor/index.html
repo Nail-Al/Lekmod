@@ -46,6 +46,17 @@
     #search { flex: 1 1 240px; min-width: 130px; }
     .toolbar .actions { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; width: max-content;
       margin-left: auto; align-items: center; gap: 7px; }
+    .action-divider { width: 1px; height: 24px; background: #c6d5e4; margin: 0 5px; flex: 0 0 1px; align-self: center; }
+    .apply-split { display: inline-flex; position: relative; }
+    #apply-primary { border-radius: 5px 0 0 5px; }
+    #apply-toggle { border-radius: 0 5px 5px 0; border-left: 0; padding: 7px 10px; }
+    .apply-menu { position: absolute; z-index: 30; left: 0; bottom: calc(100% + 6px); min-width: 245px; padding: 5px; background: #fff; border: 1px solid #bdd0e5; border-radius: 6px; box-shadow: 0 4px 16px #19345324; }
+    .apply-menu button { display: block; width: 100%; text-align: left; border: 0; }
+    .apply-menu button[hidden], .apply-menu[hidden] { display: none; }
+    .sync-chip { display: inline-block; white-space: nowrap; margin: 2px 4px 2px 0; padding: 3px 6px; border: 1px solid #c7d3df; border-radius: 3px; font-size: 12px; background: #f4f7fa; }
+    .sync-chip.synced { color: #24653b; border-color: #9bc4a9; background: #f0f8f2; }
+    .sync-chip.unsynced { color: #7b4930; border-color: #d6bb9e; background: #fff7ed; }
+    .sync-chip.unavailable { color: #6d7987; }
     .toolbar .actions label { flex: none; width: max-content; white-space: nowrap; }
     .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
     .pager .page-choice { margin-left: auto; }
@@ -275,13 +286,21 @@
       <div class="quick">
         <button id="create-key" hidden>Create new key</button>
         <button id="save" class="primary" disabled>Save</button>
-        <button id="discard" class="icon-control" title="Discard unsaved changes" aria-label="Discard unsaved changes" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
-        <button id="undo" class="icon" aria-label="Undo saved edit" title="Undo saved edit" disabled>↶</button>
-        <button id="redo" class="icon" aria-label="Redo saved edit" title="Redo saved edit" disabled>↷</button>
-        <button id="project-apply" disabled>Apply to Lekmod project</button>
-        <button id="game-apply" disabled>Apply to installed game</button>
+        <button id="discard" class="icon-control" title="Restore the last explicit Save" aria-label="Restore the last explicit Save" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
+        <button id="undo" class="icon" aria-label="Undo local edit" title="Undo local edit · Ctrl+Z" disabled>↶</button>
+        <button id="redo" class="icon" aria-label="Redo local edit" title="Redo local edit · Ctrl+Y" disabled>↷</button>
+        <span class="action-divider" aria-hidden="true"></span>
+        <div class="apply-split">
+          <button id="apply-primary" disabled>Apply to all</button><button id="apply-toggle" aria-label="Choose Apply destination" aria-haspopup="menu" aria-expanded="false" aria-controls="apply-menu" disabled>▾</button>
+          <div id="apply-menu" class="apply-menu" role="menu" hidden>
+            <button id="all-apply" role="menuitem">Apply to all</button>
+            <button id="project-apply" role="menuitem">Apply to Lekmod project</button>
+            <button id="game-apply" role="menuitem">Apply to installed game</button>
+          </div>
+        </div>
         <button id="local-drafts" title="Review saved local drafts">0 local drafts</button>
         <button id="run-checks" hidden>Run checks</button>
+        <span class="action-divider" aria-hidden="true"></span>
         <button id="exports-button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg> Import/Export</button>
       </div>
       <button id="restore-failed" hidden>Restore translation after failed save</button>
@@ -301,7 +320,7 @@
 </main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>
-<dialog id="discard-dialog"><section><h2>Discard this local draft?</h2><p>Restore this row from the project and remove its local text, grammar and note changes? The project and installed game files remain unchanged. Undo can restore the discarded draft before the next Apply.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Discard changes</button></div></section></dialog>
+<dialog id="discard-dialog"><section><h2>Restore the last Save?</h2><p id="discard-description"></p><p class="hint">This changes local work only. Use Apply to update the Source project or installed game.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Restore Save</button></div></section></dialog>
 <dialog id="drafts-dialog"><section><div class="dialog-heading"><h2>Saved local drafts</h2><button id="drafts-x" class="icon-control" title="Close" aria-label="Close local drafts">×</button></div><p class="hint">These edits stay on disk across restarts and editor updates. Apply checks the current English and project translations before rebuilding once. A backup includes incomplete drafts too.</p><div id="draft-list"></div><div class="foot"><button id="drafts-backup">Download draft backup</button><button id="drafts-close">Done</button></div></section></dialog>
 <dialog id="settings-dialog">
   <section>

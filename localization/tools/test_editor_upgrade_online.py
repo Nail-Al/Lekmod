@@ -78,7 +78,9 @@ def main() -> int:
             'index': -1, 'create': False, 'base': {'approval': None}, 'source_fingerprint': 'a' * 64,
             'edit': {'text': 'Unapplied local translation; keep across update and repair',
                      'gender': '', 'plurality': '', 'note': 'Local-only work', 'identifier': ''}}, 0)
-        draft_bytes = draft_path.read_bytes()
+        draft_snapshot = DraftStore(draft_path).entries()
+        DraftStore(draft_path).save_checkpoint()
+        checkpoint_time = DraftStore(draft_path).status()['checkpoint_saved_at']
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
         (workspace / "vanilla-snapshot.json.gz").write_bytes(b"private snapshot fixture")
         translation = root / "localization/translations/RU_RU.csv"
@@ -161,7 +163,8 @@ def main() -> int:
                            for event in json.loads(get(base + '/api/logs'))['events'])
         assert metadata["preferences"]["column_widths"] == {"key": 515}
         assert metadata['preferences']['translator_column_order'] == ['translation', 'key', 'lekmod_en_US']
-        assert draft_path.read_bytes() == draft_bytes, 'updater modified unapplied local drafts'
+        assert DraftStore(draft_path).entries() == draft_snapshot, 'update/migration changed unapplied local drafts'
+        assert DraftStore(draft_path).status()['checkpoint_saved_at'] == checkpoint_time, 'update lost explicit Save'
         if args.connected_project:
             assert metadata['draft_count'] == 1
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe

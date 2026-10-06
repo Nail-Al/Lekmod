@@ -2,7 +2,7 @@ name: Localization Editor for Windows
 
 on:
   push:
-    branches: [localization-infrastructure]
+    branches: [localization-infrastructure, editor-v025-workflow]
     paths:
       - "localization/**"
       - "LEKMOD/Art/**"
@@ -68,6 +68,7 @@ jobs:
         run: |
           python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_runtime_xml.py -q
       - name: Persist verified generated game XML
+        if: github.ref == 'refs/heads/localization-infrastructure'
         shell: pwsh
         run: |
           git add -- LEKMOD/Override/CIV5Units_Mongol.xml
@@ -79,6 +80,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           } elseif ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Publish versioned Windows download
+        if: github.ref == 'refs/heads/localization-infrastructure'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -101,14 +103,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/published | Out-Null
           $editor = Get-Content localization/editor/version.json -Raw | ConvertFrom-Json
-          gh release download $editor.release_tag --pattern LekmodLocalizationEditor-Windows.zip --dir dist/published
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item dist/LekmodLocalizationEditor-Windows.zip dist/published/LekmodLocalizationEditor-Windows.zip
           # Updater code is unchanged. Exercise the current release plus the
           # two legacy duplicate/lock cases on each build; keep the complete
           # historical sweep available for changes to the updater itself.
-          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.23')
+          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.24')
           if ($env:FULL_UPGRADE_MATRIX -eq 'true') {
-            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23')
+            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24')
           }
           foreach ($previous in $previousVersions) {
             $folder = "dist/previous-$previous"

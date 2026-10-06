@@ -36,7 +36,8 @@ DEFAULTS = {
     "developer_visible_columns": [], "column_widths": {},
     "translator_column_order": [], "developer_column_order": [],
     "snapshot_url": TEAM_SNAPSHOT_URL, "snapshot_url_cleared": False,
-    "page_size": "100",
+    "page_size": "100", "apply_target": "",
+    "translator_sync_column": "auto", "developer_sync_column": "auto", "developer_status_column": "auto",
     "translator_filters": {}, "developer_filters": {},
 }
 FILTER_DEFAULTS = {"kind": "", "status": "", "date_field": "english_edited_at",
@@ -105,6 +106,12 @@ def settings(home: Path = APP_HOME) -> dict:
     for name in ("onboarded", "prefill", "wrap", "panel_expanded", "snapshot_url_cleared"):
         if type(raw.get(name)) is bool:
             result[name] = raw[name]
+    for name, choices in (("apply_target", ("", "project", "game", "all")),
+                          ("translator_sync_column", ("auto", "show", "hide")),
+                          ("developer_sync_column", ("auto", "show", "hide")),
+                          ("developer_status_column", ("auto", "show", "hide"))):
+        if raw.get(name) in choices:
+            result[name] = raw[name]
     if raw.get("mode") in ("translator", "developer"):
         result["mode"] = raw["mode"]
     if raw.get("page_size") in ("25", "50", "100", "250", "500", "1000", "all"):
@@ -151,6 +158,9 @@ def _save_settings(values: dict, home: Path) -> dict:
                                               "snapshot_url_cleared")
     ):
         raise ValueError("invalid editor mode or preference")
+    if candidate["apply_target"] not in ("", "project", "game", "all") or any(
+        candidate[name] not in ("auto", "show", "hide") for name in ("translator_sync_column", "developer_sync_column", "developer_status_column")):
+        raise ValueError("invalid Apply action or sync column preference")
     if candidate["page_size"] not in ("25", "50", "100", "250", "500", "1000", "all"):
         raise ValueError("invalid table page size")
     if any(not isinstance(candidate[k], str) or len(candidate[k]) > 4096
@@ -383,9 +393,9 @@ def inspect_game(root: Path, project: Path | None = None) -> dict:
     return result
 
 
-def _gameplay_digest(path: Path) -> str:
+def _gameplay_digest(path: Path | bytes) -> str:
     """Compare all non-language XML so a game copy with different rules fails."""
-    root = ET.parse(path).getroot()
+    root = ET.fromstring(path) if isinstance(path, bytes) else ET.parse(path).getroot()
     if root.tag != "GameData":
         raise ValueError("game Override XML is not GameData")
     for child in list(root):
@@ -399,7 +409,7 @@ def _gameplay_digest(path: Path) -> str:
     return hashlib.sha256(ET.tostring(root, encoding="utf-8")).hexdigest()
 
 
-def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME) -> dict:
+def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME, *, content: bytes | None = None) -> dict:
     """Back up and replace only the matching installed localization XML."""
     info = validate_project(project, full=False)
     mods = {item["name"]: item for item in installed_mods(game)}
@@ -418,7 +428,9 @@ def apply_game(project: Path, game: Path, mod_name: str, home: Path = APP_HOME) 
         raise ValueError("The installed Override XML has different gameplay data. "
                          "Install the matching Lekmod release before applying text.")
     old = target.read_bytes()
-    new = source.read_bytes()
+    new = source.read_bytes() if content is None else content
+    if _gameplay_digest(new) != _gameplay_digest(target):
+        raise ValueError("The local version changes gameplay data; only localization can be applied")
     # This lazy import avoids the shared-path module's startup dependency.
     # Validate even a no-op: older LLE releases may have installed invalid XML.
     from .runtime_xml import validate_runtime_xml
