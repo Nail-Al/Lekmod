@@ -41,7 +41,9 @@ jobs:
         run: python -m pip install "cryptography>=45,<47"
 
       - name: Generate runtime XML from reviewed sources
-        run: python -B localization/tools/build_shipped_localization.py --vanilla-reference localization/reference/vanilla-fingerprints.json.gz --write
+        run: |
+          python -B localization/tools/sync_primary_english.py --write
+          python -B localization/tools/build_shipped_localization.py --vanilla-reference localization/reference/vanilla-fingerprints.json.gz --write
 
       - name: Run configured read-only checks
         run: python -B localization/tools/manage.py check --ci

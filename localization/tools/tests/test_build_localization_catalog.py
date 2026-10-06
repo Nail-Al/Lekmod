@@ -417,7 +417,7 @@ class LocalizationCatalogTests(unittest.TestCase):
         )
         self.assertIsNotNone(row)
         self.assertIsNotNone(row.find("Text"))
-        self.assertIsNone(row.find("Text").text)
+        self.assertEqual(row.find("Text").text, '\u00a0')
 
         entries[key]["lekmod_en_US"]["text"] = None
         with self.assertRaisesRegex(catalog_builder.CatalogError, key):

@@ -207,10 +207,11 @@ def main() -> int:
         source_fixture(project)
         game = project / "LEKMOD/Override/CIV5Units_Mongol.xml"
         before = hashlib.sha256(game.read_bytes()).digest()
-        # Existing v0.22 projects must migrate through the frozen generator,
+        # Existing v0.22/v0.23 projects must migrate through the frozen generator,
         # without touching canonical English, translations or local drafts.
         head, marker, fallback = game.read_bytes().partition(b'<!-- BEGIN GENERATED FALLBACK -->')
-        rejected_xml = head + marker + fallback.replace(b'<Text></Text>', b'<Text />')
+        rejected_xml = (head + marker + fallback).replace(b'<Text>&#160;</Text>', b'<Text></Text>')
+        rejected_xml = rejected_xml.replace('<Text>\u00a0</Text>'.encode('utf-8'), b'<Text></Text>')
         game.write_bytes(rejected_xml)
         settings = root / "localization/workspace/editor-settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)

@@ -74,12 +74,14 @@ class ConnectionTests(unittest.TestCase):
         self.assertIn(b'Id="2"', self.target.read_bytes())
 
     def test_invalid_language_row_cannot_change_game_or_create_a_backup(self):
-        """The conservative gate rejects changed empty-field serialization."""
+        """Both forms of empty fields are rejected before changing installed XML."""
         previous = self.target.read_bytes()
         source = self.project / 'LEKMOD/Override/CIV5Units_Mongol.xml'
         source.write_text(source.read_text().replace('<Text>new</Text>', '<Text />'), encoding='utf-8')
-        with self.assertRaisesRegex(ValueError, 'paired tags'):
-            apply_game(self.project, self.game, self.installed.name, self.home)
+        for empty in ('<Text />', '<Text></Text>'):
+            source.write_text(source.read_text().replace('<Text />', empty), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'NULL'):
+                apply_game(self.project, self.game, self.installed.name, self.home)
         self.assertEqual(self.target.read_bytes(), previous)
         self.assertFalse((self.home / 'localization/workspace/game-backups').exists())
 
@@ -138,6 +140,24 @@ class ConnectionTests(unittest.TestCase):
         cache.write_bytes(b'not a SQLite database')
         report = game_diagnostics(self.project, self.game, profile=profile)
         self.assertIn('not a database', report['databases'][0]['error'])
+
+    def test_diagnostics_retains_sql_error_before_xml_filename(self):
+        """A filename-only report previously hid the NULL/constraint failure."""
+        profile = self.home / 'profile'
+        logs = profile / 'Logs'
+        logs.mkdir(parents=True)
+        (logs / 'Database.log').write_text(
+            '[95578.312] Language_DE_DE.Text may not be NULL\n'
+            "[95578.312] While executing - 'insert or replace into Language_DE_DE(Tag,Text) values (?,?);'\n"
+            '[95578.312] In XMLSerializer while updating table Language_DE_DE from file '
+            'Assets\\DLC\\LEKMOD_v35.4\\Override\\CIV5Units_Mongol.xml.\n'
+            'unrelated private message\n', encoding='utf-8')
+        report = game_diagnostics(self.project, self.game, profile=profile)
+        lines = report['loader_messages'][0]['lines']
+        self.assertIn('Language_DE_DE.Text may not be NULL', lines[0])
+        self.assertIn('While executing', lines[1])
+        self.assertEqual(len(lines), 3)
+        self.assertNotIn('unrelated private message', json.dumps(report))
 
     def test_diagnostics_reads_localizedtext_languages_without_views(self):
         """The merged cache routes language values separately from table names."""

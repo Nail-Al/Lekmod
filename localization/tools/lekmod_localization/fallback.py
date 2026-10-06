@@ -11,6 +11,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 from .common import CatalogError, REPO_ROOT, SOURCE_LOCALE, token_counts
+from .runtime_xml import runtime_text
 
 
 FALLBACK_CLASSES = {"lekmod_new", "vanilla_modified"}
@@ -53,7 +54,7 @@ def render_locale(locale: str, entries: dict[str, dict[str, str]]) -> bytes:
         row = ET.SubElement(language, "Replace", {"Tag": key})
         for name in ("Text", "Gender", "Plurality"):
             if name in fields:
-                ET.SubElement(row, name).text = fields[name]
+                ET.SubElement(row, name).text = runtime_text(fields[name]) if name == 'Text' else fields[name]
     ET.indent(game, space="  ")
     rendered = ET.tostring(game, encoding="utf-8", xml_declaration=True,
                            short_empty_elements=False) + b"\n"

@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lekmod_localization.common import CatalogError, REPO_ROOT, token_counts, normalize_text
-from lekmod_localization.runtime_xml import LOCALES, validate_runtime_xml
+from lekmod_localization.runtime_xml import BLANK_TEXT, LOCALES, materialize_blank_text, validate_runtime_xml
 from lekmod_localization.shipped import install_candidate, render_blocks
 from lekmod_localization.shipped import approved_entries
 from lekmod_localization.catalog import build_catalog
@@ -109,7 +109,7 @@ class RuntimeXMLTests(unittest.TestCase):
         original = (REPO_ROOT / 'LEKMOD/Override/CIV5Units_Mongol.xml').read_text(encoding='utf-8')
         head, marker, fallback = original.partition('<!-- BEGIN GENERATED FALLBACK -->')
         self.assertTrue(marker)
-        old = head + marker + fallback.replace('<Text></Text>', '<Text />')
+        old = head + marker + fallback.replace('<Text>\u00a0</Text>', '<Text />')
         ET.fromstring(old)  # This is exactly the insufficient pre-v0.23 check.
         remaining = []
 
@@ -121,7 +121,7 @@ class RuntimeXMLTests(unittest.TestCase):
         connect = sqlite3.connect
         with patch('lekmod_localization.runtime_xml.sqlite3.connect',
                    side_effect=lambda *args: connect(*args, factory=ObservedConnection)):
-            with self.assertRaisesRegex(CatalogError, 'paired tags'):
+            with self.assertRaisesRegex(CatalogError, 'NULL'):
                 validate_runtime_xml(old)
         self.assertEqual(remaining, [0], 'the failed file must roll back earlier English rows')
 
@@ -152,8 +152,8 @@ class RuntimeXMLTests(unittest.TestCase):
         for key, text in zip(KEYS[2:], RUSSIAN):
             self.assertEqual(token_counts(text), token_counts(texts[key]))
             targets['RU_RU'][key] = {'Text': text}
-        base = '<GameData>\n' + sync_primary_english.english_block(
-            (REPO_ROOT / 'localization/en_US/primary.xml').read_text(encoding='utf-8')) + '</GameData>'
+        base = materialize_blank_text('<GameData>\n' + sync_primary_english.english_block(
+            (REPO_ROOT / 'localization/en_US/primary.xml').read_text(encoding='utf-8')) + '</GameData>')
         candidate = install_candidate(base, render_blocks(targets), list(targets))
         result = validate_runtime_xml(candidate, keys=KEYS)
         self.assertEqual([result['texts']['RU_RU'][key] for key in KEYS[2:]], list(RUSSIAN))
@@ -183,21 +183,76 @@ class RuntimeXMLTests(unittest.TestCase):
         self.assertEqual(restored_texts, texts)
 
     def test_empty_missing_unknown_and_duplicate_fields_fail_before_output(self):
-        """Guard input validation while accepting intentional empty strings."""
+        """Both forms of empty Text fail; a blank glyph preserves intentional blanks."""
         paired = '<GameData><Language_en_US><Row Tag="TXT_KEY_ONE"><Text></Text></Row></Language_en_US></GameData>'
-        self.assertEqual(validate_runtime_xml(paired, keys=('TXT_KEY_ONE',))['texts']['en_US']['TXT_KEY_ONE'], '')
-        for broken in (paired.replace('<Text></Text>', '<Text />'),
+        safe = materialize_blank_text(paired)
+        self.assertEqual(validate_runtime_xml(safe, keys=('TXT_KEY_ONE',))['texts']['en_US']['TXT_KEY_ONE'], BLANK_TEXT)
+        for broken in (paired, paired.replace('<Text></Text>', '<Text />'),
                        paired.replace('<Text></Text>', ''),
                        paired.replace('Language_en_US', 'Language_NO_SUCH_TABLE'),
                        paired.replace('<Text></Text>', '<Text>One</Text><Text>Two</Text>')):
             with self.subTest(broken=broken), self.assertRaises(CatalogError):
                 validate_runtime_xml(broken)
         # Comments and self-closing Delete are not empty text fields.
-        valid = paired.replace('</Language_en_US>', '<!-- <Text /> -->'
+        valid = safe.replace('</Language_en_US>', '<!-- <Text /> -->'
                                '<Delete Tag="TXT_KEY_ONE" /></Language_en_US>')
         self.assertEqual(validate_runtime_xml(valid)['counts']['en_US'], 0)
-        updated = paired.replace('</Language_en_US>', '<Update><Where Tag="TXT_KEY_ONE" />'
+        updated = safe.replace('</Language_en_US>', '<Update><Where Tag="TXT_KEY_ONE" />'
                                  '<Set><Text>Changed</Text></Set></Update></Language_en_US>')
         self.assertEqual(validate_runtime_xml(updated, keys=('TXT_KEY_ONE',))['texts']['en_US']['TXT_KEY_ONE'], 'Changed')
-        with self.assertRaisesRegex(CatalogError, 'paired tags'):
+        with self.assertRaisesRegex(CatalogError, 'NULL'):
             validate_runtime_xml(updated.replace('<Text>Changed</Text>', '<Text />'))
+
+    def test_blank_output_survives_observed_mixed_russian_cache_schema(self):
+        """The user's EN/RU views and inactive DE NOT NULL table share one load.
+
+        This exercises conservative NULL binding, not the closed-source parser.
+        A failure in DE rolls back the earlier EN and RU menu rows.
+        """
+        document = '''<GameData><Language_en_US>
+          <Row Tag="TXT_KEY_LEKMOD_MENU_DISCORD"><Text>DISCORD</Text></Row>
+          </Language_en_US><Language_RU_RU>
+          <Row Tag="TXT_KEY_LEKMOD_MENU_VERSION_UPTODATE"><Text>Актуально</Text></Row>
+          </Language_RU_RU><Language_DE_DE>
+          <Replace Tag="TXT_KEY_CIVILOPEDIA_LEADERS_US_MICHAEL_COLLINS_TEXT_1"><Text></Text></Replace>
+          </Language_DE_DE></GameData>'''
+        with closing(sqlite3.connect(':memory:')) as db:
+            db.executescript('CREATE TABLE LocalizedText(Language TEXT,Tag TEXT,Text TEXT, '
+                             'PRIMARY KEY(Language,Tag)); CREATE TABLE Language_DE_DE('
+                             'ID INTEGER PRIMARY KEY,Tag TEXT UNIQUE NOT NULL,Text TEXT NOT NULL);')
+            for locale in ('en_US', 'RU_RU'):
+                db.executescript(f'CREATE VIEW Language_{locale} AS SELECT Tag,Text FROM LocalizedText '
+                                 f"WHERE Language='{locale}'; CREATE TRIGGER insert_{locale} "
+                                 f'INSTEAD OF INSERT ON Language_{locale} BEGIN '
+                                 'INSERT INTO LocalizedText VALUES('
+                                 f"'{locale}',NEW.Tag,NEW.Text); END;")
+
+            def load(xml):
+                with db:
+                    for block in ET.fromstring(xml):
+                        for operation in block:
+                            db.execute(f'INSERT OR REPLACE INTO {block.tag}(Tag,Text) VALUES(?,?)',
+                                       (operation.get('Tag'), operation.find('Text').text))
+
+            for unsafe in (document, document.replace('<Text></Text>', '<Text />')):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, 'Language_DE_DE.Text'):
+                    load(unsafe)
+                self.assertEqual(db.execute('SELECT count(*) FROM LocalizedText').fetchone()[0], 0)
+            load(materialize_blank_text(document))
+            self.assertEqual(db.execute('SELECT count(*) FROM LocalizedText').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT Text FROM Language_DE_DE').fetchone()[0], BLANK_TEXT)
+
+    def test_blank_materialization_preserves_adjacent_xml_and_source_text(self):
+        """Only empty language fields change; entities, comments and gameplay do not."""
+        document = '''<GameData><!-- <Text></Text> -->
+          <Units><Row><Text></Text></Row></Units><Language_en_US>
+          <Row Tag="TXT_KEY_EMPTY"><Text><![CDATA[]]></Text></Row>
+          <Replace Tag="TXT_KEY_SPACE"><Text>   </Text></Replace>
+          <Row Tag="TXT_KEY_ESCAPE"><Text> A &amp; &lt;Б&gt; </Text></Row>
+          </Language_en_US></GameData>'''
+        safe = materialize_blank_text(document)
+        self.assertIn('<!-- <Text></Text> -->', safe)
+        self.assertIn('<Units><Row><Text></Text></Row></Units>', safe)
+        self.assertIn('<Text> A &amp; &lt;Б&gt; </Text>', safe)
+        self.assertEqual(safe.count('<Text>&#160;</Text>'), 2)
+        self.assertEqual(materialize_blank_text(safe), safe)

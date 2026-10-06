@@ -92,6 +92,26 @@ class EnglishSourceTests(unittest.TestCase):
         self.assertEqual(self.game_xml.read_bytes(), original)
         self.assertEqual(sync.encoded_text(self.game_xml, self.original), original)
 
+    def test_intentional_blank_is_materialized_only_in_game_output(self):
+        """English sources stay editable and exact; the game never receives empty Text."""
+        self.game_xml.write_text(self.original.replace('<Text>New</Text>', '<Text></Text>'), encoding='utf-8')
+        sync.bootstrap(self.source, self.game_xml)
+        source = self.source.read_bytes()
+        self.assertIn(b'<Text></Text>', source)
+        self.assertIn(b'<Text>&#160;</Text>', self.game_xml.read_bytes())
+        self.assertFalse(sync.synchronize(self.source, self.game_xml, write=False))
+        self.game_xml.write_bytes(self.game_xml.read_bytes().replace(b'<Text>&#160;</Text>', b'<Text></Text>'))
+        self.assertTrue(sync.synchronize(self.source, self.game_xml, write=True))
+        self.assertEqual(self.source.read_bytes(), source)
+
+    def test_blank_materialization_cannot_hide_invalid_nested_fields(self):
+        """Preparing blanks must not turn malformed Text children into valid input."""
+        sync.bootstrap(self.source, self.game_xml)
+        valid = self.source.read_text(encoding='utf-8')
+        self.source.write_text(valid.replace('<Text>New</Text>', '<Text><Bad/></Text>'), encoding='utf-8')
+        with self.assertRaisesRegex(CatalogError, 'plain escaped text'):
+            sync.synchronize(self.source, self.game_xml, write=True)
+
 
 if __name__ == "__main__":
     unittest.main()

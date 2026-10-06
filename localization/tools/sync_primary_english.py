@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 
 import audit_primary_localization as primary_audit
 from lekmod_localization.common import CatalogError, DEFAULT_SOURCE, REPO_ROOT
-from lekmod_localization.runtime_xml import validate_runtime_xml
+from lekmod_localization.runtime_xml import materialize_blank_text, validate_runtime_xml
 
 
 DEFAULT_ENGLISH = REPO_ROOT / "localization" / "en_US" / "primary.xml"
@@ -43,7 +43,7 @@ def validate_source(document: str) -> str:
         "Language_en_US"
     ]:
         raise CatalogError("English source must contain only Language_en_US")
-    validate_runtime_xml(document)
+    validate_runtime_xml(materialize_blank_text(document))
     return block
 
 
@@ -105,7 +105,7 @@ def bootstrap(source: Path, game_xml: Path) -> None:
     block = english_block(document)
     match = LANGUAGE_BLOCK.search(document)
     assert match is not None
-    proposed = document[:match.start()] + BEGIN + block + END + document[match.end():]
+    proposed = document[:match.start()] + BEGIN + materialize_blank_text(block) + END + document[match.end():]
     source_content = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         "<GameData>\n" + block + "</GameData>\n"
@@ -118,7 +118,7 @@ def bootstrap(source: Path, game_xml: Path) -> None:
 
 def synchronize(source: Path, game_xml: Path, *, write: bool) -> bool:
     """Check or update only the marked English block of the game XML."""
-    replacement = validate_source(source.read_text(encoding="utf-8"))
+    replacement = materialize_blank_text(validate_source(source.read_text(encoding="utf-8")))
     audit_english(source)
     document = game_xml.read_text(encoding="utf-8")
     start, end, current = marked_block(document)

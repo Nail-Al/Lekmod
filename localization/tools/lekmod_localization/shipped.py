@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from .common import CatalogError, KEY_RE, PLACEHOLDER_RE, SOURCE_LOCALE, token_counts
 from .fallback import fallback_entries
 from .workspace import editor_source_fingerprint
-from .runtime_xml import validate_runtime_xml
+from .runtime_xml import runtime_text, validate_runtime_xml
 
 
 BEGIN = "\t<!-- BEGIN GENERATED FALLBACK -->\n"
@@ -130,9 +130,9 @@ def render_blocks(entries_by_locale: dict[str, dict[str, dict[str, str]]]) -> st
             operation = ET.SubElement(language, "Replace", {"Tag": key})
             for name in ("Text", "Gender", "Plurality"):
                 if name in fields:
-                    ET.SubElement(operation, name).text = fields[name]
+                    ET.SubElement(operation, name).text = runtime_text(fields[name]) if name == 'Text' else fields[name]
         ET.indent(language, space="  ")
-        # Keep upstream's paired format for intentional empty Text fields.
+        # No generated Text may be empty: the game can bind it as SQL NULL.
         blocks.append("\t" + ET.tostring(language, encoding="unicode",
                                          short_empty_elements=False) + "\n")
     return "".join(blocks)

@@ -17,37 +17,60 @@ LOCALES = ('en_US', 'DE_DE', 'ES_ES', 'FR_FR', 'IT_IT', 'JA_JP', 'KO_KR',
 DLC_LANGUAGES = dict(zip(LOCALES, ('en_US', 'de_DE', 'es_ES', 'fr_FR', 'it_IT',
                                  'ja_JP', 'ko_KR', 'pl_PL', 'ru_RU', 'zh_Hant_HK')))
 FIELDS = {name.casefold(): name for name in ('Tag', 'Text', 'Gender', 'Plurality')}
+BLANK_TEXT = '\u00a0'
 
 
-def _self_closing_fields(document: str) -> set[tuple[int, tuple[str, ...]]]:
-    """Retain the empty-element distinction that ElementTree discards.
+def runtime_text(value: str) -> str:
+    """Represent an intentionally blank value with a visible-width blank glyph.
 
-    Preserve the paired empty-field convention already used by upstream
-    Lekmod. We conservatively reject self-closing Text fields; this is an
-    output policy, not a claim that our parser reproduces Civ V's parser.
+    A non-breaking space is nonempty UTF-8 text, including after ASCII XML
+    whitespace condensation. Both paired and self-closing empty elements can
+    otherwise reach the game's SQL binder as NULL. Keep canonical sources and
+    translator drafts unchanged; this substitution belongs only in game output.
     """
+    return value if value.strip() else BLANK_TEXT
+
+
+def materialize_blank_text(document: str) -> str:
+    """Patch blank language Text children without reformatting adjacent XML."""
     raw = document.encode('utf-8')
     parser = expat.ParserCreate()
     stack = []
-    ordinal = -1
-    empty_fields = set()
+    field = None
+    replacements = []
 
     def start(name, attributes):
-        nonlocal ordinal
+        nonlocal field
         stack.append(name)
-        if len(stack) >= 3 and stack[1].startswith('Language_'):
-            if len(stack) == 3:
-                ordinal += 1
-            elif len(stack) >= 4 and name.casefold() in FIELDS:
-                at = parser.CurrentByteIndex
-                end = raw.find(b'>', at)
-                if raw[at:end].rstrip().endswith(b'/'):
-                    empty_fields.add((ordinal, tuple(stack[2:])))
+        if field is not None and len(stack) > field[4]:
+            field[5].append(True)
+        if (field is None and name == 'Text' and any(node.startswith('Language_') for node in stack[:-1])
+                and stack[-2] in ('Row', 'Replace', 'Set') and not attributes):
+            at = parser.CurrentByteIndex
+            end = raw.find(b'>', at) + 1
+            field = (at, end, raw[at:end].rstrip().endswith(b'/>'), [], len(stack), [])
+
+    def characters(value):
+        if field is not None:
+            field[3].append(value)
+
+    def end(name):
+        nonlocal field
+        if field is not None and name == 'Text' and len(stack) == field[4]:
+            at, opening_end, self_closing, parts, _, children = field
+            if not children and not ''.join(parts).strip():
+                finish = opening_end if self_closing else raw.find(b'>', parser.CurrentByteIndex) + 1
+                replacements.append((at, finish))
+            field = None
+        stack.pop()
 
     parser.StartElementHandler = start
-    parser.EndElementHandler = lambda name: stack.pop()
+    parser.CharacterDataHandler = characters
+    parser.EndElementHandler = end
     parser.Parse(raw, True)
-    return empty_fields
+    for at, finish in reversed(replacements):
+        raw = raw[:at] + b'<Text>&#160;</Text>' + raw[finish:]
+    return raw.decode('utf-8')
 
 
 def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
@@ -61,19 +84,18 @@ def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
         raise CatalogError('DOCTYPE is not allowed in game localization XML')
     try:
         root = ET.fromstring(document)
-        empty_fields = _self_closing_fields(document)
     except (ET.ParseError, expat.ExpatError) as error:
         raise CatalogError(f'invalid game localization XML: {error}') from error
     if root.tag != 'GameData':
         raise CatalogError('game localization XML must have a GameData root')
     tables = {('Language_' + locale).casefold(): 'Language_' + locale for locale in LOCALES}
     loaded = set()
-    ordinal = -1
     with closing(sqlite3.connect(':memory:')) as database:
         database.execute('CREATE TABLE LocalizedText(Language TEXT, Tag TEXT, Text TEXT, '
                          'Gender TEXT, Plurality TEXT, PRIMARY KEY(Language, Tag))')
         for table in tables.values():
             database.execute(f'CREATE TABLE {quote_identifier(table)} ('
+                             'ID INTEGER PRIMARY KEY AUTOINCREMENT, '
                              'Tag TEXT UNIQUE NOT NULL, Text TEXT NOT NULL, '
                              'Gender TEXT, Plurality TEXT)')
             locale = DLC_LANGUAGES[table[9:]]
@@ -92,20 +114,19 @@ def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
                              f'INSTEAD OF DELETE ON {view} BEGIN DELETE FROM LocalizedText '
                              f"WHERE Language='{locale}' AND Tag=OLD.Tag; END")
 
-        def fields(element, path):
+        def fields(element):
             values = {}
-            for child in element:
-                if child.tag.casefold() == 'text' and (ordinal, (*path, child.tag)) in empty_fields:
-                    raise CatalogError('Use paired tags for intentional empty text: '
-                                       '<Text></Text>, not <Text /> (compatibility policy)')
+            if any(list(child) or child.attrib for child in element):
+                raise CatalogError('localization fields must contain plain escaped text')
             for name, value in [*element.attrib.items(), *(
-                    (child.tag, child.text or '') for child in element)]:
+                    (child.tag, child.text) for child in element)]:
                 canonical = FIELDS.get(name.casefold())
                 if canonical is None or canonical in values:
                     raise CatalogError(f'unknown or duplicate localization field: {name}')
+                if canonical == 'Text' and not value:
+                    raise CatalogError('Empty game Text can bind as NULL and reject the entire file; '
+                                       'render intentional blanks as a non-breaking space (&#160;)')
                 values[canonical] = value
-            if any(list(child) or child.attrib for child in element):
-                raise CatalogError('localization fields must contain plain escaped text')
             return values
 
         try:
@@ -125,8 +146,7 @@ def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
                         database.execute(sql.format(table=dlc_view), parameters)
 
                     for operation in block:
-                        ordinal += 1
-                        values = fields(operation, (operation.tag,)) if operation.tag != 'Update' else {}
+                        values = fields(operation) if operation.tag != 'Update' else {}
                         key = values.get('Tag', '(no Tag)')
                         try:
                             if operation.tag in ('Row', 'Replace'):
@@ -144,8 +164,8 @@ def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
                                 where_node, set_node = operation.find('Where'), operation.find('Set')
                                 if where_node is None or set_node is None or len(operation) != 2:
                                     raise CatalogError('localization Update needs one Where and one Set')
-                                selected = fields(where_node, ('Update', 'Where'))
-                                changed = fields(set_node, ('Update', 'Set'))
+                                selected = fields(where_node)
+                                changed = fields(set_node)
                                 key = selected.get('Tag', '(selector)')
                                 if not selected or not changed:
                                     raise CatalogError('localization Update needs a selector and values')

@@ -470,7 +470,7 @@ def game_diagnostics(project: Path, game: Path, *, profile: Path | None = None) 
             'TXT_KEY_LEKMOD_MENU_GITHUB', *('TXT_KEY_LEKMOD_MENU_VERSION_' + state
             for state in ('CHECKING', 'OUTDATED', 'UNKNOWN', 'UNREACHABLE', 'UPTODATE')))
     profile = profile if profile is not None else game_profile()
-    report = {'schema_version': 1, 'collected_at': datetime.now(timezone.utc).isoformat(),
+    report = {'schema_version': 2, 'collected_at': datetime.now(timezone.utc).isoformat(),
               'game': inspect_game(game, project), 'profile': str(profile),
               'xml': {}, 'databases': [], 'loader_messages': [],
               'note': 'Read-only report. A cache may describe an earlier game run. '
@@ -485,11 +485,17 @@ def game_diagnostics(project: Path, game: Path, *, profile: Path | None = None) 
         item = {'path': str(path), 'sha256': hashlib.sha256(data).hexdigest(),
                 'modified_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
         try:
+            root = ET.fromstring(data)
+            item['empty_text_keys'] = {
+                block.tag[9:]: sorted({operation.get('Tag', '(no Tag)') for operation in block
+                    if operation.tag in ('Row', 'Replace') and operation.find('Text') is not None
+                    and not operation.findtext('Text')})
+                for block in root if block.tag.startswith('Language_')}
             validated = validate_runtime_xml(data.decode('utf-8-sig'), keys=keys)
             item['counts'] = validated['counts']
             item['keys'] = {locale: {key: digest(text) for key, text in texts.items()}
                             for locale, texts in validated['texts'].items()}
-        except (ValueError, UnicodeError) as error:
+        except (ValueError, UnicodeError, ET.ParseError) as error:
             item['error'] = str(error)
         return item
 
@@ -536,7 +542,10 @@ def game_diagnostics(project: Path, game: Path, *, profile: Path | None = None) 
                     parameters = (*keys, stored_language) if stored_language is not None else keys
                     found = dict(database.execute(f'SELECT Tag,Text FROM {quoted} '
                         f'WHERE Tag IN ({",".join("?" for key in keys)}){language_filter}', parameters))
+                    schema_type = database.execute('SELECT type FROM sqlite_master WHERE name=?',
+                                                   (table,)).fetchone()
                     item['languages'][locale] = {'data_source': table, 'stored_language': stored_language,
+                        'schema_type': schema_type[0] if schema_type else None,
                         'columns': [
                         {'name': row[1], 'not_null': bool(row[3])} for row in database.execute(
                         f'PRAGMA table_info({quoted})')], 'keys': {key: {
@@ -550,22 +559,30 @@ def game_diagnostics(project: Path, game: Path, *, profile: Path | None = None) 
                         "SELECT Help FROM Buildings WHERE Type='BUILDING_BAZAAR'").fetchone()
                 if 'scannedfiles' in names:
                     item['scanned_mongol_files'] = list(database.execute(
-                        "SELECT Path,DateTime FROM ScannedFiles WHERE lower(Path) LIKE '%mongol%' LIMIT 20"))
+                        "SELECT Path,DateTime FROM ScannedFiles WHERE lower(Path) LIKE '%mongol%' "
+                        "ORDER BY lower(Path) LIKE '%lekmod%' DESC LIMIT 40"))
         except sqlite3.Error as error:
             item['error'] = str(error)
     for name in ('Database.log', 'XML.log', 'Localization.log'):
         path = profile / 'Logs' / name
         if not path.is_file():
             continue
-        # Limit the report even when logging has run for months; do not copy a
-        # complete log or include unrelated rows containing official text.
+        # Keep bounded SQL context: the actual error usually precedes the line
+        # naming the XML file. Filtering for the filename alone loses the cause.
         with path.open('rb') as handle:
             handle.seek(max(0, path.stat().st_size - 65536))
             lines = handle.read().decode('utf-8-sig', errors='replace').splitlines()
-        matches = [line[:500] for line in lines if 'civ5units_mongol' in line.casefold()
+        anchors = [index for index, line in enumerate(lines) if 'civ5units_mongol' in line.casefold()
                    or 'no such table: language_' in line.casefold()
-                   or ('not null' in line.casefold() and 'language_' in line.casefold())]
-        report['loader_messages'].append({'path': str(path), 'lines': matches[-40:]})
+                   or (('not null' in line.casefold() or 'may not be null' in line.casefold())
+                       and 'language_' in line.casefold())]
+        context = sorted({index for anchor in anchors[-12:]
+                          for index in range(max(0, anchor - 5), min(len(lines), anchor + 3))})
+        sql_context = re.compile(r'null|constraint|unique|while executing|xmlserializer|'
+                                 r'syntax error|no such|cannot modify', re.IGNORECASE)
+        report['loader_messages'].append({'path': str(path),
+            'lines': [lines[index][:500] for index in context
+                      if index in anchors or sql_context.search(lines[index])][-60:]})
     report['configured_languages'] = {}
     for name in ('config.ini', 'UserSettings.ini'):
         path = profile / name

@@ -30,6 +30,8 @@ jobs:
       - name: Generate runtime XML from reviewed sources
         shell: pwsh
         run: |
+          python -B localization/tools/sync_primary_english.py --write
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           python -B localization/tools/build_shipped_localization.py --vanilla-reference localization/reference/vanilla-fingerprints.json.gz --write
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Build Windows executable
@@ -104,9 +106,9 @@ jobs:
           # Updater code is unchanged. Exercise the current release plus the
           # two legacy duplicate/lock cases on each build; keep the complete
           # historical sweep available for changes to the updater itself.
-          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.22')
+          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.23')
           if ($env:FULL_UPGRADE_MATRIX -eq 'true') {
-            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22')
+            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23')
           }
           foreach ($previous in $previousVersions) {
             $folder = "dist/previous-$previous"
@@ -120,7 +122,7 @@ jobs:
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration', '--test-extra-instance') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
             if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
-            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22')) { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23')) { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
