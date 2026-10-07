@@ -13,6 +13,7 @@ from .common import (
     CatalogError,
     REPO_ROOT,
     character_count,
+    literal_bracket_counts,
     normalize_metadata,
     normalize_text,
 )
@@ -78,7 +79,10 @@ def editor_source_fingerprint(
         "text": english.get("text"),
         "gender": english.get("gender"),
         "plurality": english.get("plurality"),
-        "format_tokens": english.get("format_tokens", {}),
+        # Existing drafts and approvals hash all bracketed text. Keep that
+        # identity stable while the validator excludes non-game footnotes.
+        "format_tokens": {**english.get("format_tokens", {}),
+                          **literal_bracket_counts(english.get("text"))},
     }
     encoded = json.dumps(
         identity,

@@ -29,6 +29,9 @@ SOURCE_LOCALE = "en_US"
 TRANSLATABLE_FIELDS = ("Text", "Gender", "Plurality")
 
 BRACKET_TOKEN_RE = re.compile(r"\[[^\[\]]+\]")
+# Civ markup uses uppercase names, including parameterized colors and links.
+# Footnotes and bracketed prose are ordinary text, not formatting instructions.
+FORMAT_BRACKET_RE = re.compile(r"\[(?:[A-Z][A-Z0-9_]*|COLOR:[0-9:]+|LINK=[^\[\]]+|[/\\][A-Z][A-Z0-9_]*)\]")
 BRACE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
 PRINTF_TOKEN_RE = re.compile(r"%(?:\d+\$)?[a-zA-Z%]")
 KEY_RE = re.compile(r"^TXT_KEY_[A-Za-z0-9_]+$")
@@ -123,11 +126,33 @@ def token_counts(text: str | None) -> dict[str, int]:
         return {}
 
     tokens = (
-        BRACKET_TOKEN_RE.findall(text)
+        [token for token in BRACKET_TOKEN_RE.findall(text) if FORMAT_BRACKET_RE.fullmatch(token)]
         + BRACE_TOKEN_RE.findall(text)
         + PRINTF_TOKEN_RE.findall(text)
     )
     return dict(sorted(Counter(tokens).items()))
+
+
+def literal_bracket_counts(text: str | None) -> dict[str, int]:
+    """Retain v0.25 source hashes without requiring prose/footnotes in translations."""
+    return dict(Counter(token for token in BRACKET_TOKEN_RE.findall(text or '')
+                        if not FORMAT_BRACKET_RE.fullmatch(token)))
+
+
+def token_difference(text: str | None, required: dict[str, int]) -> tuple[dict[str, int], dict[str, int]]:
+    """Preserve source tokens, allow additional icons, ignore legacy prose tokens."""
+    actual = Counter(token_counts(text))
+    expected = Counter({name: amount for name, amount in required.items()
+                        if not BRACKET_TOKEN_RE.fullmatch(name) or FORMAT_BRACKET_RE.fullmatch(name)})
+    missing = dict(expected - actual)
+    unexpected = {name: amount for name, amount in (actual - expected).items()
+                  if not re.fullmatch(r'\[ICON_[A-Z0-9_]+\]', name)}
+    return missing, unexpected
+
+
+def tokens_match(text: str | None, required: dict[str, int]) -> bool:
+    """Use the same formatting rule for drafts, builds, exports and imports."""
+    return not any(token_difference(text, required))
 
 
 def canonical_locale(locale: str, available: list[str]) -> str:

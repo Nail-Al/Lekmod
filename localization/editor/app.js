@@ -45,9 +45,10 @@ function localDateBoundary(value, end = false) {
   return new Date(year, month - 1, day + (end ? 1 : 0)).toISOString();
 }
 let meta, prefs, locales = {}, chosen = null, offset = 0, total = 0;
-let visible = new Set(), widths = {}, searchTimer, requestId = 0;
+let visible = new Set(), widths = {}, requestId = 0;
 let toastTimer;
 let inLogs = false;
+let inTroubleshoot = false, troubleshootIssues = [], troubleshootPage = 0;
 let downloadTimer;
 let sourceVersions = null, sourceVersionRequest = null;
 let gameStatusRequest = false;
@@ -67,6 +68,7 @@ function rememberFailedSaves() {
 }
 let autoSaveTimer, draftWrite = null, selectionContext = null, applyPending = false, applyTimer;
 let applyControlsBefore = new Map(), checkpointPending = false, historyPending = false;
+let selectedSavedVersion = null;
 let blockedGameTarget = "game", blockedGameRetry = null;
 let historyQueue = Promise.resolve(), historyQueued = 0;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
@@ -246,18 +248,36 @@ function renderApplyActions() {
   if (applyPending) closeApplyMenu();
 }
 function updateHistory(state) {
-  for (const key of ["draft_count", "draft_undo_available", "draft_redo_available", "checkpoint_saved_at", "checkpoint_dirty"])
+  for (const key of ["draft_count", "draft_undo_available", "draft_redo_available", "checkpoint_saved_at", "checkpoint_dirty", "saved_version_count", "apply_issue_count"])
     if (state[key] !== undefined) meta[key] = state[key];
   el("undo").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.draft_undo_available);
   el("redo").disabled = applyPending || historyPending || !meta.draft_redo_available;
   el("discard").disabled = applyPending || historyPending || (!hasUnsaved() && !meta.checkpoint_dirty);
   el("save").disabled = !meta.ready || !!draftWrite || checkpointPending || historyPending;
-  el("save").title = "Record one restore point for this project's local work · Ctrl+S" +
+  el("saved-versions").disabled = !meta.ready || applyPending || historyPending || checkpointPending;
+  el("saved-versions").title = "Browse saved versions · " + (meta.saved_version_count || 0) + " of 50 Saves";
+  el("save").title = "Keep a saved version of this project's local work · Ctrl+S" +
     (meta.checkpoint_saved_at ? " · Last Save: " + localEditTime(meta.checkpoint_saved_at) : "");
   el("discard").title = meta.checkpoint_saved_at ? "Restore all local work to Save · " + localEditTime(meta.checkpoint_saved_at) :
     "Discard all local edits and restore the original working version";
   el("local-drafts").textContent = (meta.draft_count || 0) + " local drafts";
+  if (state.target && state.state) meta.apply_state = state;
+  renderApplyNotice();
   renderApplyActions();
+}
+function renderApplyNotice() {
+  const state = meta.apply_state || {}, count = meta.apply_issue_count || 0;
+  const show = applyPending || state.state === "error" || count > 0;
+  el("apply-notice").hidden = !show;
+  const target = el("save-state"); target.hidden = !show;
+  target.className = "section-status " + (applyPending ? "busy" : state.state === "error" ? "error" : "warning");
+  target.textContent = applyPending ? (state.phase || "Checking saved drafts") + " · " + (state.count || 0) + " saved drafts. You can keep editing." :
+    state.state === "error" ? "Apply stopped: " + state.error + (count ? " · " + count + " draft errors found." : "") + " See Synced to for destination state." :
+    (state.state === "complete" ? "Applied " + (state.applied_count || 0) + " drafts to " +
+      (state.target === "all" ? "project and game" : state.target === "game" ? "game" : "project") + ". " : "") +
+    count + " draft errors found. These rows remain saved locally.";
+  el("troubleshoot-button").hidden = !count;
+  el("troubleshoot-button").disabled = applyPending;
 }
 function renderConnections() {
   const project = meta.project;
@@ -278,7 +298,8 @@ function renderConnections() {
   el("game-badge").classList.toggle("missing", !matches);
   renderApplyActions();
   applySyncDefaults();
-  el("workspace").hidden = !meta.ready || inLogs || inMerge;
+  el("workspace").hidden = !meta.ready || inLogs || inMerge || inTroubleshoot;
+  el("troubleshoot-view").hidden = !meta.ready || !inTroubleshoot || inLogs || inMerge;
   el("merge-view").hidden = !meta.ready || inLogs || !inMerge;
   el("no-source").hidden = meta.ready || inLogs || inMerge;
   el("connection-error").textContent = meta.connection_error || "";
@@ -616,7 +637,7 @@ async function load() {
   clearSelection();
   el("table-loading").hidden = false;
   el("table-scroll").setAttribute("aria-busy", "true");
-  const args = new URLSearchParams({q: el("search-input").value, offset,
+  const args = new URLSearchParams({q: committedSearch, offset,
     limit: pageSize(), kind: filters.kind, date_field: filters.date_field,
     date_from: filters.date_from, date_to: filters.date_to, version: filters.version,
     needs_translation: filters.needs_translation});
@@ -632,7 +653,6 @@ async function load() {
     if (sequence !== requestId) return;
     total = result.total;
     renderTable(result.rows);
-    committedSearch = el("search-input").value;
     el("count").textContent = total ? (offset + 1) + "–" + Math.min(offset + result.rows.length, total) +
       " of " + total : "No rows";
     el("prev").disabled = offset === 0 || pageSize() === "all";
@@ -1111,7 +1131,7 @@ el("history-sync").addEventListener("click", async () => {
 el("mode").addEventListener("click", async () => {
   guardNavigation(async () => {
     try {
-      inMerge = false; el("merge-view").hidden = true;
+      inMerge = false; inTroubleshoot = false; el("merge-view").hidden = true;
       await preference({mode: developer() ? "translator" : "developer"});
       if (inLogs) closeLogs();
       changeMode(); renderConnections();
@@ -1144,13 +1164,28 @@ el("category").addEventListener("change", async () => {
     catch (error) { message(error.message, true); }
   });
 });
-el("search-input").addEventListener("input", () => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    const next = el("search-input").value;
-    el("search-input").value = committedSearch;
-    guardNavigation(() => { el("search-input").value = next; offset = 0; return load(); });
-  }, 230);
+function updateSearchClear() {
+  el("search-clear").disabled = !el("search-input").value && !committedSearch;
+}
+function setSearch(query) {
+  committedSearch = query;
+  el("search-input").value = query;
+  updateSearchClear();
+}
+async function submitSearch() {
+  const query = el("search-input").value;
+  await guardNavigation(async () => {
+    committedSearch = query; offset = 0; updateSearchClear();
+    logUI("search"); await load();
+  });
+}
+el("search-input").addEventListener("input", updateSearchClear);
+el("search-input").addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); submitSearch(); }
+});
+el("search-submit").addEventListener("click", submitSearch);
+el("search-clear").addEventListener("click", () => {
+  el("search-input").value = ""; updateSearchClear(); el("search-input").focus(); submitSearch();
 });
 el("page-size").addEventListener("change", async () => {
   const next = el("page-size").value;
@@ -1206,6 +1241,7 @@ el("next").addEventListener("click", () => guardNavigation(() => {
   offset += pageStep(); logUI("page-changed"); return load();
 }));
 async function openLogs() {
+  inTroubleshoot = false; el("troubleshoot-view").hidden = true;
   inLogs = true;
   logUI("logs-open");
   el("workspace").hidden = true;
@@ -1226,6 +1262,53 @@ function closeLogs() {
 }
 el("logs-button").addEventListener("click", () => inLogs ? closeLogs() : guardNavigation(openLogs));
 el("logs-back").addEventListener("click", closeLogs);
+function renderTroubleshoot() {
+  const start = troubleshootPage * 50, rows = troubleshootIssues.slice(start, start + 50);
+  const body = el("troubleshoot-table").querySelector("tbody"); body.replaceChildren();
+  for (const issue of rows) {
+    const tr = document.createElement("tr");
+    for (const value of [(issue.mode === "developer" ? "EN" : issue.locale) + " · " + issue.key,
+      issue.english_text, issue.draft_text, issue.reason + (issue.needs_recheck ? " · Edited since Apply; apply again to recheck." : "")]) {
+      const td = document.createElement("td"); td.textContent = value || ""; tr.append(td);
+    }
+    const td = document.createElement("td"), edit = document.createElement("button");
+    edit.textContent = "Edit row"; edit.addEventListener("click", () => revealIssue(issue)); td.append(edit); tr.append(td);
+    body.append(tr);
+  }
+  el("troubleshoot-count").textContent = troubleshootIssues.length ? (start + 1) + "–" + Math.min(start + 50, troubleshootIssues.length) + " of " + troubleshootIssues.length : "No remaining errors";
+  el("troubleshoot-prev").disabled = !troubleshootPage;
+  el("troubleshoot-next").disabled = start + 50 >= troubleshootIssues.length;
+}
+async function openTroubleshoot() {
+  try {
+    const result = await api("/api/apply-issues"); updateHistory(result);
+    troubleshootIssues = result.issues; troubleshootPage = 0;
+    el("troubleshoot-summary").textContent = troubleshootIssues.length + " drafts need review from the last Apply. This list is kept across restarts.";
+    renderTroubleshoot();
+    if (inLogs) closeLogs();
+    inMerge = false; inTroubleshoot = true; renderConnections(); logUI("troubleshoot-open");
+  } catch (error) { message(error.message, true); }
+}
+function closeTroubleshoot() { inTroubleshoot = false; renderConnections(); }
+async function revealIssue(issue) {
+  await guardNavigation(async () => {
+    try {
+      const changes = {mode: issue.mode, [issue.mode === "developer" ? "developer_filters" : "translator_filters"]: emptyFilters()};
+      if (issue.mode === "translator") Object.assign(changes, {locale: issue.locale, category: "all"});
+      await preference(changes);
+      if (issue.mode === "translator") { el("locale").value = issue.locale; categories(); }
+      changeMode(); closeTroubleshoot(); setSearch(issue.key); offset = 0; await load();
+      const index = (window.currentRows || []).findIndex(row => row.draft_slot === issue.slot || row.key === issue.key);
+      if (index >= 0) { selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]); el("translation").focus(); }
+      else message("This key is absent from the current source. Your draft remains in Local drafts for backup and source review.", true);
+    } catch (error) { message(error.message, true); }
+  });
+}
+el("troubleshoot-button").addEventListener("click", () => guardNavigation(openTroubleshoot));
+el("troubleshoot-back").addEventListener("click", closeTroubleshoot);
+el("troubleshoot-prev").addEventListener("click", () => { troubleshootPage--; renderTroubleshoot(); });
+el("troubleshoot-next").addEventListener("click", () => { troubleshootPage++; renderTroubleshoot(); });
+el("troubleshoot-retry").addEventListener("click", () => { closeTroubleshoot(); el("apply-primary").click(); });
 el("logs-download").addEventListener("click", () => {
   logUI("logs-download");
   location.href = "/api/logs/download";
@@ -1472,6 +1555,7 @@ function updateMergeSummary() {
   if (!gameReady) el("merge-destination").value = "project";
 }
 function openMerge() {
+  inTroubleshoot = false; el("troubleshoot-view").hidden = true;
   if (!mergeReview?.items.length) return;
   if (inLogs) closeLogs();
   inMerge = true; mergePage = 0;
@@ -1656,26 +1740,79 @@ async function saveCurrent(notify = true) {
   else { el("save").disabled = !hasUnsaved(); el("discard").disabled = false; }
   return success;
 }
-el("save").addEventListener("click", async () => {
-  if (checkpointPending || historyPending) return;
+async function recordSave() {
+  if (checkpointPending || historyPending) return false;
   checkpointPending = true;
   try {
-    if (!await saveCurrent(false)) return;
+    if (!await saveCurrent(false)) return false;
     updateHistory(await api("/api/draft-checkpoint", {}));
     if (selectionContext) selectionContext.group = Date.now().toString(36) + Math.random().toString(36).slice(2);
-    message("Save recorded. Trash restores this version across both modes and all languages.");
-  } catch (error) { message("Save could not be recorded: " + error.message, true); }
+    message("Save recorded in Saved versions. Trash restores this latest Save across both modes and all languages.");
+    return true;
+  } catch (error) { message("Save could not be recorded: " + error.message, true); return false; }
   finally { checkpointPending = false; updateHistory(meta); }
+}
+el("save").addEventListener("click", recordSave);
+async function renderSavedVersions() {
+  const result = await api("/api/draft-saves");
+  updateHistory(result);
+  const list = el("saved-version-list"); list.replaceChildren();
+  selectedSavedVersion = result.saves.find(item => item.id === selectedSavedVersion?.id) || result.saves[0] || null;
+  for (const [index, item] of result.saves.entries()) {
+    const label = document.createElement("label"); label.className = "saved-version";
+    const radio = document.createElement("input"); radio.type = "radio"; radio.name = "saved-version";
+    radio.value = item.id; radio.checked = item.id === selectedSavedVersion?.id;
+    radio.addEventListener("change", () => { selectedSavedVersion = item; });
+    const text = document.createElement("span");
+    text.textContent = localEditTime(item.saved_at) + " · " + item.row_count + " rows" + (index === 0 ? " · Latest Save" : "");
+    label.append(radio, text); list.append(label);
+  }
+  if (!result.saves.length) list.textContent = "No explicit Saves yet. Use Save to keep the current version.";
+  el("saved-versions-load").disabled = !selectedSavedVersion;
+}
+el("saved-versions").addEventListener("click", () => guardNavigation(async () => {
+  try {
+    selectedSavedVersion = null;
+    el("saved-versions-status").textContent = "";
+    await renderSavedVersions(); el("saved-versions-dialog").showModal();
+  } catch (error) { message(error.message, true); }
+}));
+for (const id of ["saved-versions-x", "saved-versions-close"]) el(id).addEventListener("click", () => {
+  if (!historyPending && !checkpointPending) el("saved-versions-dialog").close();
+});
+el("saved-versions-dialog").addEventListener("cancel", event => {
+  if (historyPending || checkpointPending) event.preventDefault();
+});
+el("saved-versions-save").addEventListener("click", async () => {
+  const button = el("saved-versions-save"); button.disabled = true;
+  try { if (await recordSave()) await renderSavedVersions(); }
+  catch (error) { el("saved-versions-status").textContent = error.message; }
+  finally { button.disabled = false; }
+});
+el("saved-versions-load").addEventListener("click", async () => {
+  if (!selectedSavedVersion || applyPending || checkpointPending || historyPending) return;
+  historyPending = true; updateHistory(meta);
+  const controls = ["saved-versions-load", "saved-versions-save", "saved-versions-close", "saved-versions-x"];
+  for (const id of controls) el(id).disabled = true;
+  try {
+    await guardNavigation(async () => {
+      const result = await api("/api/draft-load", {save_id: selectedSavedVersion.id});
+      chosen = null; savedDraft = null; offset = 0;
+      updateHistory(result); await load(); el("saved-versions-dialog").close();
+      logUI("saved-version-loaded");
+      message("Loaded Save from " + localEditTime(result.loaded_saved_at) + ". Apply updates your destinations.");
+    });
+  } catch (error) { el("saved-versions-status").textContent = error.message; }
+  finally {
+    historyPending = false; updateHistory(meta);
+    for (const id of controls) el(id).disabled = false;
+    el("saved-versions-load").disabled = !selectedSavedVersion;
+  }
 });
 async function pollApply() {
   try {
     const state = await api("/api/apply-status");
     setApplyLock(state.state === "running");
-    const target = el("save-state");
-    target.hidden = !applyPending && state.state !== "error";
-    target.className = "section-status " + (applyPending ? "busy" : "error");
-    target.textContent = state.state === "error" ? "Apply stopped: " + state.error + " See Synced to for the state of each destination." :
-      state.phase + " · " + state.count + " saved drafts. You can keep editing.";
     updateHistory(state); renderConnections();
     if (applyPending) { applyTimer = setTimeout(pollApply, 700); return; }
     // Finish saving any newer typing before refreshing the table's baseline.
@@ -1687,6 +1824,7 @@ async function pollApply() {
     });
     if (state.state === "error" && state.error_code === "game_running") showGameRunning(state.target, state.processes);
     else if (state.state === "error") message("Apply failed: " + state.error + " See Synced to for destination state.", true);
+    else if (state.apply_issue_count) message("Applied " + (state.applied_count || 0) + " drafts. " + state.apply_issue_count + " rows remain in Troubleshoot for review.");
     else message(state.target === "game" ? "Installed game updated. The source project is unchanged; restart Civilization V to test." :
       "Applied " + state.applied_count + " drafts to the Lekmod project." +
       (state.game_result ? " Installed game updated; restart Civilization V to test." : ""));
@@ -1787,7 +1925,7 @@ el("restore-failed").addEventListener("click", () => guardNavigation(async () =>
     el("category").value = draft.category;
     await preference({locale: draft.locale, category: draft.category});
   }
-  el("search-input").value = draft.key; offset = 0; await load();
+  setSearch(draft.key); offset = 0; await load();
   const index = (window.currentRows || []).findIndex(row => row.key === draft.key);
   if (index < 0) { message("The saved draft's key is no longer in the source.", true); return; }
   selectRow(window.currentRows[index], el("table").querySelectorAll("tbody tr")[index]);
@@ -1831,7 +1969,7 @@ async function performReplayLocal(name) {
         await preference({[filtersPreference()]: filters, ...(version.mode === "translator" ? {category: "all"} : {})});
         if (version.mode === "translator") el("category").value = "all";
         renderFilterChoices();
-        el("search-input").value = key; offset = 0;
+        setSearch(key); offset = 0;
       }
       await load();
       const index = (window.currentRows || []).findIndex(row => row.draft_slot === result.slot || row.key === key);
@@ -1845,6 +1983,7 @@ document.addEventListener("keydown", event => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing ||
       document.querySelector("dialog[open]") || el("workspace").hidden) return;
   const key = event.key.toLowerCase();
+  if (event.target === el("search-input") && key !== "s") return;
   if (key === "s") { event.preventDefault(); el("save").click(); }
   if (key === "z" || key === "y") {
     event.preventDefault();
@@ -1880,7 +2019,7 @@ el("create-confirm").addEventListener("click", async () => {
       edit: {identifier: key, text: el("create-text").value, gender: "", plurality: "", note: ""}});
     if (result.conflict) throw new Error("A local draft already uses that identifier.");
     el("create-key-dialog").close();
-    el("search-input").value = key;
+    setSearch(key);
     updateHistory(result); offset = 0; await load();
     message("New key saved locally. Apply adds it to primary.xml; add a gameplay reference to use it in game.");
   } catch (error) { sectionMessage("create", error.message, "error"); message(error.message, true); }

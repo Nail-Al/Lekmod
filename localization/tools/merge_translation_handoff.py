@@ -15,7 +15,7 @@ import tempfile
 import uuid
 import zipfile
 
-from lekmod_localization.common import CatalogError, KEY_RE, PLACEHOLDER_RE, token_counts
+from lekmod_localization.common import CatalogError, KEY_RE, PLACEHOLDER_RE, tokens_match
 from lekmod_localization.vanilla_reference import compatible_reference_digest
 from sync_primary_english import marked_block
 
@@ -174,7 +174,7 @@ def merge_handoff(archive: Path | bytes, project: Path, *, apply: bool = False,
                 status = "identical"
             elif (current is None or row["source_fingerprint"] != current["source_fingerprint"]
                   or PLACEHOLDER_RE.search(row["text"]) or
-                  token_counts(row["text"]) != json.loads(current["required_format_tokens"])):
+                  not tokens_match(row["text"], json.loads(current["required_format_tokens"]))):
                 status = "stale"
             else:
                 status = "conflict" if team is not None else "new"

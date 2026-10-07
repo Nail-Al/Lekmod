@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 
-from .common import CatalogError, REPO_ROOT, SOURCE_LOCALE, token_counts
+from .common import CatalogError, REPO_ROOT, SOURCE_LOCALE, tokens_match
 from .runtime_xml import runtime_text
 
 
@@ -29,7 +29,7 @@ def fallback_entries(catalog: dict) -> dict[str, dict[str, str]]:
                 value = english.get("text")
                 if english["status"] != "present" or not isinstance(value, str):
                     raise CatalogError(f"no usable English fallback text for {key}")
-                if token_counts(value) != english["format_tokens"]:
+                if not tokens_match(value, english["format_tokens"]):
                     raise CatalogError(f"English formatting tokens changed for {key}")
                 selected[key] = {"Text": value}
                 for field in ("Gender", "Plurality"):
