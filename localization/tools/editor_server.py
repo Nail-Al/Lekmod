@@ -38,7 +38,7 @@ import sync_primary_english
 from merge_translation_handoff import MAX_ARCHIVE, merge_handoff
 from merge_localization import review_merge, english_base, candidate_sources
 from lekmod_localization.drafts import DraftStore
-from lekmod_localization.runtime_xml import runtime_text
+from lekmod_localization.runtime_xml import runtime_text, preserve_rejected_rows
 from lekmod_localization.game_process import GameRunningError, require_game_closed, running_game_processes
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
@@ -649,7 +649,7 @@ class Editor:
         self.last_encrypted_archive = destination
         return {"path": str(destination), "filename": destination.name}
 
-    def apply_to_game(self) -> dict:
+    def apply_to_game(self, *, issues: list[dict] | None = None) -> dict:
         """Copy the generated XML only after checking the connected DLC copy."""
         if not self.ready:
             raise CatalogError("connect a compatible Lekmod project first")
@@ -666,6 +666,10 @@ class Editor:
         if candidate != current:
             raise CatalogError("generated localization is out of date; save or prepare the project first")
         try:
+            if issues:
+                installed = Path(game) / 'Assets/DLC' / name / 'Override/CIV5Units_Mongol.xml'
+                candidate = preserve_rejected_rows(candidate, installed.read_bytes().decode('utf-8-sig'), issues)
+                return apply_game(REPO_ROOT, Path(game), name, content=candidate.encode('utf-8'))
             return apply_game(REPO_ROOT, Path(game), name)
         except GameRunningError:
             raise
@@ -1427,10 +1431,10 @@ class Editor:
                 rows = locale_records(locale)
                 current = rows.get(key)
                 source_row = sources.get(key)
+                if key in blocked_english:
+                    raise CatalogError(f'{locale}:{key}: this translation depends on an English draft that could not be applied. Fix that English draft first')
                 if (not source_row or source_row.get('classification') == 'source_conflict' or
                         source_row['source_fingerprint'] != draft['source_fingerprint']):
-                    if key in blocked_english:
-                        raise CatalogError(f'{locale}:{key}: this translation depends on an English draft that could not be applied. Fix that English draft first')
                     raise CatalogError(f'{locale}:{key}: English changed since this translation was written. Review the current English and save the draft again before Apply')
                 if edit['text']:
                     if PLACEHOLDER_RE.search(edit['text']):
@@ -1543,7 +1547,11 @@ class Editor:
             for path, original in plan['originals'].items():
                 if (path.read_bytes() if path.is_file() else None) != original:
                     raise CatalogError('Project changed during the game build. Local drafts are retained; review before retrying')
-            return apply_game(REPO_ROOT, Path(game), inspected['mods'][0]['name'], content=candidate.encode('utf-8'))
+            name = inspected['mods'][0]['name']
+            if plan.get('issues'):
+                installed = Path(game) / 'Assets/DLC' / name / 'Override/CIV5Units_Mongol.xml'
+                candidate = preserve_rejected_rows(candidate, installed.read_bytes().decode('utf-8-sig'), plan['issues'])
+            return apply_game(REPO_ROOT, Path(game), name, content=candidate.encode('utf-8'))
 
     def start_apply(self, *, game: bool = False, target: str = '') -> dict:
         """Build one immutable draft batch in the background while editing stays available."""
@@ -1573,7 +1581,7 @@ class Editor:
                 batch = plan['entries']
                 self.drafts.save_apply_issues(plan['issues'])
                 self.apply_state = {**self.apply_state, 'skipped_count': len(plan['issues'])}
-                if entries and not batch:
+                if entries and not batch and not game:
                     self.apply_state = {**self.apply_state, 'state': 'complete', 'applied_count': 0,
                                         **self.drafts.status()}
                     self.record_event('draft-apply', 'no-valid-drafts')
@@ -1626,7 +1634,7 @@ class Editor:
                 result = {'applied_count': len(batch), **self.drafts.status()}
                 if game:
                     self.apply_state = {**self.apply_state, 'phase': 'Copying to the verified game installation'}
-                    result['game_result'] = self.apply_to_game()
+                    result['game_result'] = self.apply_to_game(issues=plan['issues'])
                 self.apply_state = {**self.apply_state, 'state': 'complete', **result}
                 self.record_event('draft-apply', 'success')
             except Exception as error:

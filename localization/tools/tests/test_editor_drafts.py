@@ -425,7 +425,7 @@ class EditorDraftTests(unittest.TestCase):
             base={'key': 'TXT_KEY_ONE', 'kind': 'Row', 'text': 'Old English from before IDE change'},
             edit=edit('New English [ICON_CULTURE]', 'TXT_KEY_ONE'))
         self.mode = 'translator'
-        self.save(text='Dependent [ICON_CULTURE]', source_fingerprint='c' * 64)
+        self.save(text='Dependent [ICON_CULTURE]', source_fingerprint='a' * 64)
         self.save('TXT_KEY_TWO', 'Independent [ICON_MOVES]', locale='DE_DE')
         before = self.source.read_bytes()
         self.editor.start_apply()
@@ -453,6 +453,39 @@ class EditorDraftTests(unittest.TestCase):
         plan = copy.call_args.args[0]
         self.assertEqual([entry['payload']['key'] for entry in plan['entries']], ['TXT_KEY_TWO'])
         self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+
+    def test_retry_all_copies_applied_project_even_when_only_rejected_drafts_remain(self):
+        self.save(text='Missing icon')
+        self.save('TXT_KEY_TWO', 'Valid translation')
+        with patch('editor_server.require_game_closed'), patch('editor_server.inspect_game', return_value={'state': 'installed'}), \
+                patch.object(self.editor, 'apply_to_game', side_effect=[CatalogError('Game copy interrupted'), {'changed': True}]) as copy:
+            self.editor.start_apply(target='all')
+            first = self.finish()
+            self.assertEqual(first['state'], 'error')
+            self.assertEqual(first['draft_count'], 1)
+            self.assertIn('Valid translation', (self.translations / 'RU_RU.csv').read_text())
+            self.editor.start_apply(target='all')
+            retry = self.finish()
+        self.assertEqual(retry['state'], 'complete')
+        self.assertTrue(retry['game_result']['changed'])
+        self.assertEqual(copy.call_count, 2)
+        self.assertEqual(retry['apply_issue_count'], 1)
+        self.assertEqual(retry['draft_count'], 1)
+        self.assertEqual(copy.call_args.kwargs['issues'][0]['key'], 'TXT_KEY_ONE')
+        self.prepare.assert_called_once()
+
+    def test_game_only_can_copy_project_while_every_local_draft_is_rejected(self):
+        self.save(text='Missing icon')
+        with patch('editor_server.require_game_closed'), patch('editor_server.inspect_game', return_value={'state': 'installed'}), \
+                patch.object(self.editor, 'apply_game_version', return_value={'changed': True}) as copy:
+            self.editor.start_apply(target='game')
+            result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 0)
+        self.assertEqual(result['apply_issue_count'], 1)
+        self.assertEqual(result['draft_count'], 1)
+        self.assertEqual(copy.call_args.args[0]['entries'], [])
+        self.prepare.assert_not_called()
 
 
     def test_save_survives_history_pruning_branching_restart_and_overwrite(self):

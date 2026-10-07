@@ -464,6 +464,27 @@ def main() -> int:
             for key, text in samples.items():
                 assert runtime[key] == text, key
             assert menu_entry()['synced_to'] == {'project': False, 'game': False}
+            # A rejected row keeps its last Game-only value, even when Project
+            # has a different baseline. Retry can copy valid Project changes
+            # while the only remaining local draft is rejected.
+            last_game_menu = RUSSIAN[0] + ' Last game-only version'
+            change_menu(last_game_menu)
+            apply_pending(target='game')
+            change_menu('Incomplete without version or color again')
+            coffee = 'TXT_KEY_BUILDING_COFFEE_HOUSE_HELP'
+            coffee_row = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                'locale': 'RU_RU', 'category': 'all', 'q': coffee})))['rows'] if item['key'] == coffee)
+            coffee_text = samples[coffee] + ' Updated in project'
+            post(base, token, '/api/draft', {'mode': 'translator', 'locale': 'RU_RU', 'key': coffee,
+                'slot': coffee_row['draft_slot'], 'revision': coffee_row['draft_revision'], 'base': coffee_row['draft_base'],
+                'source_fingerprint': coffee_row['source_fingerprint'],
+                'edit': {'text': coffee_text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            project_partial = apply_pending(target='project')
+            assert project_partial['applied_count'] == 1 and project_partial['draft_count'] == 1, project_partial
+            retry_game = apply_pending(target='all')
+            assert retry_game['applied_count'] == 0 and retry_game['apply_issue_count'] == 1, retry_game
+            retained = validate_runtime_xml(target.read_text(encoding='utf-8'), keys=(checking, coffee))['texts']['RU_RU']
+            assert retained[checking] == last_game_menu and retained[coffee] == coffee_text, retained
             change_menu(RUSSIAN[0] + ' Corrected')
             assert json.loads(get(base + '/api/apply-issues'))['issues'][0]['needs_recheck']
             corrected = apply_pending(target='all')

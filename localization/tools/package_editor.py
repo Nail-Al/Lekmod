@@ -26,8 +26,9 @@ START = """Lekmod Localization Editor for Windows
    The Apply arrow menu chooses All, Project or Game; the last choice stays
    on the main button. Project and Game can be updated independently.
    Correct drafts apply even if other rows need review. Troubleshoot lists
-   those rows and exact token/source errors. Search runs with Enter or its
-   button; the X clears it.
+   those rows and exact token/source errors. Rejected rows keep their last
+   installed Game version. Retry can still send valid Project changes to
+   Game. Search runs with Enter or its button; the X clears it.
 4. For in-game testing, connect to the Civilization V installation in
    Settings and click Find / verify game, then close Civilization V and
    choose Apply to installed game. One matching Lekmod DLC must be installed;

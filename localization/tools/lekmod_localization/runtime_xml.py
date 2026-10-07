@@ -73,6 +73,87 @@ def materialize_blank_text(document: str) -> str:
     return raw.decode('utf-8')
 
 
+def preserve_rejected_rows(candidate: str, installed: str, issues: list[dict]) -> str:
+    """Keep rejected keys at their installed version while applying other rows.
+
+    Copy complete keyed operations, including Delete/Update selectors, rather
+    than flattening their Text or rewriting unrelated gameplay XML. A rejected
+    English key keeps its installed overrides in every language.
+    """
+    if not issues or candidate == installed:
+        return candidate
+    rejected = set()
+    for issue in issues:
+        languages = ('*',) if issue['mode'] == 'developer' else (issue['locale'].casefold(),)
+        keys = {issue['key']}
+        if issue['mode'] == 'developer' and issue.get('identifier'):
+            keys.add(issue['identifier'])
+        rejected.update((language, key) for language in languages for key in keys)
+
+    def spans(document):
+        if '<!DOCTYPE' in document.upper():
+            raise CatalogError('DOCTYPE is not allowed in game localization XML')
+        raw = document.encode('utf-8')
+        parser = expat.ParserCreate()
+        stack, operations, ends = [], [], {}
+        operation, tag_text = None, None
+
+        def start(name, attributes):
+            nonlocal operation, tag_text
+            stack.append(name)
+            if len(stack) == 3 and stack[1].casefold().startswith('language_'):
+                at = parser.CurrentByteIndex
+                opening_end = raw.find(b'>', at) + 1
+                operation = {'start': at, 'opening_end': opening_end,
+                    'empty': raw[at:opening_end].rstrip().endswith(b'/>'),
+                    'locale': stack[1][9:].casefold(), 'keys': set()}
+            if operation is not None:
+                operation['keys'].update(value for field, value in attributes.items() if field.casefold() == 'tag')
+            if operation is not None and name.casefold() == 'tag':
+                tag_text = []
+
+        def characters(value):
+            if tag_text is not None:
+                tag_text.append(value)
+
+        def end(name):
+            nonlocal operation, tag_text
+            if operation is not None and name.casefold() == 'tag' and tag_text is not None:
+                operation['keys'].add(''.join(tag_text).strip())
+                tag_text = None
+            if operation is not None and len(stack) == 3:
+                finish = operation['opening_end'] if operation['empty'] else raw.find(b'>', parser.CurrentByteIndex) + 1
+                locale = operation['locale']
+                if any((locale, key) in rejected or ('*', key) in rejected for key in operation['keys']):
+                    operations.append((locale, operation['start'], finish))
+                operation = None
+            if len(stack) == 2 and name.casefold().startswith('language_'):
+                ends[name[9:].casefold()] = parser.CurrentByteIndex
+            stack.pop()
+
+        parser.StartElementHandler = start
+        parser.CharacterDataHandler = characters
+        parser.EndElementHandler = end
+        try:
+            parser.Parse(raw, True)
+        except expat.ExpatError as error:
+            raise CatalogError('Cannot preserve rejected game rows: ' + str(error)) from error
+        return raw, operations, ends
+
+    raw, removed, ends = spans(candidate)
+    previous, retained, _ = spans(installed)
+    insertions = {}
+    for locale, start, finish in retained:
+        if locale not in ends:
+            raise CatalogError('Cannot preserve rejected rows in missing game language: ' + locale)
+        insertions.setdefault(ends[locale], []).append(previous[start:finish])
+    patches = [(start, finish, b'') for _, start, finish in removed]
+    patches += [(at, at, b'\n' + b'\n'.join(values) + b'\n') for at, values in insertions.items()]
+    for start, finish, replacement in sorted(patches, reverse=True):
+        raw = raw[:start] + replacement + raw[finish:]
+    return materialize_blank_text(raw.decode('utf-8'))
+
+
 def validate_runtime_xml(document: str, *, keys: tuple[str, ...] = ()) -> dict:
     """Load language operations in one disposable SQLite transaction.
 
