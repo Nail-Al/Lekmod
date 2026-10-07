@@ -428,6 +428,58 @@ def main() -> int:
                     item = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
                         'locale': locale, 'category': 'all', 'q': checking})))['rows'] if item['key'] == checking)
                     assert item['translation'] == '' and item['translation_status'] == 'missing', item
+            # Apply 292 real HTTP drafts: the reported three translations,
+            # extra icons, and one genuinely incomplete menu translation.
+            # Only the bad row stays local; the actual installed XML is checked.
+            samples = {
+                'TXT_KEY_UA_AKKAD_PEDIA': '[COLOR_XP_BLUE] (https://en.wikipedia.org/wiki/Akkadian_Empire)[ENDCOLOR]Аккадская империя была первой известной империей.',
+                'TXT_KEY_UNIT_LITE_AKKAD_ONAGER_WAGON_HELP': 'Уникальный юнит Аккада. Не тратит [ICON_MOVES] Очки передвижения на разграбление клеток.',
+                'TXT_KEY_BUILDING_COFFEE_HOUSE_HELP': 'Заменяет Мельницу. Требует меньше [ICON_PRODUCTION] Производства. Увеличивает на 20% скорость возникновения [ICON_GREAT_PEOPLE] Великих людей.',
+            }
+            all_rows = json.loads(get(base + '/api/rows?' + urlencode({
+                'locale': 'RU_RU', 'category': 'all', 'limit': 'all'})))['rows']
+            by_key = {item['key']: item for item in all_rows}
+            eligible = [item for item in all_rows if item['required_format_tokens'] == '{}' and
+                        item['classification'] != 'source_conflict' and item['source_fingerprint'] and
+                        item['key'] not in {*samples, *KEYS} and not item.get('has_local_draft')][:288]
+            assert len(eligible) == 288, 'fixture needs 288 independent source rows'
+            samples.update({item['key']: 'Пакетный перевод ' + item['key'] + ' [ICON_PRODUCTION]' for item in eligible})
+            before_save = post(base, token, '/api/draft-checkpoint', {})['save_id']
+            for key, text in samples.items():
+                item = by_key[key]
+                post(base, token, '/api/draft', {'mode': 'translator', 'locale': 'RU_RU', 'key': key,
+                    'slot': item['draft_slot'], 'revision': item['draft_revision'], 'base': item['draft_base'],
+                    'source_fingerprint': item['source_fingerprint'],
+                    'edit': {'text': text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            change_menu('Incomplete without version or color')
+            assert json.loads(get(base + '/api/meta'))['draft_count'] == 292
+            latest_save = post(base, token, '/api/draft-checkpoint', {})
+            partial = apply_pending(target='all')
+            assert partial['applied_count'] == 291 and partial['apply_issue_count'] == 1, partial
+            assert partial['draft_count'] == 1, partial
+            rejected = json.loads(get(base + '/api/apply-issues'))['issues']
+            assert len(rejected) == 1 and rejected[0]['key'] == checking, rejected
+            assert '{1_Version}' in rejected[0]['reason'], rejected
+            runtime = validate_runtime_xml(target.read_text(encoding='utf-8'), keys=tuple(samples))['texts']['RU_RU']
+            for key, text in samples.items():
+                assert runtime[key] == text, key
+            assert menu_entry()['synced_to'] == {'project': False, 'game': False}
+            change_menu(RUSSIAN[0] + ' Corrected')
+            assert json.loads(get(base + '/api/apply-issues'))['issues'][0]['needs_recheck']
+            corrected = apply_pending(target='all')
+            assert corrected['applied_count'] == 1 and corrected['apply_issue_count'] == 0, corrected
+            source_csv_before = csv_path.read_bytes()
+            installed_before = target.read_bytes()
+            loaded = post(base, token, '/api/draft-load', {'save_id': before_save})
+            assert loaded['history_count'] == 0
+            assert loaded['checkpoint_saved_at'] == latest_save['checkpoint_saved_at']
+            assert csv_path.read_bytes() == source_csv_before and target.read_bytes() == installed_before
+            saves = json.loads(get(base + '/api/draft-saves'))['saves']
+            assert saves[0]['id'] == latest_save['save_id']
+            assert any(saved['id'] == before_save for saved in saves)
+            apply_pending(target='all')
+            assert menu_entry()['translation'] == RUSSIAN[0]
+            print('Frozen 292-draft partial Apply: 291 valid rows installed, one missing token retained, Troubleshoot fixed/retried, historical Save loaded locally.')
             # A newly created entity can go to game before project, and can be undone after Apply.
             post(base, token, '/api/preferences', {'mode': 'developer'})
             new_key = 'TXT_KEY_LLE_PORTABLE_CREATED'

@@ -44,6 +44,24 @@
     .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 12px; }
     .toolbar label { flex: 0 1 210px; }
     #search { flex: 1 1 240px; min-width: 130px; }
+    .search-controls { display: flex; gap: 6px; align-items: center; }
+    .search-box { flex: 1; min-width: 0; position: relative; }
+    #search-input { width: 100%; padding-right: 35px; }
+    #search-input::-webkit-search-cancel-button { -webkit-appearance: none; }
+    #search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 27px; height: 27px; padding: 0; border: 0; }
+    #saved-version-list { display: grid; gap: 7px; max-height: min(50vh, 420px); overflow: auto; }
+    .saved-version { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--divider); border-radius: 5px; cursor: pointer; }
+    .saved-version:has(input:checked) { background: #edf4fc; border-color: #6985a4; }
+    .saved-version input { width: auto; margin: 0; }
+    .apply-notice { display: flex; align-items: center; gap: 10px; }
+    .apply-notice[hidden] { display: none; }
+    .apply-notice > p { flex: 1; margin: 0; }
+    #troubleshoot-view { flex: 1; min-height: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    #troubleshoot-view[hidden] { display: none; }
+    .troubleshoot-scroll { flex: 1; min-height: 120px; overflow: auto; border: 1px solid var(--divider); border-radius: 7px; }
+    #troubleshoot-table { width: 100%; min-width: 950px; }
+    #troubleshoot-table th:first-child { width: 23%; }
+    #troubleshoot-table th:last-child { width: 100px; }
     .toolbar .actions { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; width: max-content;
       margin-left: auto; align-items: center; gap: 7px; }
     .action-divider { width: 1px; height: 24px; background: #c6d5e4; margin: 0 5px; flex: 0 0 1px; align-self: center; }
@@ -241,7 +259,7 @@
     <section class="toolbar card">
       <label id="locale-label">Language<select id="locale"></select></label>
       <label id="category-label">Category<select id="category"></select></label>
-      <label id="search">Search<input id="search-input" type="search" placeholder="Key or text"></label>
+      <label id="search">Search<span class="search-controls"><span class="search-box"><input id="search-input" type="search" placeholder="Key or text"><button id="search-clear" type="button" class="icon-control" title="Clear search" aria-label="Clear search" disabled>×</button></span><button id="search-submit" type="button" title="Search · Enter">Search</button></span></label>
       <div class="actions">
         <label class="inline"><input type="checkbox" id="wrap" checked> Wrap lines</label>
         <button id="columns-button" class="icon-control" title="Show or hide table columns" aria-label="Show or hide table columns">☷</button>
@@ -256,7 +274,7 @@
         <button id="next" aria-label="Next page">Next ›</button>
         <label class="inline page-choice">Rows<select id="page-size"><option>25</option><option>50</option><option selected>100</option><option>250</option><option>500</option><option>1000</option><option value="all">All</option></select></label>
       </nav>
-      <p id="save-state" class="section-status" role="status" aria-live="polite" hidden></p>
+      <div id="apply-notice" class="apply-notice" hidden><p id="save-state" class="section-status" role="status" aria-live="polite" hidden></p><button id="troubleshoot-button" title="Review drafts that could not be applied" hidden>Troubleshoot table</button></div>
       <div class="table-frame">
         <div class="table-scroll" id="table-scroll">
           <table id="table"><colgroup></colgroup><thead></thead><tbody></tbody></table>
@@ -269,7 +287,7 @@
       <div class="panel-content">
       <p id="context" class="hint"></p>
       <div id="token-help" hidden>
-        <p class="hint">Keep these formatting tokens exactly as shown. Icons and colors work in game; you may translate the words around them.</p>
+        <p class="hint">Preserve the original formatting tokens. You may add extra [ICON_*] icons; footnotes and bracketed prose can be translated or removed.</p>
         <div class="tokens" id="tokens"></div>
       </div>
       <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
@@ -286,6 +304,7 @@
       <div class="quick">
         <button id="create-key" hidden>Create new key</button>
         <button id="save" class="primary" disabled>Save</button>
+        <button id="saved-versions" class="icon-control" title="Browse saved versions" aria-label="Browse saved versions" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7m2-5v6l4 2"/></svg></button>
         <button id="discard" class="icon-control" title="Restore the last explicit Save" aria-label="Restore the last explicit Save" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></button>
         <button id="undo" class="icon" aria-label="Undo local edit" title="Undo local edit · Ctrl+Z" disabled>↶</button>
         <button id="redo" class="icon" aria-label="Redo local edit" title="Redo local edit · Ctrl+Y" disabled>↷</button>
@@ -308,6 +327,13 @@
       </div>
     </details>
   </div>
+  <section id="troubleshoot-view" class="card" hidden>
+    <div class="quick"><h2>Apply troubleshoot</h2><button id="troubleshoot-back">Back to editor</button><button id="troubleshoot-retry">Apply again</button></div>
+    <p id="troubleshoot-summary" class="hint" role="status"></p>
+    <p class="hint">Correct independent rows are applied. These rows remain local drafts. Edit a row, then Apply again to recheck it. A translation depending on rejected English waits for that English to be fixed.</p>
+    <nav class="pager" aria-label="Troubleshoot pages"><button id="troubleshoot-prev">‹ Previous</button><span id="troubleshoot-count"></span><button id="troubleshoot-next">Next ›</button></nav>
+    <div class="troubleshoot-scroll"><table id="troubleshoot-table"><thead><tr><th>Language / key</th><th>English at Apply</th><th>Current LLE text</th><th>Reason</th><th>Action</th></tr></thead><tbody></tbody></table></div>
+  </section>
   <section id="merge-view" class="card" hidden>
     <div class="quick"><h2>Merge review</h2><button id="merge-clear">Clear review</button><button id="merge-back">Back to editor</button></div>
     <p id="merge-summary" class="hint"></p>
@@ -322,6 +348,7 @@
 <dialog id="prefill-dialog"><section><h2>Clear the edit box?</h2><p>The text currently in the edit box has not been saved by this switch.</p><div class="foot"><button id="prefill-keep">Keep text</button><button id="prefill-clear" class="primary">Clear text</button></div></section></dialog>
 <dialog id="game-running-dialog"><section><h2>Close Civilization V first</h2><p id="game-running-detail"></p><p class="hint">Your local work is saved. Retry checks the game process again and applies your changes when the game is closed.</p><p id="game-running-status" class="section-status warning" role="status"></p><div class="foot"><button id="game-running-cancel">Cancel</button><button id="game-running-retry" class="primary">Retry</button></div></section></dialog>
 <dialog id="discard-dialog"><section><h2>Restore the last Save?</h2><p id="discard-description"></p><p class="hint">This changes local work only. Use Apply to update the Source project or installed game.</p><div class="foot"><button id="discard-cancel">Keep editing</button><button id="discard-confirm" class="primary">Restore Save</button></div></section></dialog>
+<dialog id="saved-versions-dialog"><section><div class="dialog-heading"><h2>Saved versions</h2><button id="saved-versions-x" class="icon-control" title="Close" aria-label="Close saved versions">×</button></div><p class="hint">The latest 50 explicit Saves are kept across restarts and updates, for both modes and all languages in this project.</p><div id="saved-version-list"></div><p class="hint">Loading replaces the current local version and clears Undo/Redo. Save the current version first if you want to keep it. Apply updates the project or game afterwards. Trash always restores the latest explicit Save.</p><p id="saved-versions-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="saved-versions-save">Save current version</button><button id="saved-versions-close">Cancel</button><button id="saved-versions-load" class="primary" disabled>Load selected Save</button></div></section></dialog>
 <dialog id="drafts-dialog"><section><div class="dialog-heading"><h2>Saved local drafts</h2><button id="drafts-x" class="icon-control" title="Close" aria-label="Close local drafts">×</button></div><p class="hint">These edits stay on disk across restarts and editor updates. Apply checks the current English and project translations before rebuilding once. A backup includes incomplete drafts too.</p><div id="draft-list"></div><div class="foot"><button id="drafts-backup">Download draft backup</button><button id="drafts-close">Done</button></div></section></dialog>
 <dialog id="settings-dialog">
   <section>

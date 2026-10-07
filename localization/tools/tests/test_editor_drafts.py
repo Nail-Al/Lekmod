@@ -26,6 +26,66 @@ def edit(text, identifier=''):
 
 
 class DraftStoreTests(unittest.TestCase):
+    def test_fifty_saves_keep_deduplicated_content_and_prune_old_versions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = DraftStore(Path(folder) / 'drafts.sqlite3')
+            stable = 'Большой неизменный перевод. ' * 5000
+            store.put('T:RU:STABLE', {'edit': edit(stable)}, 0)
+            revision = 0
+            ids = []
+            for index in range(55):
+                revision = store.put('T:DE:CHANGED', {'edit': edit(str(index))}, revision)['entry']['revision']
+                ids.append(store.save_checkpoint()['save_id'])
+            reopened = DraftStore(store.path)
+            saves = reopened.saved_versions()
+            self.assertEqual(len(saves), 50)
+            self.assertEqual(saves[0]['id'], ids[-1])
+            self.assertEqual(saves[-1]['id'], ids[5])
+            self.assertEqual(saves[-1]['row_count'], 2)
+            with self.assertRaises(CatalogError):
+                reopened.load_saved_version(ids[0])
+            with reopened.connection() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM saved_content').fetchone()[0], 51)
+            self.assertLess(store.path.stat().st_size, 2 * 1024 * 1024, '50 Saves duplicated a large unchanged row')
+            latest_time = reopened.status()['checkpoint_saved_at']
+            reopened.load_saved_version(ids[5])
+            self.assertEqual(reopened.get('T:DE:CHANGED')['payload']['edit']['text'], '5')
+            self.assertEqual(reopened.get('T:RU:STABLE')['payload']['edit']['text'], stable)
+            self.assertEqual(reopened.status()['history_count'], 0)
+            self.assertEqual(reopened.status()['checkpoint_saved_at'], latest_time)
+            self.assertEqual(reopened.status()['saved_version_count'], 50)
+            reopened.restore_checkpoint()
+            self.assertEqual(reopened.get('T:DE:CHANGED')['payload']['edit']['text'], '54')
+
+    def test_v025_save_is_migrated_once_and_not_replaced_by_unsaved_work(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = DraftStore(Path(folder) / 'drafts.sqlite3')
+            first = store.put('T:RU:ONE', {'edit': edit('Explicit old Save')}, 0)
+            store.save_checkpoint()
+            old_time = store.status()['checkpoint_saved_at']
+            store.put('T:RU:ONE', {'edit': edit('Later autosave')}, first['entry']['revision'])
+            store.put('T:DE:TWO', {'edit': edit('Another language')}, 0)
+            with store.connection() as db:
+                for table in ('saved_rows', 'saved_content', 'saved_checkpoints'):
+                    db.execute('DROP TABLE ' + table)
+                db.execute("DELETE FROM migrations WHERE name='saved-checkpoints'")
+            migrated = DraftStore(store.path)
+            self.assertEqual(migrated.get('T:RU:ONE')['payload']['edit']['text'], 'Later autosave')
+            self.assertEqual(migrated.saved_versions(), [{'id': 1, 'saved_at': old_time, 'row_count': 1}])
+            self.assertEqual(DraftStore(store.path).status()['saved_version_count'], 1)
+            migrated.load_saved_version(1)
+            self.assertEqual(migrated.get('T:RU:ONE')['payload']['edit']['text'], 'Explicit old Save')
+            self.assertIsNone(migrated.get('T:DE:TWO')['payload'])
+
+    def test_empty_save_can_be_loaded_after_editing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = DraftStore(Path(folder) / 'drafts.sqlite3')
+            saved = store.save_checkpoint()
+            store.put('ONE', {'edit': edit('Later work')}, 0)
+            store.load_saved_version(saved['save_id'])
+            self.assertEqual(store.entries(), [])
+            self.assertEqual(store.status()['saved_version_count'], 1)
+
     def test_v024_cleared_draft_history_survives_version_migration(self):
         """Old NULL draft rows still have useful Undo/Redo actions."""
         with tempfile.TemporaryDirectory() as folder:
@@ -201,8 +261,10 @@ class EditorDraftTests(unittest.TestCase):
         before = (self.translations / 'RU_RU.csv').read_bytes()
         self.editor.start_apply()
         result = self.finish()
-        self.assertEqual(result['state'], 'error')
-        self.assertIn('formatting token', result['error'])
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 0)
+        self.assertEqual(result['apply_issue_count'], 1)
+        self.assertIn('formatting token', self.editor.drafts.apply_issues()[0]['reason'])
         self.prepare.assert_not_called()
         self.assertEqual((self.translations / 'RU_RU.csv').read_bytes(), before)
         self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
@@ -214,7 +276,7 @@ class EditorDraftTests(unittest.TestCase):
         path = self.translations / 'RU_RU.csv'
         path.write_bytes(encoded_csv([row], APPROVAL_FIELDS)); before = path.read_bytes()
         self.editor.start_apply(); result = self.finish()
-        self.assertIn('changed in an IDE', result['error'])
+        self.assertIn('changed in an IDE', self.editor.drafts.apply_issues()[0]['reason'])
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
 
@@ -289,8 +351,108 @@ class EditorDraftTests(unittest.TestCase):
         self.save()
         self.candidates.return_value['TXT_KEY_ONE']['source_fingerprint'] = 'c'*64
         self.editor.start_apply(); result = self.finish()
-        self.assertIn('English changed', result['error'])
+        self.assertIn('English changed', self.editor.drafts.apply_issues()[0]['reason'])
         self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
+
+    def test_all_292_drafts_allow_extra_icons_and_keep_save_after_apply(self):
+        self.candidates.return_value = {}
+        for index in range(292):
+            key = f'TXT_KEY_BATCH_{index}'
+            self.candidates.return_value[key] = {'classification': 'lekmod_new', 'source_fingerprint': 'a' * 64,
+                                                'required_format_tokens': '{}'}
+            self.save(key, f'Перевод {index} [ICON_PRODUCTION]')
+        saved = self.editor.drafts.save_checkpoint()['save_id']
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['state'], 'complete')
+        self.assertEqual(self.editor.apply_state['applied_count'], 292)
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+        self.prepare.assert_called_once()
+        with (self.translations / 'RU_RU.csv').open(encoding='utf-8-sig', newline='') as handle:
+            self.assertEqual(len(list(csv.DictReader(handle))), 292)
+        self.editor.drafts.load_saved_version(saved)
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 0)
+
+    def test_format_error_names_missing_token_and_retains_draft(self):
+        self.save(text='Незавершённый перевод [ICON_PRODUCTION]')
+        self.editor.start_apply()
+        result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 0)
+        self.assertIn('Missing: [ICON_CULTURE] × 1', self.editor.drafts.apply_issues()[0]['reason'])
+        self.assertEqual(self.editor.drafts.status()['draft_count'], 1)
+        self.prepare.assert_not_called()
+
+    def test_partial_apply_retains_bad_row_and_reports_it_across_restart(self):
+        bad = self.save(text='Needs an icon')
+        self.save('TXT_KEY_TWO', 'Correct [ICON_MOVES]', locale='DE_DE')
+        before_ru = (self.translations / 'RU_RU.csv').read_bytes()
+        self.editor.start_apply()
+        result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 1)
+        self.assertEqual(result['apply_issue_count'], 1)
+        self.assertEqual(result['draft_count'], 1)
+        self.assertEqual((self.translations / 'RU_RU.csv').read_bytes(), before_ru)
+        self.assertIn('Correct [ICON_MOVES]', (self.translations / 'DE_DE.csv').read_text())
+        self.prepare.assert_called_once()
+        reopened = DraftStore(self.editor.drafts.path)
+        self.assertEqual(reopened.apply_issues()[0]['slot'], bad['entry']['slot'])
+        self.assertFalse(reopened.apply_issues()[0]['needs_recheck'])
+        self.save(text='Fixed [ICON_CULTURE]', revision=reopened.get(bad['entry']['slot'])['revision'])
+        self.assertTrue(reopened.apply_issues()[0]['needs_recheck'])
+        self.assertEqual(reopened.apply_issues()[0]['draft_text'], 'Fixed [ICON_CULTURE]')
+        self.editor.start_apply()
+        self.assertEqual(self.finish()['apply_issue_count'], 0)
+        self.assertEqual(reopened.entries(), [])
+
+    def test_partial_apply_collects_every_bad_row_without_writing_empty_batch(self):
+        self.save(text='Missing [ICON_PRODUCTION]')
+        self.save(locale='DE_DE', source_fingerprint='c' * 64)
+        self.save('TXT_KEY_TWO', '(ru text)')
+        originals = {p: p.read_bytes() for p in self.translations.glob('*.csv')}
+        self.editor.start_apply()
+        result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 0)
+        self.assertEqual(result['apply_issue_count'], 3)
+        self.assertEqual(result['draft_count'], 3)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        self.prepare.assert_not_called()
+
+    def test_translation_depending_on_rejected_english_waits_while_other_row_applies(self):
+        self.mode = 'developer'
+        self.save(text='New English [ICON_CULTURE]', index=0,
+            base={'key': 'TXT_KEY_ONE', 'kind': 'Row', 'text': 'Old English from before IDE change'},
+            edit=edit('New English [ICON_CULTURE]', 'TXT_KEY_ONE'))
+        self.mode = 'translator'
+        self.save(text='Dependent [ICON_CULTURE]', source_fingerprint='c' * 64)
+        self.save('TXT_KEY_TWO', 'Independent [ICON_MOVES]', locale='DE_DE')
+        before = self.source.read_bytes()
+        self.editor.start_apply()
+        result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 1)
+        self.assertEqual(result['apply_issue_count'], 2)
+        self.assertEqual(self.source.read_bytes(), before)
+        issues = self.editor.drafts.apply_issues()
+        dependent = next(issue for issue in issues if issue['mode'] == 'translator')
+        self.assertIn('depends on an English draft', dependent['reason'])
+
+    def test_game_only_partial_apply_builds_only_valid_rows_without_source_writes(self):
+        self.save(text='Missing icon')
+        self.save('TXT_KEY_TWO', 'Game [ICON_MOVES]')
+        originals = {p: p.read_bytes() for p in (self.source, self.game, self.translations / 'RU_RU.csv')}
+        with patch('editor_server.require_game_closed'), patch('editor_server.inspect_game', return_value={'state': 'installed'}), \
+                patch.object(self.editor, 'apply_game_version', return_value={'updated': True}) as copy:
+            self.editor.start_apply(target='game')
+            result = self.finish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['applied_count'], 1)
+        self.assertEqual(result['apply_issue_count'], 1)
+        self.assertEqual(result['draft_count'], 2)
+        plan = copy.call_args.args[0]
+        self.assertEqual([entry['payload']['key'] for entry in plan['entries']], ['TXT_KEY_TWO'])
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
 
 
     def test_save_survives_history_pruning_branching_restart_and_overwrite(self):

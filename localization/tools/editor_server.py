@@ -42,7 +42,7 @@ from lekmod_localization.runtime_xml import runtime_text
 from lekmod_localization.game_process import GameRunningError, require_game_closed, running_game_processes
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
-    PLACEHOLDER_RE, KEY_RE, character_count, token_counts,
+    PLACEHOLDER_RE, KEY_RE, character_count, token_counts, token_difference, tokens_match,
 )
 from lekmod_localization.connections import (
     APP_HOME, TEAM_SNAPSHOT_URL, apply_game, detect_game, inspect_game, game_diagnostics, release_version,
@@ -1020,7 +1020,7 @@ class Editor:
         else:
             text = item['translation']
             valid = not text or (not PLACEHOLDER_RE.search(text) and
-                token_counts(text) == json.loads(item['required_format_tokens']) and
+                tokens_match(text, json.loads(item['required_format_tokens'])) and
                 item.get('translation_source_fingerprint', item['source_fingerprint']) == item['source_fingerprint'])
             expected = {'Text': runtime_text(text or item['lekmod_en_US']),
                 'Gender': item['translation_gender'] if text else item.get('lekmod_en_US_gender', ''),
@@ -1189,7 +1189,7 @@ class Editor:
                 item['characters'] = character_count(item['text'])
                 item['required_format_tokens'] = token_counts(item['text'])
             self.row_sync(item, installed, developer=True)
-            if query and query not in item['key'].casefold() and query not in item['text'].casefold():
+            if query and query not in item['key'].casefold() and query not in item['text'].casefold() and query not in item.get('draft_key', '').casefold():
                 continue
             version = (filters or {}).get('version', '')
             if version and not (set(item['changed_in']) & set(self.version_info['upgrade_versions']) if version == 'upgrade' else version in item['changed_in']):
@@ -1208,7 +1208,7 @@ class Editor:
                 'has_local_draft': True, 'draft_create': True,
                 'applied_edit': {'text': '', 'gender': '', 'plurality': '', 'note': '', 'identifier': draft['key']}}
             self.row_sync(item, installed, developer=True)
-            if (not query or query in item['key'].casefold() or query in item['text'].casefold()) and matches_filters(item, filters or {}, primary=True):
+            if (not query or query in item['key'].casefold() or query in item['text'].casefold() or query in item['draft_key'].casefold()) and matches_filters(item, filters or {}, primary=True):
                 selected.append(item)
         return {"total": len(selected), "rows": page_slice(selected, offset, limit)}
 
@@ -1304,7 +1304,7 @@ class Editor:
             raise CatalogError('Select a local draft to discard')
         return self.drafts.put(slot, None, revision)
 
-    def draft_plan(self, entries: list[dict]) -> dict:
+    def draft_plan(self, entries: list[dict], *, partial: bool = False) -> dict:
         """Validate a batch against current files; English always precedes translations."""
         source = sync_primary_english.DEFAULT_ENGLISH
         originals = {source: source.read_bytes()}
@@ -1313,7 +1313,21 @@ class Editor:
         replacements, additions, new_keys, bases = [], [], set(), {}
         english = [entry for entry in entries if entry['payload']['mode'] == 'developer']
         translations = [entry for entry in entries if entry['payload']['mode'] == 'translator']
-        approvals = {}
+        approvals, issues, touched_locales = {}, [], set()
+        seen_identifiers, duplicate_identifiers = set(), set()
+        for entry in english:
+            identifier = entry['payload']['edit']['identifier']
+            if identifier in seen_identifiers:
+                duplicate_identifiers.add(identifier)
+            seen_identifiers.add(identifier)
+
+        def add_issue(entry, error, english_text=''):
+            draft = entry['payload']
+            prefix = f"{draft['locale']}:{draft['key']}: " if draft['mode'] == 'translator' else draft['key'] + ': '
+            issues.append({'slot': entry['slot'], 'revision': entry['revision'],
+                'mode': draft['mode'], 'locale': draft['locale'], 'key': draft['key'],
+                'identifier': draft['edit']['identifier'], 'reason': str(error).removeprefix(prefix),
+                'english_text': english_text, 'draft_text': draft['edit']['text']})
 
         def locale_records(locale):
             if locale not in approvals:
@@ -1324,66 +1338,77 @@ class Editor:
             return approvals[locale]
 
         for entry in english:
-            draft = entry['payload']
-            key, edit, base = draft['key'], draft['edit'], draft['base']
-            identifier = edit['identifier']
-            if not KEY_RE.fullmatch(identifier) or (draft['create'] and not edit['text'].strip()):
-                raise CatalogError(f'{key}: enter a valid TXT_KEY identifier and non-empty English text before Apply')
-            if draft.get('delete'):
-                matches = [row for row in operations if row['key'] == base.get('key', key) and row['kind'] == base.get('kind', 'Row')]
-                if not matches:
-                    bases[entry['slot']] = {'key': key, 'kind': 'Row', 'text': '', 'absent': True}
-                    continue
-                row = next((row for row in matches if row['index'] == draft['index']), matches[0] if len(matches) == 1 else None)
-                if not row or primary_text(row['text']) != base.get('text'):
-                    raise CatalogError(f'{key}: English changed before removal; review the project first')
-                if any(key in locale_records(locale) for locale in self.manifest()['locales']):
-                    raise CatalogError(f'{key}: a translated key needs an IDE migration before removal')
-                for path in (REPO_ROOT / 'LEKMOD').rglob('*'):
-                    if path.is_file() and path != build_shipped_localization.DEFAULT_SOURCE and path.suffix.lower() in ('.xml', '.sql', '.lua', '.modinfo') and key in path.read_text(encoding='utf-8', errors='ignore'):
-                        raise CatalogError(f'{key}: remove its gameplay reference in an IDE first')
-                end = document.index('</' + row['kind'] + '>', row['text_end']) + len('</' + row['kind'] + '>')
-                replacements.append((row['start'], end, ''))
-                bases[entry['slot']] = {'key': key, 'kind': row['kind'], 'text': '', 'absent': True}
-                continue
-            if identifier in new_keys:
-                raise CatalogError(f'{identifier}: two local English drafts use the same identifier')
-            new_keys.add(identifier)
-            target = [row for row in operations if row['key'] == identifier]
-            kind = 'Row' if draft['create'] else base.get('kind')
-            already_applied = (len(target) == 1 and target[0]['kind'] == kind and
-                primary_text(target[0]['text']) == edit['text'] and
-                (identifier == key or not any(row['key'] == key for row in operations) or draft['create']))
-            if already_applied:
-                bases[entry['slot']] = {'key': identifier, 'kind': kind, 'text': edit['text']}
-                continue  # Recover an interrupted Apply without treating our own write as an IDE conflict.
-            if draft['create'] or identifier != key:
-                if identifier in read_reference()['english'] or any(row['key'] == identifier for row in operations):
-                    raise CatalogError(f'{identifier}: this key already exists')
-            if draft['create']:
-                for path in (REPO_ROOT / 'LEKMOD/Art').rglob('*'):
-                    if path.is_file() and path.suffix.lower() in ('.xml', '.sql') and identifier in path.read_text(encoding='utf-8', errors='ignore'):
-                        raise CatalogError(f'{identifier}: key exists in {path.relative_to(REPO_ROOT)}')
-                additions.append(f'\t\t<Row Tag="{identifier}">\n\t\t\t<Text>{escape(edit["text"])}</Text>\n\t\t</Row>\n')
-            else:
-                matches = [row for row in operations if row['key'] == base.get('key') and row['kind'] == base.get('kind')]
-                row = next((row for row in matches if row['index'] == draft['index']), None)
-                if row is None and len(matches) == 1:
-                    row = matches[0]
-                if row is None or primary_text(row['text']) != base.get('text'):
-                    raise CatalogError(f'{key}: English was changed in the project. Your local draft is retained; review the current source before Apply')
-                if identifier != key:
-                    if len(matches) != 1 or any(key in locale_records(locale) for locale in self.manifest()['locales']):
-                        raise CatalogError(f'{key}: a referenced or translated identifier needs an IDE migration')
+            previous = (len(replacements), len(additions), set(new_keys), dict(bases))
+            try:
+                draft = entry['payload']
+                key, edit, base = draft['key'], draft['edit'], draft['base']
+                identifier = edit['identifier']
+                if identifier in duplicate_identifiers:
+                    raise CatalogError(f'{identifier}: two local English drafts use the same identifier')
+                if not KEY_RE.fullmatch(identifier) or (draft['create'] and not edit['text'].strip()):
+                    raise CatalogError(f'{key}: enter a valid TXT_KEY identifier and non-empty English text before Apply')
+                if draft.get('delete'):
+                    matches = [row for row in operations if row['key'] == base.get('key', key) and row['kind'] == base.get('kind', 'Row')]
+                    if not matches:
+                        bases[entry['slot']] = {'key': key, 'kind': 'Row', 'text': '', 'absent': True}
+                        continue
+                    row = next((row for row in matches if row['index'] == draft['index']), matches[0] if len(matches) == 1 else None)
+                    if not row or primary_text(row['text']) != base.get('text'):
+                        raise CatalogError(f'{key}: English changed before removal; review the project first')
+                    if any(key in locale_records(locale) for locale in self.manifest()['locales']):
+                        raise CatalogError(f'{key}: a translated key needs an IDE migration before removal')
                     for path in (REPO_ROOT / 'LEKMOD').rglob('*'):
-                        if (path.is_file() and path != build_shipped_localization.DEFAULT_SOURCE and
-                                path.suffix.lower() in ('.xml', '.sql', '.lua', '.modinfo') and
-                                path.stat().st_size < 8 * 1024 * 1024 and key in path.read_text(encoding='utf-8', errors='ignore')):
-                            raise CatalogError(f'{key}: update its gameplay reference in {path.relative_to(REPO_ROOT)} through an IDE migration')
-                body = document[row['start']:row['text_start']] + formatted_primary_text(row['text'], edit['text'])
-                body = body.replace(f'Tag="{key}"', f'Tag="{identifier}"', 1)
-                replacements.append((row['start'], row['text_end'], body))
-            bases[entry['slot']] = {'key': identifier, 'kind': 'Row' if draft['create'] else base['kind'], 'text': edit['text']}
+                        if path.is_file() and path != build_shipped_localization.DEFAULT_SOURCE and path.suffix.lower() in ('.xml', '.sql', '.lua', '.modinfo') and key in path.read_text(encoding='utf-8', errors='ignore'):
+                            raise CatalogError(f'{key}: remove its gameplay reference in an IDE first')
+                    end = document.index('</' + row['kind'] + '>', row['text_end']) + len('</' + row['kind'] + '>')
+                    replacements.append((row['start'], end, ''))
+                    bases[entry['slot']] = {'key': key, 'kind': row['kind'], 'text': '', 'absent': True}
+                    continue
+                if identifier in new_keys:
+                    raise CatalogError(f'{identifier}: two local English drafts use the same identifier')
+                new_keys.add(identifier)
+                target = [row for row in operations if row['key'] == identifier]
+                kind = 'Row' if draft['create'] else base.get('kind')
+                already_applied = (len(target) == 1 and target[0]['kind'] == kind and
+                    primary_text(target[0]['text']) == edit['text'] and
+                    (identifier == key or not any(row['key'] == key for row in operations) or draft['create']))
+                if already_applied:
+                    bases[entry['slot']] = {'key': identifier, 'kind': kind, 'text': edit['text']}
+                    continue  # Recover an interrupted Apply without treating our own write as an IDE conflict.
+                if draft['create'] or identifier != key:
+                    if identifier in read_reference()['english'] or any(row['key'] == identifier for row in operations):
+                        raise CatalogError(f'{identifier}: this key already exists')
+                if draft['create']:
+                    for path in (REPO_ROOT / 'LEKMOD/Art').rglob('*'):
+                        if path.is_file() and path.suffix.lower() in ('.xml', '.sql') and identifier in path.read_text(encoding='utf-8', errors='ignore'):
+                            raise CatalogError(f'{identifier}: key exists in {path.relative_to(REPO_ROOT)}')
+                    additions.append(f'\t\t<Row Tag="{identifier}">\n\t\t\t<Text>{escape(edit["text"])}</Text>\n\t\t</Row>\n')
+                else:
+                    matches = [row for row in operations if row['key'] == base.get('key') and row['kind'] == base.get('kind')]
+                    row = next((row for row in matches if row['index'] == draft['index']), None)
+                    if row is None and len(matches) == 1:
+                        row = matches[0]
+                    if row is None or primary_text(row['text']) != base.get('text'):
+                        raise CatalogError(f'{key}: English was changed in the project. Your local draft is retained; review the current source before Apply')
+                    if identifier != key:
+                        if len(matches) != 1 or any(key in locale_records(locale) for locale in self.manifest()['locales']):
+                            raise CatalogError(f'{key}: a referenced or translated identifier needs an IDE migration')
+                        for path in (REPO_ROOT / 'LEKMOD').rglob('*'):
+                            if (path.is_file() and path != build_shipped_localization.DEFAULT_SOURCE and
+                                    path.suffix.lower() in ('.xml', '.sql', '.lua', '.modinfo') and
+                                    path.stat().st_size < 8 * 1024 * 1024 and key in path.read_text(encoding='utf-8', errors='ignore')):
+                                raise CatalogError(f'{key}: update its gameplay reference in {path.relative_to(REPO_ROOT)} through an IDE migration')
+                    body = document[row['start']:row['text_start']] + formatted_primary_text(row['text'], edit['text'])
+                    body = body.replace(f'Tag="{key}"', f'Tag="{identifier}"', 1)
+                    replacements.append((row['start'], row['text_end'], body))
+                bases[entry['slot']] = {'key': identifier, 'kind': 'Row' if draft['create'] else base['kind'], 'text': edit['text']}
+            except CatalogError as error:
+                if not partial:
+                    raise
+                del replacements[previous[0]:]
+                del additions[previous[1]:]
+                new_keys, bases = previous[2:]
+                add_issue(entry, error, entry['payload']['base'].get('text', ''))
         for start, end, replacement in sorted(replacements, reverse=True):
             document = document[:start] + replacement + document[end:]
         if additions:
@@ -1392,35 +1417,54 @@ class Editor:
         if english:
             sync_primary_english.validate_source(document)
         sources = candidate_sources(REPO_ROOT, document) if translations else {}
+        blocked_english = {key for issue in issues if issue['mode'] == 'developer'
+                           for key in (issue['key'], issue['identifier'])}
         for entry in translations:
-            draft = entry['payload']
-            key, locale, edit = draft['key'], draft['locale'], draft['edit']
-            rows = locale_records(locale)
-            current = rows.get(key)
-            source_row = sources.get(key)
-            if (not source_row or source_row.get('classification') == 'source_conflict' or
-                    source_row['source_fingerprint'] != draft['source_fingerprint']):
-                raise CatalogError(f'{locale}:{key}: English changed since this translation was written. Review the current English and save the draft again before Apply')
-            if edit['text'] and (PLACEHOLDER_RE.search(edit['text']) or
-                    token_counts(edit['text']) != json.loads(source_row['required_format_tokens'])):
-                raise CatalogError(f'{locale}:{key}: the draft is saved, but Apply requires every formatting token to match English')
-            expected = ({'key': key, 'source_fingerprint': draft['source_fingerprint'],
-                             'text': edit['text'], 'gender': edit['gender'], 'plurality': edit['plurality'],
-                             'translator_note': edit['note'], 'updated_at': entry['updated_at']}
-                        if edit['text'] else None)
-            if current != draft['base'].get('approval') and current != expected:
-                raise CatalogError(f'{locale}:{key}: the project translation changed in an IDE or merge. Your local draft is retained; review it before Apply')
-            if expected:
-                rows[key] = expected
-            else:
-                rows.pop(key, None)
-            bases[entry['slot']] = {'approval': rows.get(key), 'source_fingerprint': draft['source_fingerprint']}
+            source_row = None
+            try:
+                draft = entry['payload']
+                key, locale, edit = draft['key'], draft['locale'], draft['edit']
+                rows = locale_records(locale)
+                current = rows.get(key)
+                source_row = sources.get(key)
+                if (not source_row or source_row.get('classification') == 'source_conflict' or
+                        source_row['source_fingerprint'] != draft['source_fingerprint']):
+                    if key in blocked_english:
+                        raise CatalogError(f'{locale}:{key}: this translation depends on an English draft that could not be applied. Fix that English draft first')
+                    raise CatalogError(f'{locale}:{key}: English changed since this translation was written. Review the current English and save the draft again before Apply')
+                if edit['text']:
+                    if PLACEHOLDER_RE.search(edit['text']):
+                        raise CatalogError(f'{locale}:{key}: replace the language placeholder with your translation before Apply')
+                    missing_counts, extra_counts = token_difference(edit['text'], json.loads(source_row['required_format_tokens']))
+                    if missing_counts or extra_counts:
+                        missing = [f'{name} × {amount}' for name, amount in missing_counts.items()]
+                        extra = [f'{name} × {amount}' for name, amount in extra_counts.items()]
+                        detail = '; '.join((['Missing: ' + ', '.join(missing)] if missing else []) +
+                                           (['Unexpected: ' + ', '.join(extra)] if extra else []))
+                        raise CatalogError(f'{locale}:{key}: formatting tokens must match English. {detail}. Your draft is saved')
+                expected = ({'key': key, 'source_fingerprint': draft['source_fingerprint'],
+                                 'text': edit['text'], 'gender': edit['gender'], 'plurality': edit['plurality'],
+                                 'translator_note': edit['note'], 'updated_at': entry['updated_at']}
+                            if edit['text'] else None)
+                if current != draft['base'].get('approval') and current != expected:
+                    raise CatalogError(f'{locale}:{key}: the project translation changed in an IDE or merge. Your local draft is retained; review it before Apply')
+                if expected:
+                    rows[key] = expected
+                else:
+                    rows.pop(key, None)
+                bases[entry['slot']] = {'approval': rows.get(key), 'source_fingerprint': draft['source_fingerprint']}
+                touched_locales.add(locale)
+            except CatalogError as error:
+                if not partial:
+                    raise
+                add_issue(entry, error, source_row.get('lekmod_en_US', '') if source_row else '')
         writes = {path: encoded_csv([rows[key] for key in sorted(rows)], APPROVAL_FIELDS)
-                  for locale, rows in approvals.items() if (path := TRANSLATIONS / (locale + '.csv')) in originals}
+                  for locale, rows in approvals.items() if locale in touched_locales and (path := TRANSLATIONS / (locale + '.csv')) in originals}
         if english:
             writes[source] = sync_primary_english.encoded_text(source, document)
         writes = {path: value for path, value in writes.items() if value != originals[path]}
-        return {'writes': writes, 'originals': originals, 'document': document, 'bases': bases}
+        return {'writes': writes, 'originals': originals, 'document': document, 'bases': bases,
+                'entries': [entry for entry in entries if entry['slot'] in bases], 'issues': issues}
 
     def review_draft(self, slot: str) -> dict:
         """Show the current source before an explicit rebase of a conflicting local edit."""
@@ -1525,15 +1569,23 @@ class Editor:
 
         def work():
             try:
+                plan = self.draft_plan(entries, partial=True)
+                batch = plan['entries']
+                self.drafts.save_apply_issues(plan['issues'])
+                self.apply_state = {**self.apply_state, 'skipped_count': len(plan['issues'])}
+                if entries and not batch:
+                    self.apply_state = {**self.apply_state, 'state': 'complete', 'applied_count': 0,
+                                        **self.drafts.status()}
+                    self.record_event('draft-apply', 'no-valid-drafts')
+                    return
                 if target == 'game':
                     self.apply_state = {**self.apply_state, 'phase': 'Building the local version for the installed game'}
-                    result = self.apply_game_version(self.draft_plan(entries))
-                    self.apply_state = {**self.apply_state, 'state': 'complete', 'applied_count': len(entries),
+                    result = self.apply_game_version(plan)
+                    self.apply_state = {**self.apply_state, 'state': 'complete', 'applied_count': len(batch),
                         'game_result': result, **self.drafts.status()}
                     self.record_event('draft-apply-game', 'success')
                     return
-                if entries:
-                    plan = self.draft_plan(entries)
+                if batch:
                     originals, writes = plan['originals'], plan['writes']
                     self.apply_originals = originals
                     for path, original in originals.items():
@@ -1564,14 +1616,14 @@ class Editor:
                         atomic_bytes(game_path, old_game)
                         self.row_cache = {}
                         raise
-                    self.drafts.finish(entries, plan['bases'])
+                    self.drafts.finish(batch, plan['bases'])
                     self.last_applied_drafts = {entry['slot']: {'base': plan['bases'][entry['slot']],
-                        'edit': entry['payload']['edit']} for entry in entries}
+                        'edit': entry['payload']['edit']} for entry in batch}
                     self.row_cache = {}
-                    dates = {entry['payload']['edit']['identifier']: entry['updated_at'] for entry in entries
+                    dates = {entry['payload']['edit']['identifier']: entry['updated_at'] for entry in batch
                              if entry['payload']['mode'] == 'developer'}
                     if dates: self.mark_english_edits(dates)
-                result = {'applied_count': len(entries), **self.drafts.status()}
+                result = {'applied_count': len(batch), **self.drafts.status()}
                 if game:
                     self.apply_state = {**self.apply_state, 'phase': 'Copying to the verified game installation'}
                     result['game_result'] = self.apply_to_game()
@@ -1611,7 +1663,7 @@ class Editor:
         translation = data["translation"]
         if translation and (
             PLACEHOLDER_RE.search(translation)
-            or token_counts(translation) != json.loads(row["required_format_tokens"])
+            or not tokens_match(translation, json.loads(row["required_format_tokens"]))
         ):
             raise CatalogError("translation must preserve all formatting tokens")
         approved_path = TRANSLATIONS / f"{locale}.csv"
@@ -1965,7 +2017,7 @@ def make_handler(editor: Editor, token: str, port: int):
                                            'server_instance': editor.instance_id})
                     else: self.respond(503, {'error': 'Preparing the connected project; please wait'})
                     return
-                if url.path in {'/api/drafts', '/api/draft-backup', '/api/apply-status'} and not editor.ready:
+                if url.path in {'/api/drafts', '/api/draft-backup', '/api/draft-saves', '/api/apply-issues', '/api/apply-status'} and not editor.ready:
                     raise CatalogError('Connect a compatible project first')
                 if url.path == "/":
                     html = PAGE.read_text(encoding="utf-8").replace("{{TOKEN}}", token).encode("utf-8")
@@ -2038,6 +2090,10 @@ def make_handler(editor: Editor, token: str, port: int):
                     self.respond(200, {**editor.apply_state, **editor.drafts.status()})
                 elif url.path == '/api/drafts':
                     self.respond(200, {'entries': editor.drafts.entries(), **editor.drafts.status()})
+                elif url.path == '/api/apply-issues':
+                    self.respond(200, {'issues': editor.drafts.apply_issues(), **editor.drafts.status()})
+                elif url.path == '/api/draft-saves':
+                    self.respond(200, {'saves': editor.drafts.saved_versions(), **editor.drafts.status()})
                 elif url.path == '/api/draft-backup':
                     self.download('lekmod-local-drafts.json', json.dumps({
                         'schema_version': 1, 'project': str(REPO_ROOT), 'release': release_version(REPO_ROOT),
@@ -2140,6 +2196,10 @@ def make_handler(editor: Editor, token: str, port: int):
                     if editor.save_state.get('state') == 'running':
                         raise CatalogError('Wait until Apply finishes before restoring Save')
                     result = editor.drafts.restore_checkpoint()
+                elif self.path == '/api/draft-load':
+                    if editor.save_state.get('state') == 'running':
+                        raise CatalogError('Wait until Apply finishes before loading a Save')
+                    result = editor.drafts.load_saved_version(int(data.get('save_id', 0)))
                 elif self.path == '/api/draft-discard':
                     result = editor.discard_draft(data)
                 elif self.path == '/api/draft-review':

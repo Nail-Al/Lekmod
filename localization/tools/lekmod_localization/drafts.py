@@ -1,16 +1,19 @@
-"""Durable working versions, bounded local history and a separate explicit Save."""
+"""Durable working versions, bounded Undo history and 50 explicit Saves."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import zlib
 
 from .common import CatalogError
 
 HISTORY_LIMIT = 100
+SAVE_LIMIT = 50
 
 
 class DraftStore:
@@ -36,6 +39,14 @@ class DraftStore:
                 CREATE TABLE IF NOT EXISTS checkpoint_state (id INTEGER PRIMARY KEY CHECK(id=1),
                     saved_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS saved_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    saved_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS saved_content (hash TEXT PRIMARY KEY, payload BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS saved_rows (save_id INTEGER NOT NULL,
+                    slot TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(save_id, slot));
+                CREATE INDEX IF NOT EXISTS saved_rows_content ON saved_rows(content_hash);
+                CREATE TABLE IF NOT EXISTS apply_issues (slot TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL, payload TEXT NOT NULL);
             """)
             if not db.execute("SELECT 1 FROM migrations WHERE name='versions'").fetchone():
                 for row in db.execute("SELECT * FROM drafts").fetchall():
@@ -61,6 +72,11 @@ class DraftStore:
                                    (version[0], version[0], row['id']))
                 db.execute("INSERT INTO migrations VALUES ('versions')")
             self.prune(db)
+            if not db.execute("SELECT 1 FROM migrations WHERE name='saved-checkpoints'").fetchone():
+                saved = db.execute('SELECT saved_at FROM checkpoint_state WHERE id=1').fetchone()
+                if saved:
+                    self.archive_save(db, saved[0], db.execute('SELECT slot, payload FROM checkpoint').fetchall())
+                db.execute("INSERT INTO migrations VALUES ('saved-checkpoints')")
 
     @contextmanager
     def connection(self):
@@ -166,6 +182,9 @@ class DraftStore:
                     "draft_undo_available": bool(db.execute('SELECT 1 FROM history WHERE id<=? LIMIT 1', (cursor,)).fetchone()),
                     "draft_redo_available": bool(db.execute('SELECT 1 FROM history WHERE id>? LIMIT 1', (cursor,)).fetchone()),
                     "history_count": db.execute('SELECT count(*) FROM history').fetchone()[0],
+                    "saved_version_count": db.execute('SELECT count(*) FROM saved_checkpoints').fetchone()[0],
+                    "apply_issue_count": db.execute('SELECT count(*) FROM apply_issues i JOIN drafts d USING(slot) '
+                                                    'WHERE d.payload IS NOT NULL').fetchone()[0],
                     "checkpoint_saved_at": saved[0] if saved else '',
                     "checkpoint_dirty": bool(dirty)}
 
@@ -236,28 +255,90 @@ class DraftStore:
         return {**self.status(), 'slot': action['slot'], 'version': desired}
 
     def save_checkpoint(self) -> dict:
-        """Overwrite the single explicit Save; pruning and Undo never touch it."""
+        """Archive an explicit Save and make it the trash restore point."""
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            saved_at = datetime.now(timezone.utc).isoformat()
             db.execute('DELETE FROM checkpoint')
             db.execute('INSERT INTO checkpoint SELECT slot, current, signature FROM versions')
             db.execute('INSERT OR REPLACE INTO checkpoint_state VALUES (1,?)',
-                       (datetime.now(timezone.utc).isoformat(),))
-        return self.status()
+                       (saved_at,))
+            save_id = self.archive_save(db, saved_at, db.execute('SELECT slot, payload FROM checkpoint').fetchall())
+        return {'save_id': save_id, **self.status()}
+
+    @staticmethod
+    def archive_save(db, saved_at, rows):
+        """Share unchanged compressed row content across up to 50 snapshots."""
+        save_id = db.execute('INSERT INTO saved_checkpoints(saved_at) VALUES (?)', (saved_at,)).lastrowid
+        for row in rows:
+            data = (row['payload'] or 'null').encode('utf-8')
+            digest = hashlib.sha256(data).hexdigest()
+            db.execute('INSERT OR IGNORE INTO saved_content VALUES (?,?)', (digest, zlib.compress(data)))
+            db.execute('INSERT INTO saved_rows VALUES (?,?,?)', (save_id, row['slot'], digest))
+        db.execute('DELETE FROM saved_checkpoints WHERE id NOT IN '
+                   '(SELECT id FROM saved_checkpoints ORDER BY id DESC LIMIT ?)', (SAVE_LIMIT,))
+        db.execute('DELETE FROM saved_rows WHERE save_id NOT IN (SELECT id FROM saved_checkpoints)')
+        db.execute('DELETE FROM saved_content WHERE hash NOT IN (SELECT content_hash FROM saved_rows)')
+        return save_id
+
+    def saved_versions(self) -> list[dict]:
+        """List only metadata; loading the dialog does not fetch private texts."""
+        with self.connection() as db:
+            return [dict(row) for row in db.execute('''
+                SELECT s.id, s.saved_at, count(r.slot) AS row_count
+                FROM saved_checkpoints s LEFT JOIN saved_rows r ON r.save_id=s.id
+                GROUP BY s.id ORDER BY s.id DESC''')]
+
+    def save_apply_issues(self, issues: list[dict]) -> None:
+        """Retain the last validation report across restarts, without altering drafts."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM apply_issues')
+            db.executemany('INSERT INTO apply_issues VALUES (?,?,?)',
+                           [(issue['slot'], issue['revision'], self.encode(issue)) for issue in issues])
+
+    def apply_issues(self) -> list[dict]:
+        """Show current draft text and flag edits made after the last validation."""
+        with self.connection() as db:
+            result = []
+            for row in db.execute('SELECT i.payload AS issue, i.revision AS checked_revision, '
+                                  'd.payload AS draft, d.revision FROM apply_issues i JOIN drafts d USING(slot) '
+                                  'WHERE d.payload IS NOT NULL ORDER BY i.slot'):
+                issue = self.decode(row['issue'])
+                issue['draft_text'] = self.decode(row['draft'])['edit']['text']
+                issue['needs_recheck'] = row['revision'] != row['checked_revision']
+                result.append(issue)
+            return result
+
+    def load_saved_version(self, save_id: int) -> dict:
+        """Load one immutable Save locally, retaining the latest explicit Save."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            save = db.execute('SELECT * FROM saved_checkpoints WHERE id=?', (save_id,)).fetchone()
+            if not save:
+                raise CatalogError('This Save is no longer available. Open Saved versions again.')
+            saved = {row['slot']: zlib.decompress(row['payload']).decode('utf-8') for row in db.execute(
+                'SELECT r.slot, c.payload FROM saved_rows r JOIN saved_content c ON c.hash=r.content_hash '
+                'WHERE r.save_id=?', (save_id,))}
+            self.restore_versions(db, saved)
+        return {'loaded_save_id': save_id, 'loaded_saved_at': save['saved_at'], **self.status()}
+
+    def restore_versions(self, db, saved):
+        """Rebase a restored local version against today's project, atomically."""
+        for version in db.execute('SELECT * FROM versions').fetchall():
+            desired = self.decode(saved[version['slot']] if version['slot'] in saved else version['initial'])
+            self.write(db, version['slot'], self.encode(self.pending(desired, self.decode(version['baseline']))))
+            db.execute('UPDATE versions SET current=?, signature=? WHERE slot=?',
+                       (self.encode(desired), self.signature(desired), version['slot']))
+        db.execute('DELETE FROM history')
+        db.execute('DELETE FROM apply_issues')
+        db.execute('UPDATE state SET cursor=0 WHERE id=1')
 
     def restore_checkpoint(self) -> dict:
         """Restore Save, or the original working version if Save has never been pressed."""
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            for version in db.execute('SELECT v.*, c.payload AS saved FROM versions v LEFT JOIN checkpoint c USING(slot)').fetchall():
-                exists = db.execute('SELECT 1 FROM checkpoint WHERE slot=?', (version['slot'],)).fetchone()
-                desired = self.decode(version['saved'] if exists else version['initial'])
-                baseline = self.decode(version['baseline'])
-                self.write(db, version['slot'], self.encode(self.pending(desired, baseline)))
-                db.execute('UPDATE versions SET current=?, signature=? WHERE slot=?',
-                           (self.encode(desired), self.signature(desired), version['slot']))
-            db.execute('DELETE FROM history')
-            db.execute('UPDATE state SET cursor=0 WHERE id=1')
+            self.restore_versions(db, {row['slot']: row['payload'] for row in db.execute('SELECT * FROM checkpoint')})
         return self.status()
 
     def finish(self, applied: list[dict], bases: dict[str, dict]) -> dict:

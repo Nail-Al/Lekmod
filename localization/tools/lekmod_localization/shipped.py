@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
-from .common import CatalogError, KEY_RE, PLACEHOLDER_RE, SOURCE_LOCALE, token_counts
+from .common import CatalogError, KEY_RE, PLACEHOLDER_RE, SOURCE_LOCALE, tokens_match
 from .fallback import fallback_entries
 from .workspace import editor_source_fingerprint
 from .runtime_xml import runtime_text, validate_runtime_xml
@@ -104,7 +104,7 @@ def approved_entries(
             if not isinstance(text, str) or (not text and fallback[key]["Text"]):
                 raise CatalogError(f"empty approved translation: {locale} {key}")
             if PLACEHOLDER_RE.search(text) or (
-                token_counts(text) != source[key]["lekmod_en_US"]["format_tokens"]
+                not tokens_match(text, source[key]["lekmod_en_US"]["format_tokens"])
             ):
                 raise CatalogError(f"invalid translation tokens: {locale} {key}")
             if set(approval) - {"source_fingerprint", "text", "gender", "plurality"}:

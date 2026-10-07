@@ -10,14 +10,15 @@ const prefs = {mode:"translator",onboarded:true,locale:"RU_RU",category:"all",pr
   translator_column_order:[],developer_column_order:[],column_widths:{},translator_filters:{},developer_filters:{},
   project_path:"project",game_path:"game",snapshot_url:"",apply_target:"",
   translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
-let connected=true, gameRunning=false, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null;
-const requests=[], history=[], errors=[], values={};
+let connected=true, gameRunning=false, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null, simulatePartial=false;
+let applyIssues=[];
+const requests=[], history=[], saves=[], errors=[], values={};
 let debug=()=>({});
 const keys=Array.from({length:4},(_,i)=>"TXT_KEY_UI_"+(i+1));
 const blank=()=>({text:"",gender:"",plurality:"",note:"",identifier:""});
 function status(){return {draft_count:Object.values(values).filter(v=>v.text||v.note).length,
   draft_undo_available:cursor>0,draft_redo_available:cursor<history.length,
-  checkpoint_saved_at:savedAt,checkpoint_dirty:JSON.stringify(values)!==JSON.stringify(checkpoint)};}
+  apply_issue_count:applyIssues.length,saved_version_count:saves.length,checkpoint_saved_at:savedAt,checkpoint_dirty:JSON.stringify(values)!==JSON.stringify(checkpoint)};}
 function rows(developer=false){
  return keys.map((key,i)=>{const value=values[key]||blank(), english="English "+(i+1), edited=!!(value.text||value.note);
   return {key,category:i<2?"menus":"buildings",index:i,kind:"Row",text:english,characters:english.length,entity_status:"applied",
@@ -36,10 +37,10 @@ function rows(developer=false){
 function metadata(){return {ready:true,project:{version:"v35.4.003"},release:"v35.4",included_source:false,
  game:connected?{path:"game",state:"installed",selected_mod:"LEKMOD_v35.4",mods:[{name:"LEKMOD_v35.4",version:"v35.4.003",release:"v35.4"}],error:""}:{path:"",state:"missing_game",mods:[],error:""},
  preferences:{...prefs},locales:{RU_RU:["menus","buildings"]},vanilla_counts:{},version_history:{upgrade_versions:[],synced:[],available:[]},
- config:{checks:{},build:{shipped:true}},editor_version:"0.25",server_instance:"ui-test",apply_state:{state:"idle"},...status()};}
+ config:{checks:{},build:{shipped:true}},editor_version:"0.26",server_instance:"ui-test",apply_state:{state:"idle"},...status()};}
 async function response(url,options={}){
  const u=new URL(url,"http://localhost/"), body=options.body?JSON.parse(options.body):{};
- requests.push({path:u.pathname,body});
+ requests.push({path:u.pathname,body,query:u.searchParams.get("q")});
  let result={};
  if(u.pathname==="/api/meta")result=metadata();
  else if(u.pathname==="/api/preferences"){Object.assign(prefs,body);result={preferences:{...prefs}};}
@@ -52,7 +53,16 @@ async function response(url,options={}){
   history.splice(cursor);history.push({key:body.key,before,after:{...body.edit}});cursor=history.length;revision++;
   result={entry:{slot:body.slot,revision,payload:{...body}},...status()};
  } else if(u.pathname==="/api/draft-checkpoint"){
-  checkpoint=JSON.parse(JSON.stringify(values));savedAt="2026-10-06T18:00:00Z";result=status();
+  checkpoint=JSON.parse(JSON.stringify(values));savedAt="2026-10-07T04:00:"+String(saves.length).padStart(2,"0")+"Z";
+  saves.unshift({id:saves.length+1,saved_at:savedAt,row_count:Object.keys(values).length,values:JSON.parse(JSON.stringify(values))});result=status();
+ } else if(u.pathname==="/api/draft-saves"){
+  result={saves:saves.map(({values,...meta})=>meta),...status()};
+ } else if(u.pathname==="/api/apply-issues"){
+  result={issues:applyIssues.map(issue=>({...issue,draft_text:values[issue.key]?.text||"",needs_recheck:issue.revision!==revision})),...status()};
+ } else if(u.pathname==="/api/draft-load"){
+  const save=saves.find(item=>item.id===body.save_id);assert(save);
+  for(const key of Object.keys(values))delete values[key];Object.assign(values,JSON.parse(JSON.stringify(save.values)));
+  history.length=0;cursor=0;revision++;result={loaded_save_id:save.id,loaded_saved_at:save.saved_at,...status()};
  } else if(u.pathname==="/api/draft-restore"){
   for(const key of Object.keys(values))delete values[key];Object.assign(values,JSON.parse(JSON.stringify(checkpoint)));
   history.length=0;cursor=0;revision++;result=status();
@@ -62,10 +72,12 @@ async function response(url,options={}){
   result={...status(),slot:"T:RU_RU:"+action.key,version:{mode:"translator",locale:"RU_RU",key:action.key,edit:values[action.key]}};
  } else if(u.pathname==="/api/apply-project"){
   if(gameRunning&&["game","all"].includes(body.target))return {ok:false,json:async()=>({error:"Civilization V is running",error_code:"game_running",processes:["CivilizationV_DX11.exe"]})};
+  applyIssues=simulatePartial?[{slot:"T:RU_RU:"+keys[0],revision,mode:"translator",locale:"RU_RU",key:keys[0],
+    english_text:"English {1_Name}",draft_text:values[keys[0]].text,reason:"Missing: {1_Name} × 1"}]:[];
   applying=body.target;result={state:"running",target:applying,count:status().draft_count,...status()};
- } else if(u.pathname==="/api/apply-status"){result={state:"complete",target:applying,count:0,applied_count:0,phase:"Complete",...status()};}
+ } else if(u.pathname==="/api/apply-status"){result={state:"complete",target:applying,count:0,applied_count:1,phase:"Complete",...status()};}
  else if(u.pathname==="/api/versions")result={versions:[{version:"v35.4",supported:true}],warning:""};
- else if(u.pathname==="/api/editor-latest")result={current:"0.25",latest:"0.25",available:false};
+ else if(u.pathname==="/api/editor-latest")result={current:"0.26",latest:"0.26",available:false};
  else if(u.pathname==="/api/game-process")result={processes:gameRunning?["CivilizationV_DX11.exe"]:[]};
  else if(u.pathname==="/api/game-status")result=metadata().game;
  else if(u.pathname==="/api/download-status")result={state:"idle"};
@@ -94,6 +106,21 @@ async function wait(fn,label){
  assert(d.querySelector('thead th[data-field="synced_to"]'));
  assert(d.querySelector(".sync-chip").title.includes("Source project"));
  assert(!e("save").disabled,"Save records a global checkpoint even without a row selection");
+ const rowCalls=requests.filter(x=>x.path==="/api/rows").length;
+ e("search-input").value="TXT_KEY_UI_1";e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
+ e("search-input").focus();e("search-input").setSelectionRange(3,3);
+ await new Promise(r=>setTimeout(r,400));
+ assert.equal(requests.filter(x=>x.path==="/api/rows").length,rowCalls,"Typing does not submit Search");
+ assert.equal(e("search-input").selectionStart,3,"Editing in the middle keeps the caret");
+ e("search-input").dispatchEvent(new w.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+ await wait(()=>w.currentRows?.length===1&&e("table-loading").hidden,"Search by Enter");
+ assert.equal(w.currentRows[0].key,keys[0]);
+ e("search-clear").click();await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"Search clear");
+ assert.equal(e("search-input").value,"");
+ e("search-input").value=keys[1];e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
+ e("search-submit").click();await wait(()=>w.currentRows?.length===1&&e("table-loading").hidden,"Search button");
+ assert.equal(w.currentRows[0].key,keys[1]);
+ e("search-clear").click();await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"Clear button resets applied query");
  select(0);input("Первый");
  await wait(()=>values[keys[0]]?.text==="Первый"&&e("draft-state").textContent.includes("Saved locally"),"first autosave");
  e("save").click();await wait(()=>savedAt&&!e("save").disabled,"explicit Save");
@@ -108,7 +135,7 @@ async function wait(fn,label){
  assert.equal(e("selected").textContent,keys[1]+" · RU_RU");
  hotkey("y");await wait(()=>cursor===2&&e("table-loading").hidden,"Ctrl+Y");
  hotkey("z");await wait(()=>cursor===1&&e("table-loading").hidden,"undo before branching");
- e("search-input").value="";e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
+ e("search-clear").click();
  await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"return to all rows");
  select(3);input("Новая ветка");await wait(()=>values[keys[3]]?.text==="Новая ветка"&&e("draft-state").textContent.includes("Saved locally"),"branch");
  assert.equal(cursor,history.length);assert(e("redo").disabled);
@@ -117,6 +144,34 @@ async function wait(fn,label){
  hotkey("z");assert.equal(requests.filter(x=>x.path==="/api/draft-undo").length,historyCalls,"Dialog typing keeps native shortcuts");
  e("discard-confirm").click();await wait(()=>!e("discard-dialog").open&&e("table-loading").hidden,"restore checkpoint");
  assert.equal(values[keys[0]].text,"Первый");assert(!values[keys[3]]);
+ select(1);input("Вторая сохранённая версия");
+ await wait(()=>values[keys[1]]?.text==="Вторая сохранённая версия"&&e("draft-state").textContent.includes("Saved locally"),"second Save content");
+ e("save").click();await wait(()=>saves.length===2&&!e("save").disabled,"second explicit Save");
+ const latestSaveTime=savedAt;
+ e("saved-versions").click();await wait(()=>e("saved-versions-dialog").open,"Saved versions dialog");
+ const savedChoices=d.querySelectorAll('input[name="saved-version"]');assert.equal(savedChoices.length,2);
+ savedChoices[1].click();e("saved-versions-load").click();
+ await wait(()=>!e("saved-versions-dialog").open&&e("table-loading").hidden&&!e("save").disabled,"load older Save");
+ assert.equal(values[keys[0]].text,"Первый");assert(!values[keys[1]]);
+ assert.equal(savedAt,latestSaveTime,"Loading an older Save keeps the latest restore point");
+ assert.equal(saves.length,2);assert.equal(history.length,0);
+ e("discard").click();e("discard-confirm").click();
+ await wait(()=>!e("discard-dialog").open&&e("table-loading").hidden,"Trash restores latest Save after loading an older Save");
+ assert.equal(values[keys[1]].text,"Вторая сохранённая версия");
+ simulatePartial=true;e("apply-primary").click();
+ await wait(()=>!e("apply-primary").disabled&&!e("troubleshoot-button").hidden,"partial Apply report");
+ assert(e("save-state").textContent.includes("Applied 1 drafts"));
+ assert(e("save-state").textContent.includes("1 draft errors found"));
+ e("troubleshoot-button").click();await wait(()=>!e("troubleshoot-view").hidden,"Troubleshoot page");
+ assert(e("workspace").hidden);assert.equal(e("troubleshoot-table").querySelectorAll("tbody tr").length,1);
+ assert(e("troubleshoot-table").textContent.includes("Missing: {1_Name}"));
+ e("troubleshoot-table").querySelector("tbody button").click();
+ await wait(()=>e("troubleshoot-view").hidden&&e("selected").textContent===keys[0]+" · RU_RU"&&e("table-loading").hidden,"Edit issue reveals its row");
+ input("Исправленный {1_Name}");await wait(()=>values[keys[0]]?.text==="Исправленный {1_Name}"&&e("draft-state").textContent.includes("Saved locally"),"fix issue");
+ e("troubleshoot-button").click();await wait(()=>!e("troubleshoot-view").hidden,"review edited issue");
+ assert(e("troubleshoot-table").textContent.includes("Edited since Apply"));
+ simulatePartial=false;e("troubleshoot-retry").click();
+ await wait(()=>e("troubleshoot-view").hidden&&!e("apply-primary").disabled&&e("troubleshoot-button").hidden,"Retry applies corrected row");
  gameRunning=true;
  e("apply-toggle").click();assert(!e("apply-menu").hidden);e("game-apply").click();
  await wait(()=>e("game-running-dialog").open,"running game modal");
@@ -138,5 +193,5 @@ async function wait(fn,label){
  assert.equal(renamed.synced_to.game,false,"A renamed entity cannot match the old game's key");
  assert.deepEqual(errors,[]);
  dom.window.close();
- console.log("Editor UI: autosave, explicit Save/restore, Ctrl+Z/Ctrl+Y, branching, split actions, destination defaults and Developer Status passed.");
+ console.log("Editor UI: manual Search/Enter/clear with stable caret, saved versions, partial Apply/Troubleshoot/edit/retry, autosave, Ctrl+Z/Ctrl+Y, branching and split actions passed.");
 })().catch(error=>{console.error(error);process.exit(1);});

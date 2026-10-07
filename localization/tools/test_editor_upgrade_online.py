@@ -81,6 +81,7 @@ def main() -> int:
         draft_snapshot = DraftStore(draft_path).entries()
         DraftStore(draft_path).save_checkpoint()
         checkpoint_time = DraftStore(draft_path).status()['checkpoint_saved_at']
+        saved_versions = DraftStore(draft_path).saved_versions()
         (workspace / "editor-settings.json").write_text(json.dumps(preferences), encoding="utf-8")
         (workspace / "vanilla-snapshot.json.gz").write_bytes(b"private snapshot fixture")
         translation = root / "localization/translations/RU_RU.csv"
@@ -165,6 +166,7 @@ def main() -> int:
         assert metadata['preferences']['translator_column_order'] == ['translation', 'key', 'lekmod_en_US']
         assert DraftStore(draft_path).entries() == draft_snapshot, 'update/migration changed unapplied local drafts'
         assert DraftStore(draft_path).status()['checkpoint_saved_at'] == checkpoint_time, 'update lost explicit Save'
+        assert DraftStore(draft_path).saved_versions() == saved_versions, 'update lost saved version history'
         if args.connected_project:
             assert metadata['draft_count'] == 1
         assert (root / "LekmodLocalizationEditor.exe").read_bytes() == expected_exe
