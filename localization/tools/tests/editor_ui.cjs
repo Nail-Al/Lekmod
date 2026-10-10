@@ -12,6 +12,10 @@ const prefs = {mode:"translator",onboarded:true,locale:"RU_RU",category:"all",pr
   translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
 let connected=true, gameRunning=false, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null, simulatePartial=false;
 let applyIssues=[];
+const mergeFixture={handoff_id:"ui-merge",locales:["en_US","RU_RU"],identical_count:0,items:[
+ {id:"en_US:TXT_KEY_UI_1",locale:"en_US",key:"TXT_KEY_UI_1",status:"conflict",choice:"review",team:"Team English",incoming:"Incoming English",resets:[]},
+ {id:"RU_RU:TXT_KEY_UI_1",locale:"RU_RU",key:"TXT_KEY_UI_1",status:"conflict",choice:"review",team:"Team translation",incoming:"Incoming translation",resets:[]},
+ {id:"RU_RU:TXT_KEY_UI_2",locale:"RU_RU",key:"TXT_KEY_UI_2",status:"new",choice:"incoming",team:"",incoming:"New translation",resets:[]}]};
 const requests=[], history=[], saves=[], errors=[], values={};
 let debug=()=>({});
 const keys=Array.from({length:4},(_,i)=>"TXT_KEY_UI_"+(i+1));
@@ -58,7 +62,11 @@ async function response(url,options={}){
  } else if(u.pathname==="/api/draft-saves"){
   result={saves:saves.map(({values,...meta})=>meta),...status()};
  } else if(u.pathname==="/api/apply-issues"){
-  result={issues:applyIssues.map(issue=>({...issue,draft_text:values[issue.key]?.text||"",needs_recheck:issue.revision!==revision})),...status()};
+  result={issues:applyIssues.map(issue=>({...issue,current_revision:revision,draft_text:values[issue.key]?.text||"",needs_recheck:issue.revision!==revision})),...status()};
+ } else if(u.pathname==="/api/draft-accept-formatting"){
+  const issue=applyIssues.find(item=>item.slot===body.slot);assert(issue);
+  assert.equal(body.revision,revision);assert.equal(body.source_fingerprint,issue.source_fingerprint);
+  applyIssues=applyIssues.filter(item=>item!==issue);result={accepted:true,...status()};
  } else if(u.pathname==="/api/draft-load"){
   const save=saves.find(item=>item.id===body.save_id);assert(save);
   for(const key of Object.keys(values))delete values[key];Object.assign(values,JSON.parse(JSON.stringify(save.values)));
@@ -73,7 +81,7 @@ async function response(url,options={}){
  } else if(u.pathname==="/api/apply-project"){
   if(gameRunning&&["game","all"].includes(body.target))return {ok:false,json:async()=>({error:"Civilization V is running",error_code:"game_running",processes:["CivilizationV_DX11.exe"]})};
   applyIssues=simulatePartial?[{slot:"T:RU_RU:"+keys[0],revision,mode:"translator",locale:"RU_RU",key:keys[0],
-    english_text:"English {1_Name}",draft_text:values[keys[0]].text,reason:"Missing: {1_Name} × 1"}]:[];
+    english_text:"English {1_Name}",draft_text:values[keys[0]].text,reason:"Missing: {1_Name} × 1",code:"formatting",source_fingerprint:"a".repeat(64)}]:[];
   applying=body.target;result={state:"running",target:applying,count:status().draft_count,...status()};
  } else if(u.pathname==="/api/apply-status"){result={state:"complete",target:applying,count:0,applied_count:1,phase:"Complete",...status()};}
  else if(u.pathname==="/api/versions")result={versions:[{version:"v35.4",supported:true}],warning:""};
@@ -81,6 +89,8 @@ async function response(url,options={}){
  else if(u.pathname==="/api/game-process")result={processes:gameRunning?["CivilizationV_DX11.exe"]:[]};
  else if(u.pathname==="/api/game-status")result=metadata().game;
  else if(u.pathname==="/api/download-status")result={state:"idle"};
+ else if(u.pathname==="/api/handoff-review")result=mergeFixture;
+ else if(u.pathname==="/api/handoff-choices")result={saved:true};
  return {ok:true,json:async()=>result};
 }
 async function wait(fn,label){
@@ -97,7 +107,7 @@ async function wait(fn,label){
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;};
  w.HTMLElement.prototype.setPointerCapture=function(){};
- w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorRefresh=refresh; window.editorReflectDraft=reflectDraft; window.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
+ w.eval(fs.readFileSync(path.join(root,"localization/editor/app.js"),"utf8") + "\nwindow.editorRefresh=refresh; window.editorReflectDraft=reflectDraft; window.editorOpenMerge=review=>{mergeReview=review;mergeChoices={};meta.draft_count=0;openMerge();}; window.editorDebug=()=>({historyPending,applyPending,chosen,savedDraft,current:captureDraft(),dirty:hasUnsaved(),context:selectionContext});");
  function select(i){d.querySelectorAll("tbody tr")[i].click();}
  function input(text){e("translation").value=text;e("translation").dispatchEvent(new w.Event("input",{bubbles:true}));}
  function hotkey(key){d.dispatchEvent(new w.KeyboardEvent("keydown",{key,ctrlKey:true,bubbles:true}));}
@@ -117,6 +127,9 @@ async function wait(fn,label){
  assert.equal(w.currentRows[0].key,keys[0]);
  e("search-clear").click();await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"Search clear");
  assert.equal(e("search-input").value,"");
+ assert.equal(w.getComputedStyle(e("search-clear")).minHeight,"0");
+ assert.equal(w.getComputedStyle(e("search-clear")).height,"27px");
+ assert.equal(w.getComputedStyle(d.querySelector(".search-box")).overflow,"hidden");
  e("search-input").value=keys[1];e("search-input").dispatchEvent(new w.Event("input",{bubbles:true}));
  e("search-submit").click();await wait(()=>w.currentRows?.length===1&&e("table-loading").hidden,"Search button");
  assert.equal(w.currentRows[0].key,keys[1]);
@@ -172,6 +185,21 @@ async function wait(fn,label){
  assert(e("troubleshoot-table").textContent.includes("Edited since Apply"));
  simulatePartial=false;e("troubleshoot-retry").click();
  await wait(()=>e("troubleshoot-view").hidden&&!e("apply-primary").disabled&&e("troubleshoot-button").hidden,"Retry applies corrected row");
+ simulatePartial=true;e("apply-primary").click();
+ await wait(()=>!e("apply-primary").disabled&&!e("troubleshoot-button").hidden,"formatting review report");
+ e("troubleshoot-button").click();await wait(()=>!e("troubleshoot-view").hidden,"formatting review page");
+ const accept=[...e("troubleshoot-table").querySelectorAll("button")].find(button=>button.textContent==="Accept formatting");assert(accept);
+ const textBefore=values[keys[0]].text,applyCalls=requests.filter(x=>x.path==="/api/apply-project").length;
+ accept.click();assert(e("formatting-dialog").open);
+ e("formatting-cancel").click();assert(!requests.some(x=>x.path==="/api/draft-accept-formatting"),"Cancel does not accept formatting");
+ accept.click();e("formatting-confirm").click();
+ await wait(()=>!e("formatting-dialog").open&&e("troubleshoot-table").querySelectorAll("tbody tr").length===0,"explicit formatting accepted");
+ assert.equal(values[keys[0]].text,textBefore,"Formatting acceptance keeps the exact translation");
+ assert.equal(requests.filter(x=>x.path==="/api/apply-project").length,applyCalls,"Acceptance leaves destination writes for Apply");
+ simulatePartial=false;e("message").textContent="";e("troubleshoot-retry").click();
+ await wait(()=>requests.filter(x=>x.path==="/api/apply-project").length===applyCalls+1&&
+  e("troubleshoot-view").hidden&&!e("apply-primary").disabled&&e("table-loading").hidden&&
+  e("message").textContent.startsWith("Applied"),"Apply after acceptance");
  gameRunning=true;
  e("apply-toggle").click();assert(!e("apply-menu").hidden);e("game-apply").click();
  await wait(()=>e("game-running-dialog").open,"running game modal");
@@ -181,6 +209,21 @@ async function wait(fn,label){
  await wait(()=>e("apply-primary").dataset.target==="game"&&!e("apply-primary").disabled,"select game action");
  assert(requests.some(x=>x.path==="/api/apply-project"&&x.body.target==="game"));
  assert(!e("all-apply").hidden&&e("game-apply").hidden);
+ w.editorOpenMerge(mergeFixture);
+ assert(e("merge-apply").disabled,"Conflicting replacements require explicit choices");
+ const englishChoice=e("merge-table").querySelector('select[aria-label="Decision for en_US TXT_KEY_UI_1"]');
+ const translationChoice=()=>e("merge-table").querySelector('select[aria-label="Decision for RU_RU TXT_KEY_UI_1"]');
+ assert.equal(englishChoice.value,"review");assert.equal(translationChoice().value,"review");
+ assert(e("merge-table").querySelector('input[aria-label="Include RU_RU TXT_KEY_UI_2"]').checked,"Independent additions remain included");
+ englishChoice.value="keep";englishChoice.dispatchEvent(new w.Event("change",{bubbles:true}));
+ await wait(()=>!translationChoice().disabled&&e("merge-summary").textContent.includes("1 unresolved"),"English decision rechecks dependencies");
+ assert(e("merge-apply").disabled);
+ translationChoice().value="incoming";translationChoice().dispatchEvent(new w.Event("change",{bubbles:true}));
+ await wait(()=>!e("merge-apply").disabled&&requests.some(x=>x.path==="/api/handoff-choices"),"Explicit translation decision enables Merge");
+ const decisions=requests.filter(x=>x.path==="/api/handoff-choices").at(-1).body.choices;
+ assert.equal(decisions["en_US:TXT_KEY_UI_1"],"keep");assert.equal(decisions["RU_RU:TXT_KEY_UI_1"],"incoming");
+ assert(!requests.some(x=>x.path==="/api/handoff-apply"),"Review does not write destinations");
+ e("merge-back").click();
  connected=false;await w.editorRefresh();await wait(()=>e("table-loading").hidden,"project only");
  assert.equal(e("apply-primary").dataset.target,"project");
  assert(e("game-apply").disabled&&e("all-apply").disabled);
@@ -193,5 +236,5 @@ async function wait(fn,label){
  assert.equal(renamed.synced_to.game,false,"A renamed entity cannot match the old game's key");
  assert.deepEqual(errors,[]);
  dom.window.close();
- console.log("Editor UI: manual Search/Enter/clear with stable caret, saved versions, partial Apply/Troubleshoot/edit/retry, autosave, Ctrl+Z/Ctrl+Y, branching and split actions passed.");
+ console.log("Editor UI: Search/Enter/clear, Save/history, partial Apply/Troubleshoot, formatting acceptance, autosave, undo/redo, explicit Merge decisions and split actions passed.");
 })().catch(error=>{console.error(error);process.exit(1);});

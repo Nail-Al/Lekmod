@@ -224,6 +224,25 @@ class EditorDraftTests(unittest.TestCase):
         self.assertNotEqual(self.editor.save_state['state'], 'running')
         return self.editor.apply_state
 
+    def test_import_keeps_english_decisions_and_does_not_accept_conflicting_translations(self):
+        self.editor.handoff_packages = []
+        self.editor.handoff_choices = {'en_US:TXT_KEY_ONE': 'keep'}
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as package:
+            package.writestr('README.txt', 'demonstration handoff')
+        report = {'items': [
+            {'id': 'en_US:TXT_KEY_ONE', 'status': 'conflict', 'choice': 'keep'},
+            {'id': 'RU_RU:TXT_KEY_ONE', 'status': 'conflict', 'choice': 'review'},
+            {'id': 'RU_RU:TXT_KEY_TWO', 'status': 'stale', 'choice': 'review'}]}
+        with patch('editor_server.review_merge', return_value=report) as review:
+            result = self.editor.preview_handoff(stream.getvalue())
+        self.assertEqual(review.call_args.kwargs['choices'], {'en_US:TXT_KEY_ONE': 'keep'})
+        self.assertEqual(result['choices']['RU_RU:TXT_KEY_ONE'], 'review')
+        self.assertEqual(result['choices']['RU_RU:TXT_KEY_TWO'], 'keep')
+        saved = json.loads((self.root / 'localization/workspace/pending-handoff/manifest.json').read_text())
+        self.assertEqual(saved['choices'], result['choices'])
+        self.prepare.assert_not_called()
+
     def test_fast_save_bottleneck_never_invokes_rebuild_or_changes_project_files(self):
         """Permanent regression: 100 local writes must perform zero catalog/XML builds."""
         files = [self.source, self.game, self.translations / 'RU_RU.csv']
@@ -241,6 +260,57 @@ class EditorDraftTests(unittest.TestCase):
         self.assertEqual({path: path.read_bytes() for path in files}, originals)
         restored = DraftStore(self.editor.drafts.path)
         self.assertEqual(restored.entries()[0]['payload']['edit']['text'], 'incomplete draft 99')
+
+    def test_formatting_acceptance_keeps_files_local_and_survives_save_undo_and_apply(self):
+        result = self.save(text='Перевод без повторной иконки')
+        self.editor.start_apply(); self.finish()
+        issue = self.editor.apply_issues()[0]
+        self.assertEqual(issue['code'], 'formatting')
+        before = (self.translations / 'RU_RU.csv').read_bytes()
+        accepted = self.editor.accept_formatting({'slot': issue['slot'], 'revision': issue['current_revision'],
+                                                'source_fingerprint': issue['source_fingerprint']})
+        self.assertTrue(accepted['accepted'])
+        self.assertEqual((self.translations / 'RU_RU.csv').read_bytes(), before)
+        saved = self.editor.drafts.save_checkpoint()['save_id']
+        self.editor.drafts.replay(undo=True)
+        self.assertEqual(len(self.editor.draft_plan(self.editor.drafts.entries(), partial=True)['issues']), 1)
+        self.editor.drafts.replay(undo=False)
+        self.assertEqual(self.editor.draft_plan(self.editor.drafts.entries())['issues'], [])
+        self.editor.drafts = DraftStore(self.editor.drafts.path)
+        self.editor.drafts.load_saved_version(saved)
+        self.editor.start_apply(); applied = self.finish()
+        self.assertEqual(applied['applied_count'], 1)
+        with (self.translations / 'RU_RU.csv').open(encoding='utf-8-sig', newline='') as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(len(row['formatting_approval']), 64)
+        self.assertEqual(row['text'], 'Перевод без повторной иконки')
+        # Metadata-only edits retain review; changing text invalidates it.
+        self.save(text=row['text'], base={'approval': row}, edit={**edit(row['text']), 'note': 'reviewed note'},
+                  revision=self.editor.drafts.get(issue['slot'])['revision'])
+        self.assertEqual(self.editor.draft_plan(self.editor.drafts.entries())['issues'], [])
+        self.editor.start_apply(); self.finish()
+        self.save(text=row['text'] + ' изменён', revision=self.editor.drafts.get(issue['slot'])['revision'])
+        self.assertEqual(self.editor.draft_plan(self.editor.drafts.entries(), partial=True)['issues'][0]['code'], 'formatting')
+
+    def test_formatting_review_refuses_stale_source_and_concurrent_draft_edits(self):
+        self.save(text='Без иконки'); self.editor.start_apply(); self.finish()
+        issue = self.editor.apply_issues()[0]
+        request = {'slot': issue['slot'], 'revision': issue['current_revision'],
+                   'source_fingerprint': issue['source_fingerprint']}
+        self.candidates.return_value['TXT_KEY_ONE']['source_fingerprint'] = 'c' * 64
+        with self.assertRaisesRegex(CatalogError, 'source or project review'):
+            self.editor.accept_formatting(request)
+        self.candidates.return_value['TXT_KEY_ONE']['source_fingerprint'] = 'a' * 64
+        self.save(text='Другой перевод', revision=request['revision'])
+        with self.assertRaisesRegex(CatalogError, 'draft changed'):
+            self.editor.accept_formatting(request)
+
+    def test_legacy_troubleshoot_supports_review_without_reapplying(self):
+        self.save(text='Без иконки'); self.editor.start_apply(); self.finish()
+        old = self.editor.drafts.apply_issues()[0]
+        old.pop('code'); old.pop('source_fingerprint')
+        self.editor.drafts.save_apply_issues([old])
+        self.assertEqual(self.editor.apply_issues()[0]['code'], 'formatting')
 
     def test_batch_applies_all_languages_once_and_preserves_other_ide_rows(self):
         self.save(); self.save('TXT_KEY_TWO', 'Second', locale='DE_DE')

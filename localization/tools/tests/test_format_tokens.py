@@ -10,11 +10,31 @@ import unittest
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lekmod_localization.common import REPO_ROOT, normalize_text, token_counts, token_difference, tokens_match
+from lekmod_localization.common import REPO_ROOT, normalize_text, token_counts, token_difference, tokens_match, formatting_approval
 from lekmod_localization.workspace import editor_source_fingerprint
 
 
 class FormattingTests(unittest.TestCase):
+    def test_explicit_review_allows_reported_icon_repetition_changes(self):
+        for icon, count in (('[ICON_SPY]', 2), ('[ICON_RESEARCH]', 4)):
+            text = 'Переформулированный перевод ' + icon * (count - 1)
+            required = {icon: count}
+            self.assertFalse(tokens_match(text, required))
+            accepted = formatting_approval(text, required, 'a' * 64)
+            self.assertTrue(tokens_match(text, required, approval=accepted, source_fingerprint='a' * 64))
+            self.assertFalse(tokens_match(text + ' Изменено', required, approval=accepted, source_fingerprint='a' * 64))
+            self.assertFalse(tokens_match(text, required, approval=accepted, source_fingerprint='b' * 64))
+            self.assertFalse(tokens_match(text, {icon: count + 1}, approval=accepted, source_fingerprint='a' * 64))
+
+    def test_substitution_mismatch_needs_its_own_exact_explicit_review(self):
+        required = {'{1_Name}': 1, '[NEWLINE]': 2}
+        text = 'Intentional static label'
+        accepted = formatting_approval(text, required, 'a' * 64)
+        self.assertFalse(tokens_match(text, required))
+        self.assertTrue(tokens_match(text, required, approval=accepted, source_fingerprint='a' * 64))
+        self.assertFalse(tokens_match(text, required, approval='true', source_fingerprint='a' * 64))
+        self.assertFalse(tokens_match(text, required, approval=accepted))
+
     def test_real_markup_including_link_and_color_variants_remains_required(self):
         text = '[COLOR_XP_BLUE][ENDCOLOR][COLOR:205:127:50:255][/COLOR][LINK=UNIT_TEST][\\LINK][NEWLINE][TAB]{1_Name}%s'
         counts = token_counts(text)

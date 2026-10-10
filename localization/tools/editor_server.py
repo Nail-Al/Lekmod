@@ -42,7 +42,7 @@ from lekmod_localization.runtime_xml import runtime_text, preserve_rejected_rows
 from lekmod_localization.game_process import GameRunningError, require_game_closed, running_game_processes
 from lekmod_localization.common import (
     CatalogError, DEFAULT_EDITOR_OUTPUT, REPO_ROOT, WORKSPACE,
-    PLACEHOLDER_RE, KEY_RE, character_count, token_counts, token_difference, tokens_match,
+    PLACEHOLDER_RE, KEY_RE, character_count, token_counts, token_difference, tokens_match, formatting_approval,
 )
 from lekmod_localization.connections import (
     APP_HOME, TEAM_SNAPSHOT_URL, apply_game, detect_game, inspect_game, game_diagnostics, release_version,
@@ -71,7 +71,7 @@ FAVICON = (Path(sys._MEIPASS) / "favicon.svg" if getattr(sys, "frozen", False)
            else APP_HOME / "localization" / "editor" / "favicon.svg")
 LOG = logging.getLogger("lekmod.editor")
 TRANSLATIONS = REPO_ROOT / "localization" / "translations"
-APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at")
+APPROVAL_FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality", "translator_note", "updated_at", "formatting_approval")
 OPERATIONS = re.compile(
     r"(?ms)^(?P<indent>[ \t]+)<(?P<kind>Row|Replace)\b(?P<attrs>[^>]*)>"
     r"(?P<body>.*?)</(?P=kind)>"
@@ -248,7 +248,8 @@ def matches_filters(row: dict, filters: dict, *, primary: bool) -> bool:
 class Editor:
     """Validate and persist browser edits before touching the shipped XML."""
 
-    def __init__(self, snapshot: Path = manage.SNAPSHOT):
+    def __init__(self, snapshot: Path = manage.SNAPSHOT, *, preferences: dict | None = None):
+        self.preference_overrides = dict(preferences or {})
         # Initialize diagnostics and recovery controls before costly project work.
         self.instance_id = getattr(self, 'instance_id', secrets.token_hex(16))
         self.actions, self.events = [], []
@@ -386,7 +387,8 @@ class Editor:
                     self.handoff_data = packages[-1]
                     self.handoff_id = secrets.token_urlsafe(16)
                     self.handoff_choices = {item['id']: self.handoff_choices.get(item['id'],
-                                            'keep' if item['status'] in ('stale', 'blocked') else 'incoming')
+                                            'keep' if item['status'] in ('stale', 'blocked') else
+                                            item.get('choice', 'review' if item['status'] == 'conflict' else 'incoming'))
                                             for item in self.handoff_preview['items']}
                     for item in self.handoff_preview['items']:
                         if item['status'] in ('stale', 'blocked'): self.handoff_choices[item['id']] = 'keep'
@@ -394,6 +396,10 @@ class Editor:
                     self.handoff_packages = []
                     self.handoff_preview = self.handoff_data = None
                     self.record_event('handoff-restore', 'error:' + safe_ui_event_detail(str(error)[:500]))
+
+    def preferences(self) -> dict:
+        """Allow IDE commands to use explicit destinations without changing UI settings."""
+        return {**settings(), **getattr(self, 'preference_overrides', {})}
 
     def record_event(self, name: str, result: str) -> None:
         """Keep a bounded, text-free local action journal for troubleshooting."""
@@ -529,7 +535,7 @@ class Editor:
         """Return selector choices and current feature switches."""
         self.read_events()
         manifest = self.manifest() if self.ready else {"locales": {}}
-        prefs = settings()
+        prefs = self.preferences()
         game_path = prefs["game_path"] or detect_game()
         game = (inspect_game(Path(game_path), REPO_ROOT if self.ready else None)
                 if game_path else {"path": "", "mods": [], "state": "missing_game", "error": ""})
@@ -653,7 +659,7 @@ class Editor:
         """Copy the generated XML only after checking the connected DLC copy."""
         if not self.ready:
             raise CatalogError("connect a compatible Lekmod project first")
-        prefs = settings()
+        prefs = self.preferences()
         game = prefs["game_path"] or detect_game()
         if not game:
             raise CatalogError("connect a Civilization V installation in Settings")
@@ -789,16 +795,17 @@ class Editor:
         return stream.getvalue()
 
     def preview_handoff(self, data: bytes) -> dict:
-        """Hold an imported ZIP only in memory until this editor session ends."""
+        """Retain imported packages and explicit choices across sessions."""
         if not self.ready or not isinstance(data, bytes) or not 0 < len(data) <= MAX_ARCHIVE:
             raise CatalogError("connect a project and choose a valid handoff ZIP")
         packages = [*self.handoff_packages, data]
         if len(packages) > 20 or sum(map(len, packages)) > MAX_ARCHIVE:
             raise CatalogError('Finish or clear this review before importing more ZIPs')
-        report = review_merge(packages, REPO_ROOT)
+        report = review_merge(packages, REPO_ROOT, choices={key: value
+            for key, value in getattr(self, 'handoff_choices', {}).items() if key.startswith('en_US:')})
         with zipfile.ZipFile(io.BytesIO(data)) as package:
             contains_english = 'localization/en_US/primary.xml' in package.namelist()
-        if contains_english and settings()['mode'] != 'developer':
+        if contains_english and self.preferences()['mode'] != 'developer':
             raise CatalogError('Import English source in Developer mode first')
         self.handoff_packages = packages
         self.handoff_data = data
@@ -807,9 +814,13 @@ class Editor:
         self.handoff_choices = {key: value for key, value in getattr(self, 'handoff_choices', {}).items()
                                 if key in {item['id'] for item in report['items']}}
         for item in report['items']:
-            if item['status'] in ('stale', 'blocked'): self.handoff_choices[item['id']] = 'keep'
+            if item['status'] in ('stale', 'blocked'):
+                self.handoff_choices[item['id']] = 'keep'
+            else:
+                self.handoff_choices.setdefault(item['id'], item.get('choice',
+                    'review' if item['status'] == 'conflict' else 'incoming'))
         self.persist_handoff()
-        return {"handoff_id": self.handoff_id, **report}
+        return {"handoff_id": self.handoff_id, 'choices': self.handoff_choices, **report}
 
     def persist_handoff(self) -> None:
         """Preserve the project-bound pending review through editor upgrades."""
@@ -876,7 +887,7 @@ class Editor:
             raise CatalogError('invalid merge destination')
         if destination == 'project_game':
             require_game_closed()
-            prefs = settings()
+            prefs = self.preferences()
             game_info = inspect_game(Path(prefs['game_path']), REPO_ROOT)
             if game_info['state'] != 'installed':
                 raise CatalogError('Game is not connected to one matching Lekmod installation')
@@ -894,7 +905,7 @@ class Editor:
             self.cursor = 0
         if destination == 'project_game':
             try:
-                prefs = settings()
+                prefs = self.preferences()
                 report['game_result'] = apply_game(REPO_ROOT, Path(prefs['game_path']),
                                                    game_info['mods'][0]['name'], APP_HOME)
             except (ValueError, OSError) as error:
@@ -970,7 +981,7 @@ class Editor:
 
     def game_texts(self) -> dict | None:
         """Compare with actual installed XML, invalidating its cache on external writes."""
-        prefs = settings()
+        prefs = self.preferences()
         game_path = prefs.get('game_path') or detect_game()
         if not game_path:
             return None
@@ -1024,7 +1035,9 @@ class Editor:
         else:
             text = item['translation']
             valid = not text or (not PLACEHOLDER_RE.search(text) and
-                tokens_match(text, json.loads(item['required_format_tokens'])) and
+                tokens_match(text, json.loads(item['required_format_tokens']),
+                             approval=item.get('formatting_approval', ''),
+                             source_fingerprint=item['source_fingerprint']) and
                 item.get('translation_source_fingerprint', item['source_fingerprint']) == item['source_fingerprint'])
             expected = {'Text': runtime_text(text or item['lekmod_en_US']),
                 'Gender': item['translation_gender'] if text else item.get('lekmod_en_US_gender', ''),
@@ -1101,6 +1114,7 @@ class Editor:
                 item["translation_gender"] = saved.get("gender", "")
                 item["translation_plurality"] = saved.get("plurality", "")
                 item["translator_note"] = approved_details[row["key"]]["translator_note"]
+            item['formatting_approval'] = saved.get('formatting_approval', '') if saved else ''
             if row.get('classification') == 'source_conflict':
                 item['translation_status'] = 'needs_source_review'
             english_draft = english_drafts.get(row['key'])
@@ -1142,6 +1156,7 @@ class Editor:
                     translation_characters=str(character_count(edit['text'])), translation_status='draft',
                     translation_updated_at=draft['updated_at'], draft_base=draft['payload']['base'], has_local_draft=True,
                     translation_source_fingerprint=draft['payload']['source_fingerprint'])
+                item['formatting_approval'] = draft['payload'].get('formatting_approval', '')
             self.row_sync(item, installed, developer=False)
             if (filters or {}).get('needs_translation') == 'true' and item.get('translation_status') not in ('missing', 'stale'):
                 continue
@@ -1296,6 +1311,13 @@ class Editor:
             payload['source_fingerprint'] = fingerprint
             if previous and previous['payload'] and previous['payload'].get('reviewed_source'):
                 payload['reviewed_source'] = previous['payload']['reviewed_source']
+            # Preserve review only while the text and source are exactly the same.
+            candidate = previous['payload'] if previous and previous['payload'] else None
+            if candidate is None and base.get('approval'):
+                candidate = {'edit': {'text': base['approval']['text']}, **base['approval']}
+            if (candidate and candidate.get('formatting_approval') and
+                    candidate['edit']['text'] == edit['text'] and candidate.get('source_fingerprint') == fingerprint):
+                payload['formatting_approval'] = candidate['formatting_approval']
         result = self.drafts.put(slot, payload, data['revision'], str(data.get('group', ''))[:100])
         return {**result, 'saved_locally': True}
 
@@ -1331,6 +1353,7 @@ class Editor:
             issues.append({'slot': entry['slot'], 'revision': entry['revision'],
                 'mode': draft['mode'], 'locale': draft['locale'], 'key': draft['key'],
                 'identifier': draft['edit']['identifier'], 'reason': str(error).removeprefix(prefix),
+                'code': getattr(error, 'code', ''), 'source_fingerprint': draft.get('source_fingerprint', ''),
                 'english_text': english_text, 'draft_text': draft['edit']['text']})
 
         def locale_records(locale):
@@ -1430,6 +1453,8 @@ class Editor:
                 key, locale, edit = draft['key'], draft['locale'], draft['edit']
                 rows = locale_records(locale)
                 current = rows.get(key)
+                if current and not current.get('formatting_approval'):
+                    current = {name: value for name, value in current.items() if name != 'formatting_approval'}
                 source_row = sources.get(key)
                 if key in blocked_english:
                     raise CatalogError(f'{locale}:{key}: this translation depends on an English draft that could not be applied. Fix that English draft first')
@@ -1440,17 +1465,25 @@ class Editor:
                     if PLACEHOLDER_RE.search(edit['text']):
                         raise CatalogError(f'{locale}:{key}: replace the language placeholder with your translation before Apply')
                     missing_counts, extra_counts = token_difference(edit['text'], json.loads(source_row['required_format_tokens']))
-                    if missing_counts or extra_counts:
+                    if (missing_counts or extra_counts) and not tokens_match(
+                            edit['text'], json.loads(source_row['required_format_tokens']),
+                            approval=draft.get('formatting_approval', ''), source_fingerprint=draft['source_fingerprint']):
                         missing = [f'{name} × {amount}' for name, amount in missing_counts.items()]
                         extra = [f'{name} × {amount}' for name, amount in extra_counts.items()]
                         detail = '; '.join((['Missing: ' + ', '.join(missing)] if missing else []) +
                                            (['Unexpected: ' + ', '.join(extra)] if extra else []))
-                        raise CatalogError(f'{locale}:{key}: formatting tokens must match English. {detail}. Your draft is saved')
+                        error = CatalogError(f'{locale}:{key}: formatting tokens differ from English. {detail}. Your draft is saved')
+                        error.code = 'formatting'
+                        raise error
                 expected = ({'key': key, 'source_fingerprint': draft['source_fingerprint'],
                                  'text': edit['text'], 'gender': edit['gender'], 'plurality': edit['plurality'],
-                                 'translator_note': edit['note'], 'updated_at': entry['updated_at']}
+                                 'translator_note': edit['note'], 'updated_at': entry['updated_at'],
+                                 **({'formatting_approval': draft['formatting_approval']} if draft.get('formatting_approval') else {})}
                             if edit['text'] else None)
-                if current != draft['base'].get('approval') and current != expected:
+                baseline = draft['base'].get('approval')
+                if baseline and not baseline.get('formatting_approval'):
+                    baseline = {name: value for name, value in baseline.items() if name != 'formatting_approval'}
+                if current != baseline and current != expected:
                     raise CatalogError(f'{locale}:{key}: the project translation changed in an IDE or merge. Your local draft is retained; review it before Apply')
                 if expected:
                     rows[key] = expected
@@ -1469,6 +1502,38 @@ class Editor:
         writes = {path: value for path, value in writes.items() if value != originals[path]}
         return {'writes': writes, 'originals': originals, 'document': document, 'bases': bases,
                 'entries': [entry for entry in entries if entry['slot'] in bases], 'issues': issues}
+
+    def apply_issues(self) -> list[dict]:
+        """Refresh review details, including issues saved by a legacy editor."""
+        previous = self.drafts.apply_issues()
+        if not previous or self.save_state.get('state') == 'running':
+            return previous
+        current = {issue['slot']: issue for issue in self.draft_plan(self.drafts.entries(), partial=True)['issues']}
+        return [{**issue, **current.get(issue['slot'], {}),
+                 'needs_recheck': issue['needs_recheck'], 'current_revision': issue['current_revision']}
+                for issue in previous]
+
+    def accept_formatting(self, data: dict) -> dict:
+        """Review one immutable formatting mismatch without bypassing project conflicts."""
+        if not self.ready or self.save_state.get('state') == 'running':
+            raise CatalogError('Wait until Apply finishes before accepting formatting')
+        entry = self.drafts.get(data.get('slot', ''))
+        if not entry or not entry['payload'] or entry['revision'] != data.get('revision'):
+            raise CatalogError('This draft changed; Apply again and review the current formatting')
+        plan = self.draft_plan(self.drafts.entries(), partial=True)
+        issue = next((item for item in plan['issues'] if item['slot'] == entry['slot']), None)
+        if not issue or issue.get('code') != 'formatting':
+            raise CatalogError('This row needs source or project review, not a formatting exception')
+        if issue['source_fingerprint'] != data.get('source_fingerprint'):
+            raise CatalogError('The English source changed; Apply again before accepting formatting')
+        source = candidate_sources(REPO_ROOT, plan['document'])[entry['payload']['key']]
+        payload = entry['payload']
+        payload['formatting_approval'] = formatting_approval(payload['edit']['text'],
+            json.loads(source['required_format_tokens']), source['source_fingerprint'])
+        result = self.drafts.put(entry['slot'], payload, entry['revision'])
+        # Review changes no destinations. The next Apply still checks all files.
+        self.drafts.save_apply_issues([item for item in plan['issues'] if item['slot'] != entry['slot']])
+        return {**result, **self.drafts.status(), 'accepted': True}
 
     def review_draft(self, slot: str) -> dict:
         """Show the current source before an explicit rebase of a conflicting local edit."""
@@ -1514,6 +1579,8 @@ class Editor:
         payload = review['entry']['payload']
         payload['base'] = review['base']
         if payload['mode'] == 'translator':
+            if payload['source_fingerprint'] != review['source_fingerprint']:
+                payload.pop('formatting_approval', None)
             payload['source_fingerprint'] = review['source_fingerprint']
             payload['reviewed_source'] = review['reviewed_source']
         else: payload['index'] = review['index']
@@ -1521,7 +1588,7 @@ class Editor:
 
     def apply_game_version(self, plan: dict) -> dict:
         """Build in isolated temporary files without writing primary.xml or language CSVs."""
-        prefs = settings()
+        prefs = self.preferences()
         game = prefs.get('game_path') or detect_game()
         inspected = inspect_game(Path(game), REPO_ROOT)
         if inspected['state'] != 'installed':
@@ -1563,7 +1630,7 @@ class Editor:
             raise CatalogError('Wait for the current Apply to finish')
         if game:
             require_game_closed()
-            prefs = settings()
+            prefs = self.preferences()
             inspected = inspect_game(Path(prefs.get('game_path') or detect_game()), REPO_ROOT)
             if inspected['state'] != 'installed':
                 raise CatalogError(inspected.get('error') or 'Connect one matching Lekmod game installation first')
@@ -1653,7 +1720,7 @@ class Editor:
         """Approve one CSV row, update the tracked language CSV and game XML."""
         if not self.ready:
             raise CatalogError("connect a complete compatible Lekmod project first")
-        if settings()["mode"] != "translator":
+        if self.preferences()["mode"] != "translator":
             raise CatalogError("switch to Translator mode to edit a translation")
         locale = str(data.get("locale", ""))
         category = str(data.get("category", ""))
@@ -1671,7 +1738,8 @@ class Editor:
         translation = data["translation"]
         if translation and (
             PLACEHOLDER_RE.search(translation)
-            or not tokens_match(translation, json.loads(row["required_format_tokens"]))
+            or not tokens_match(translation, json.loads(row["required_format_tokens"]),
+                                approval=data.get('formatting_approval', ''), source_fingerprint=row['source_fingerprint'])
         ):
             raise CatalogError("translation must preserve all formatting tokens")
         approved_path = TRANSLATIONS / f"{locale}.csv"
@@ -1691,6 +1759,7 @@ class Editor:
         if translation:
             existing[key] = {
                 "source_fingerprint": row["source_fingerprint"], "text": translation,
+                **({'formatting_approval': data['formatting_approval']} if data.get('formatting_approval') else {}),
                 **{field: data["translation_" + field] for field in ("gender", "plurality")
                    if data["translation_" + field]},
             }
@@ -1705,7 +1774,7 @@ class Editor:
              "text": value["text"], "gender": value.get("gender", ""),
              "plurality": value.get("plurality", ""),
              "translator_note": notes.get(selected, ""),
-             "updated_at": timestamps.get(selected, "")}
+             "updated_at": timestamps.get(selected, ""), 'formatting_approval': value.get('formatting_approval', '')}
             for selected, value in sorted(existing.items())
         ]
         atomic_bytes(approved_path, encoded_csv(approved_rows, APPROVAL_FIELDS))
@@ -1803,7 +1872,7 @@ class Editor:
 
     def require_developer(self) -> None:
         """Keep canonical English changes in a full checkout for review."""
-        if settings()["mode"] != "developer":
+        if self.preferences()["mode"] != "developer":
             raise CatalogError("switch to Developer mode to edit English source")
         try:
             validate_project(REPO_ROOT, full=True)
@@ -2099,7 +2168,7 @@ def make_handler(editor: Editor, token: str, port: int):
                 elif url.path == '/api/drafts':
                     self.respond(200, {'entries': editor.drafts.entries(), **editor.drafts.status()})
                 elif url.path == '/api/apply-issues':
-                    self.respond(200, {'issues': editor.drafts.apply_issues(), **editor.drafts.status()})
+                    self.respond(200, {'issues': editor.apply_issues(), **editor.drafts.status()})
                 elif url.path == '/api/draft-saves':
                     self.respond(200, {'saves': editor.drafts.saved_versions(), **editor.drafts.status()})
                 elif url.path == '/api/draft-backup':
@@ -2153,7 +2222,7 @@ def make_handler(editor: Editor, token: str, port: int):
             try:
                 if getattr(editor, 'initializing', False) is True:
                     self.respond(503, {'error': 'Preparing the connected project; please wait'}); return
-                if self.path in {'/api/apply-project', '/api/translate', '/api/translate-async',
+                if self.path in {'/api/apply-project', '/api/draft-accept-formatting', '/api/translate', '/api/translate-async',
                         '/api/primary', '/api/create-primary', '/api/rename-primary', '/api/connect',
                         '/api/snapshot', '/api/snapshot-cloud', '/api/check', '/api/apply-game',
                         '/api/undo', '/api/redo', '/api/handoff-apply', '/api/handoff-review',
@@ -2198,6 +2267,8 @@ def make_handler(editor: Editor, token: str, port: int):
                     raise CatalogError("wait until the current row finishes saving")
                 if self.path == '/api/draft':
                     result = editor.save_draft(data)
+                elif self.path == '/api/draft-accept-formatting':
+                    result = editor.accept_formatting(data)
                 elif self.path == '/api/draft-checkpoint':
                     result = editor.drafts.save_checkpoint()
                 elif self.path == '/api/draft-restore':

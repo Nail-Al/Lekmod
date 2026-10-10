@@ -59,12 +59,18 @@ jobs:
           sparse-checkout: |
             localization/editor
             localization/tools/tests/editor_ui.cjs
+            localization/tools/tests/editor_layout.cjs
           sparse-checkout-cone-mode: false
       - name: Test actual browser interface
         run: |
           node --check localization/editor/app.js
           npm install --prefix "$RUNNER_TEMP/lle-ui" --no-save jsdom@26.1.0
           NODE_PATH="$RUNNER_TEMP/lle-ui/node_modules" node localization/tools/tests/editor_ui.cjs
+      - name: Verify search control geometry in Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/lle-ui" --no-save jsdom@26.1.0 playwright@1.56.0
+          "$RUNNER_TEMP/lle-ui/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/lle-ui/node_modules" node localization/tools/tests/editor_layout.cjs
 
   snapshot-collector:
     name: Verify snapshot collection on Windows

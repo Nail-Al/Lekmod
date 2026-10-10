@@ -49,6 +49,7 @@ let visible = new Set(), widths = {}, requestId = 0;
 let toastTimer;
 let inLogs = false;
 let inTroubleshoot = false, troubleshootIssues = [], troubleshootPage = 0;
+let pendingFormattingIssue = null;
 let downloadTimer;
 let sourceVersions = null, sourceVersionRequest = null;
 let gameStatusRequest = false;
@@ -1273,6 +1274,18 @@ function renderTroubleshoot() {
     }
     const td = document.createElement("td"), edit = document.createElement("button");
     edit.textContent = "Edit row"; edit.addEventListener("click", () => revealIssue(issue)); td.append(edit); tr.append(td);
+    if (issue.code === "formatting") {
+      const accept = document.createElement("button"); accept.textContent = "Accept formatting";
+      accept.disabled = applyPending || issue.needs_recheck;
+      accept.title = issue.needs_recheck ? "Apply again to review the edited draft" : "Review and accept these formatting differences";
+      accept.addEventListener("click", () => {
+        pendingFormattingIssue = issue;
+        el("formatting-key").textContent = issue.locale + " · " + issue.key;
+        el("formatting-detail").textContent = issue.reason;
+        el("formatting-status").textContent = "";
+        el("formatting-dialog").showModal();
+      }); td.append(accept);
+    }
     body.append(tr);
   }
   el("troubleshoot-count").textContent = troubleshootIssues.length ? (start + 1) + "–" + Math.min(start + 50, troubleshootIssues.length) + " of " + troubleshootIssues.length : "No remaining errors";
@@ -1309,6 +1322,20 @@ el("troubleshoot-back").addEventListener("click", closeTroubleshoot);
 el("troubleshoot-prev").addEventListener("click", () => { troubleshootPage--; renderTroubleshoot(); });
 el("troubleshoot-next").addEventListener("click", () => { troubleshootPage++; renderTroubleshoot(); });
 el("troubleshoot-retry").addEventListener("click", () => { closeTroubleshoot(); el("apply-primary").click(); });
+el("formatting-cancel").addEventListener("click", () => el("formatting-dialog").close());
+el("formatting-dialog").addEventListener("close", () => { pendingFormattingIssue = null; });
+el("formatting-confirm").addEventListener("click", async () => {
+  const issue = pendingFormattingIssue;
+  if (!issue) return;
+  el("formatting-confirm").disabled = true; el("formatting-cancel").disabled = true;
+  try {
+    const result = await api("/api/draft-accept-formatting", {slot: issue.slot,
+      revision: issue.current_revision ?? issue.revision, source_fingerprint: issue.source_fingerprint});
+    updateHistory(result); el("formatting-dialog").close(); await openTroubleshoot();
+    message("Formatting accepted. Apply again to update the selected destination.");
+  } catch (error) { el("formatting-status").textContent = error.message; }
+  finally { el("formatting-confirm").disabled = false; el("formatting-cancel").disabled = false; }
+});
 el("logs-download").addEventListener("click", () => {
   logUI("logs-download");
   location.href = "/api/logs/download";
@@ -1460,7 +1487,8 @@ for (const id of ["exports-close", "exports-x"])
   el(id).addEventListener("click", () => el("exports-dialog").close());
 function mergeDecisions() {
   return Object.fromEntries((mergeReview?.items || []).map(item =>
-    [item.id, mergeChoices[item.id] || (item.status === "stale" || item.status === "blocked" ? "keep" : "incoming")]));
+    [item.id, ["stale", "blocked"].includes(item.status) ? "keep" :
+      mergeChoices[item.id] || item.choice || (item.status === "conflict" ? "review" : "incoming")]));
 }
 function renderMerge() {
   if (!mergeReview) return;
@@ -1495,16 +1523,25 @@ function renderMerge() {
     resets.title = "Older saved translations fall back to English after this source change. Their CSV text is retained.";
     row.append(resets);
     const cell = document.createElement("td");
-    const check = document.createElement("input"); check.type = "checkbox";
+    const conflict = item.status === "conflict";
+    const check = document.createElement(conflict ? "select" : "input");
+    if (conflict) {
+      for (const [value, label] of [["review", "Choose a decision…"], ["keep", "Keep current"], ["incoming", "Use incoming"]])
+        check.append(new Option(label, value));
+      check.value = mergeDecisions()[item.id];
+    } else {
+      check.type = "checkbox";
+      check.checked = mergeDecisions()[item.id] === "incoming";
+    }
     check.disabled = ["stale", "blocked"].includes(item.status) || mergeApplying || mergeChecking;
-    check.checked = mergeDecisions()[item.id] === "incoming";
-    check.setAttribute("aria-label", "Include " + item.locale + " " + item.key);
+    check.setAttribute("aria-label", (conflict ? "Decision for " : "Include ") + item.locale + " " + item.key);
     check.addEventListener("change", async () => {
-      mergeChoices[item.id] = check.checked ? "incoming" : "keep";
+      const previous = mergeDecisions()[item.id];
+      mergeChoices[item.id] = conflict ? check.value : check.checked ? "incoming" : "keep";
       if (item.locale === "en_US") {
         mergeChecking = true;
         updateMergeSummary();
-        for (const input of el("merge-table").querySelectorAll("input")) input.disabled = true;
+        for (const input of el("merge-table").querySelectorAll("input, select")) input.disabled = true;
         el("merge-apply").disabled = true;
         sectionMessage("merge", "Checking translations against the selected English changes…", "busy");
         try {
@@ -1514,7 +1551,7 @@ function renderMerge() {
             if (["stale", "blocked"].includes(entry.status)) mergeChoices[entry.id] = "keep";
           sectionMessage("merge", "English dependencies checked.");
         } catch (error) {
-          mergeChoices[item.id] = check.checked ? "keep" : "incoming";
+          mergeChoices[item.id] = previous;
           message(error.message, true); sectionMessage("merge", error.message, "error");
         } finally { mergeChecking = false; renderMerge(); }
       } else {
@@ -1588,7 +1625,8 @@ el("handoff-preview").addEventListener("click", async () => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not preview this ZIP.");
     mergeReview = result;
-    mergeChoices = Object.fromEntries(Object.entries(mergeChoices).filter(([id]) => result.items.some(item => item.id === id)));
+    mergeChoices = {...(result.choices || {}),
+      ...Object.fromEntries(Object.entries(mergeChoices).filter(([id]) => result.items.some(item => item.id === id)))};
     for (const item of result.items)
       if (["stale", "blocked"].includes(item.status)) mergeChoices[item.id] = "keep";
     el("merge-button").disabled = !result.items.length;
@@ -1606,7 +1644,7 @@ el("merge-apply").addEventListener("click", async () => {
   for (const id of ["mode", "settings-button", "logs-button", "merge-back",
                     "merge-prev", "merge-next", "merge-button", "merge-clear", "merge-destination"])
     el(id).disabled = true;
-  for (const select of el("merge-table").querySelectorAll("input")) select.disabled = true;
+  for (const select of el("merge-table").querySelectorAll("input, select")) select.disabled = true;
   button.disabled = true; button.classList.add("busy-action");
   sectionMessage("merge", "Merging reviewed rows and rebuilding game XML…", "busy");
   try {

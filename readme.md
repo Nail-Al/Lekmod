@@ -38,6 +38,8 @@ If you encounter any issues during installation or gameplay, you can refer to th
 ## Contributing
 We welcome contributions to LEKMOD! If you have improvements, bugfixes, or new features to suggest, please submit a pull request. Make sure your changes are well-documented and tested. All contributions should follow the project's quality standards. Incomplete or low-quality contributions may be declined.
 
+For English text and translations, see the [localization contributor guide](localization/README.md). It covers the Lekmod Localization Editor, direct IDE editing, shared command-line tools, validation, and in-game testing.
+
 ## Known Issues & Limitations
 - **Linux Support**: While LEKMOD can be run on Linux using Proton, some features may not work as intended and some linux distributions may have compatibility issues.
 - **Mac Support**: LEKMOD does not support macOS. Users attempting to run the mod on Mac may encounter significant issues or may not be able to run it at all.

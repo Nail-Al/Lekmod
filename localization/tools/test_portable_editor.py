@@ -501,6 +501,47 @@ def main() -> int:
             apply_pending(target='all')
             assert menu_entry()['translation'] == RUSSIAN[0]
             print('Frozen 292-draft partial Apply: 291 valid rows installed, one missing token retained, Troubleshoot fixed/retried, historical Save loaded locally.')
+            # The reported translations intentionally remove repeated icons.
+            # Review, Game-only Apply and Project Apply must share the approval.
+            reported = {
+                'TXT_KEY_BUILDING_POLICE_STATION_HELP': 'Сокращает на 25% эффективность вражеских [ICON_SPY] Шпионов при краже технологий и на 50% количество [ICON_RESEARCH] Науки, которое они могут похитить.[NEWLINE][NEWLINE]В городе должна быть построена [ICON_BUILDING_CONSTABLE] Жандармерия.',
+                'TXT_KEY_GAME_OPTION_SPOILS_OF_WAR_HELP': 'Вместо получения технологии при успешном захвате города вы получаете определённое количество [ICON_RESEARCH] Науки на изучение технологии, которую обычно могли бы украсть.[NEWLINE]Это количество зависит от эпохи технологии и рассчитывается исходя из её базовой стоимости с учётом скорости игры, но без других модификаторов, таких как скидки на уже известные другим командам технологии.[NEWLINE]Если полученное количество [ICON_RESEARCH] Науки превышает базовую стоимость технологии, она открывается полностью, как при обычном захвате.[NEWLINE][NEWLINE]Доля стоимости технологии, получаемая в виде [ICON_RESEARCH] Науки в зависимости от эпохи (100% означает полное получение технологии):[NEWLINE][COLOR_POSITIVE_TEXT]Древнейший мир[ENDCOLOR] — [COLOR_POSITIVE_TEXT]Новейшее время[ENDCOLOR]: 100%[NEWLINE][COLOR_POSITIVE_TEXT]Современность[ENDCOLOR]: 90%[NEWLINE][COLOR_POSITIVE_TEXT]Эпоха атома[ENDCOLOR]: 60%[NEWLINE][COLOR_POSITIVE_TEXT]Информационная эра[ENDCOLOR]: 30%',
+            }
+            for key, text in reported.items():
+                row = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': 'RU_RU', 'category': 'all', 'q': key})))['rows'] if item['key'] == key)
+                post(base, token, '/api/draft', {'mode': 'translator', 'locale': 'RU_RU', 'key': key,
+                    'slot': row['draft_slot'], 'revision': row['draft_revision'], 'base': row['draft_base'],
+                    'source_fingerprint': row['source_fingerprint'],
+                    'edit': {'text': text, 'gender': '', 'plurality': '', 'note': '', 'identifier': ''}})
+            rejected = apply_pending(target='all')
+            assert rejected['applied_count'] == 0 and rejected['apply_issue_count'] == 2, rejected
+            issues = json.loads(get(base + '/api/apply-issues'))['issues']
+            csv_before_accept = csv_path.read_bytes()
+            for issue in issues:
+                assert issue['code'] == 'formatting' and '× 1' in issue['reason'], issue
+                post(base, token, '/api/draft-accept-formatting', {'slot': issue['slot'],
+                    'revision': issue['current_revision'], 'source_fingerprint': issue['source_fingerprint']})
+            assert csv_path.read_bytes() == csv_before_accept
+            approved_save = post(base, token, '/api/draft-checkpoint', {})['save_id']
+            accepted_game = apply_pending(target='game')
+            assert accepted_game['applied_count'] == 2 and accepted_game['apply_issue_count'] == 0, accepted_game
+            assert csv_path.read_bytes() == csv_before_accept
+            runtime = validate_runtime_xml(target.read_text(encoding='utf-8'), keys=tuple(reported))['texts']['RU_RU']
+            for key, text in reported.items():
+                assert runtime[key] == text, key
+                row = next(item for item in json.loads(get(base + '/api/rows?' + urlencode({
+                    'locale': 'RU_RU', 'category': 'all', 'q': key})))['rows'] if item['key'] == key)
+                assert row['synced_to'] == {'project': False, 'game': True}, row
+            accepted_project = apply_pending(target='project')
+            assert accepted_project['applied_count'] == 2 and accepted_project['apply_issue_count'] == 0, accepted_project
+            with csv_path.open(encoding='utf-8-sig', newline='') as handle:
+                records = {row['key']: row for row in csv.DictReader(handle)}
+            for key, text in reported.items():
+                assert records[key]['text'] == text and len(records[key]['formatting_approval']) == 64
+            post(base, token, '/api/draft-load', {'save_id': approved_save})
+            assert json.loads(get(base + '/api/meta'))['draft_count'] == 0
+            print('Frozen formatting review: both reported translations accepted exactly; Game-only and Project Apply, sync status and saved-version approval passed.', flush=True)
             # A newly created entity can go to game before project, and can be undone after Apply.
             post(base, token, '/api/preferences', {'mode': 'developer'})
             new_key = 'TXT_KEY_LLE_PORTABLE_CREATED'

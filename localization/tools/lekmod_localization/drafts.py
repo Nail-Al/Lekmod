@@ -100,9 +100,11 @@ class DraftStore:
     @classmethod
     def signature(cls, value):
         if value and value.get('mode') in ('translator', 'developer'):
+            accepted = value.get('formatting_approval', '')
             value = ({'absent': True} if value.get('delete') else
                 {'edit': value['edit'], 'absent': False, **({'source_fingerprint': value.get('source_fingerprint')}
-                 if value['mode'] == 'translator' and value['edit']['text'] else {})})
+                 if value['mode'] == 'translator' and value['edit']['text'] else {}),
+                 **({'formatting_approval': accepted} if accepted else {})})
         return cls.encode(value) or ''
 
     @staticmethod
@@ -116,6 +118,9 @@ class DraftStore:
             approved = base.get('approval')
             if approved:
                 result['source_fingerprint'] = approved.get('source_fingerprint', result.get('source_fingerprint'))
+            result.pop('formatting_approval', None)
+            if approved and approved.get('formatting_approval'):
+                result['formatting_approval'] = approved['formatting_approval']
             result['edit'] = ({'text': approved['text'], 'gender': approved.get('gender', ''),
                 'plurality': approved.get('plurality', ''), 'note': approved.get('translator_note', ''),
                 'identifier': ''} if approved else
@@ -307,6 +312,7 @@ class DraftStore:
                 issue = self.decode(row['issue'])
                 issue['draft_text'] = self.decode(row['draft'])['edit']['text']
                 issue['needs_recheck'] = row['revision'] != row['checked_revision']
+                issue['current_revision'] = row['revision']
                 result.append(issue)
             return result
 

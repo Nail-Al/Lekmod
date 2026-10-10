@@ -13,7 +13,7 @@ import zipfile
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lekmod_localization.common import CatalogError
+from lekmod_localization.common import CatalogError, formatting_approval
 from merge_translation_handoff import FIELDS, csv_records, merge_handoff
 from sync_primary_english import BEGIN, END, marked_block
 
@@ -38,7 +38,7 @@ class HandoffMergeTests(unittest.TestCase):
         self.target.parent.mkdir(parents=True)
         self.existing = {"key": "TXT_KEY_EXISTING", "source_fingerprint": "a" * 64,
                          "text": "Существующий", "gender": "", "plurality": "",
-                         "translator_note": "Team's note", "updated_at": "2026-09-27T10:00:00Z"}
+                         "translator_note": "Team's note", "updated_at": "2026-09-27T10:00:00Z", 'formatting_approval': ''}
         self.target.write_bytes(self.csv_bytes([self.existing], old_format=True))
         self.editor = self.project / "localization/workspace/editor"
         locale = self.editor / "RU_RU"
@@ -58,13 +58,13 @@ class HandoffMergeTests(unittest.TestCase):
                              "required_format_tokens": '{"[ICON_CULTURE]":1}'})
         self.new = {"key": "TXT_KEY_NEW", "source_fingerprint": "b" * 64,
                     "text": "Новый [ICON_CULTURE]", "gender": "", "plurality": "",
-                    "translator_note": "Keep the icon", "updated_at": "2026-09-28T13:48:15Z"}
+                    "translator_note": "Keep the icon", "updated_at": "2026-09-28T13:48:15Z", 'formatting_approval': ''}
         self.zip = self.project / "handoff.zip"
 
     @staticmethod
     def csv_bytes(rows, old_format=False):
         with io.StringIO(newline="") as stream:
-            fields = FIELDS[:-1] if old_format else FIELDS
+            fields = FIELDS[:-2] if old_format else FIELDS
             writer = csv.DictWriter(stream, fields, lineterminator="\n",
                                     extrasaction="ignore")
             writer.writeheader()
@@ -149,6 +149,16 @@ class HandoffMergeTests(unittest.TestCase):
                 with self.assertRaisesRegex(CatalogError, "resolve every"):
                     merge_handoff(self.zip, self.project, apply=True)
                 self.assertEqual(self.target.read_bytes(), original)
+
+    def test_formatting_approval_survives_handoff_and_never_approves_changed_text(self):
+        accepted = {**self.new, 'text': 'Новый без иконки'}
+        accepted['formatting_approval'] = formatting_approval(accepted['text'], {'[ICON_CULTURE]': 1}, 'b' * 64)
+        self.package([accepted])
+        self.assertEqual(merge_handoff(self.zip, self.project)['items'][0]['status'], 'new')
+        merge_handoff(self.zip, self.project, apply=True)
+        self.assertEqual(csv_records(self.target.read_bytes(), self.target.name)[accepted['key']], accepted)
+        self.package([{**accepted, 'text': 'Изменён без иконки'}])
+        self.assertEqual(merge_handoff(self.zip, self.project)['items'][0]['status'], 'stale')
 
     def test_note_only_conflict_is_visible_and_cannot_be_silently_replaced(self):
         """The review exposes changed notes even when translated text is identical."""

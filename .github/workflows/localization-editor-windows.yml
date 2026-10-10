@@ -2,7 +2,7 @@ name: Localization Editor for Windows
 
 on:
   push:
-    branches: [localization-infrastructure, editor-v025-workflow, editor-v026-workflow]
+    branches: [localization-infrastructure, editor-v025-workflow, editor-v026-workflow, editor-v027-workflow]
     paths:
       - "localization/**"
       - "LEKMOD/Art/**"
@@ -43,6 +43,8 @@ jobs:
         shell: pwsh
         run: |
           python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_editor_drafts.py -q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_editor_cli.py -q
       - name: Package contributor files
         shell: pwsh
         run: |
@@ -109,9 +111,9 @@ jobs:
           # Updater code is unchanged. Exercise the current release plus the
           # two legacy duplicate/lock cases on each build; keep the complete
           # historical sweep available for changes to the updater itself.
-          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.24', 'editor-v0.25')
+          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.26')
           if ($env:FULL_UPGRADE_MATRIX -eq 'true') {
-            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25')
+            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26')
           }
           foreach ($previous in $previousVersions) {
             $folder = "dist/previous-$previous"
@@ -125,7 +127,7 @@ jobs:
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration', '--test-extra-instance') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
             if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
-            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25')) { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26')) { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

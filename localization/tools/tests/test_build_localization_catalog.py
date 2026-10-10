@@ -533,6 +533,15 @@ class LocalizationCatalogTests(unittest.TestCase):
         approval["text"] = "Оборвана {1_Num}"
         with self.assertRaisesRegex(catalog_builder.CatalogError, "tokens"):
             approved_entries(catalog, ["RU_RU", "DE_DE"], {"RU_RU": {key: approval}})
+        from lekmod_localization.common import formatting_approval
+        approval['formatting_approval'] = formatting_approval(approval['text'],
+            entry['lekmod_en_US']['format_tokens'], approval['source_fingerprint'])
+        accepted, counts = approved_entries(catalog, ['RU_RU', 'DE_DE'], {'RU_RU': {key: approval}})
+        self.assertEqual(accepted['RU_RU'][key]['Text'], approval['text'])
+        self.assertEqual(counts['RU_RU'], 1)
+        approval['text'] += ' Изменено'
+        with self.assertRaisesRegex(catalog_builder.CatalogError, 'tokens'):
+            approved_entries(catalog, ['RU_RU', 'DE_DE'], {'RU_RU': {key: approval}})
 
     def test_cli_build_from_snapshot_keeps_catalog_classifications(self):
         """Offline builds preserve classifications without rereading game DB."""

@@ -1,6 +1,6 @@
 {
-  "version": "0.26",
-  "release_tag": "editor-v0.26",
+  "version": "0.27",
+  "release_tag": "editor-v0.27",
   "compatible_releases": [
     "v35.3",
     "v35.4"

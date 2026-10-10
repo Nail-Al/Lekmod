@@ -33,7 +33,8 @@ def read_approvals(path: Path) -> dict:
             with file.open(encoding="utf-8-sig", newline="") as handle:
                 reader = csv.DictReader(handle)
                 expected = ["key", "source_fingerprint", "text", "gender", "plurality", "translator_note"]
-                if reader.fieldnames not in (expected, [*expected, "updated_at"]):
+                if reader.fieldnames not in (expected, [*expected, "updated_at"],
+                                             [*expected, "updated_at", "formatting_approval"]):
                     raise CatalogError(f"invalid translation columns: {file}")
                 rows = {}
                 for row in reader:
@@ -43,10 +44,13 @@ def read_approvals(path: Path) -> dict:
                         raise CatalogError(f"invalid or repeated translation key: {file} {key}")
                     if not row["text"] or None in row or any(value is None for value in row.values()):
                         raise CatalogError(f"incomplete translation: {file} {key}")
+                    if row.get('formatting_approval') and not re.fullmatch(r'[0-9a-f]{64}', row['formatting_approval']):
+                        raise CatalogError(f"invalid formatting approval: {file} {key}")
                     rows[key] = {
                         "source_fingerprint": fingerprint,
                         "text": row["text"],
                         **{field: row[field] for field in ("gender", "plurality") if row[field]},
+                        **({'formatting_approval': row['formatting_approval']} if row.get('formatting_approval') else {}),
                     }
                 result[locale] = rows
         return result
@@ -104,10 +108,12 @@ def approved_entries(
             if not isinstance(text, str) or (not text and fallback[key]["Text"]):
                 raise CatalogError(f"empty approved translation: {locale} {key}")
             if PLACEHOLDER_RE.search(text) or (
-                not tokens_match(text, source[key]["lekmod_en_US"]["format_tokens"])
+                not tokens_match(text, source[key]["lekmod_en_US"]["format_tokens"],
+                                 approval=approval.get('formatting_approval', ''),
+                                 source_fingerprint=approval['source_fingerprint'])
             ):
                 raise CatalogError(f"invalid translation tokens: {locale} {key}")
-            if set(approval) - {"source_fingerprint", "text", "gender", "plurality"}:
+            if set(approval) - {"source_fingerprint", "text", "gender", "plurality", "formatting_approval"}:
                 raise CatalogError(f"unknown approval fields: {locale} {key}")
             fields = result[locale][key]
             fields["Text"] = text

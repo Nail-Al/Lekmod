@@ -132,7 +132,7 @@ def carry_translations(old: Path, new: Path) -> dict:
             if key not in keys: summary['archived'] += 1
             elif key not in current: current[key] = row; summary['copied'] += 1
             elif any(current[key].get(field) != row.get(field) for field in
-                     ('text', 'source_fingerprint', 'gender', 'plurality', 'translator_note')):
+                     ('text', 'source_fingerprint', 'gender', 'plurality', 'translator_note', 'formatting_approval')):
                 summary['conflicts'] += 1
         if old_rows and encoded_records(current) != original:
             writes[target] = encoded_records(current)

@@ -27,7 +27,9 @@ START = """Lekmod Localization Editor for Windows
    on the main button. Project and Game can be updated independently.
    Correct drafts apply even if other rows need review. Troubleshoot lists
    those rows and exact token/source errors. Rejected rows keep their last
-   installed Game version. Retry can still send valid Project changes to
+   installed Game version. Intentional differences can be reviewed with
+   Accept formatting; approval is bound to exact translation and English.
+   Retry can still send valid Project changes to
    Game. Search runs with Enter or its button; the X clears it.
 4. For in-game testing, connect to the Civilization V installation in
    Settings and click Find / verify game, then close Civilization V and
@@ -40,7 +42,7 @@ START = """Lekmod Localization Editor for Windows
    Settings > Vanilla reference. Keep the prefilled encrypted link, enter
    the team's password and click Download, decrypt and verify. The app
    keeps the verified local copy for future launches, without saving the
-   password. An older EN/RU-only snapshot needs this download once.
+   password.
 6. For future editor versions, use Settings > Editor updates > Check latest
    version > Download and update. The wrench button checks app files against
    the published release; Fix version repairs missing or changed app files.
@@ -54,6 +56,12 @@ START = """Lekmod Localization Editor for Windows
 
 The standalone package is a translation workspace, not an installable
 Civilization V mod. To stop the background editor, use Settings > Quit editor.
+
+Illustrated user manual:
+https://github.com/Nail-Al/Lekmod/blob/localization-infrastructure/localization/docs/LLE-manual.md
+
+IDE and terminal commands:
+https://github.com/Nail-Al/Lekmod/blob/localization-infrastructure/localization/docs/terminal-guide.md
 """
 
 

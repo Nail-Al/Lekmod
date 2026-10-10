@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -150,9 +152,24 @@ def token_difference(text: str | None, required: dict[str, int]) -> tuple[dict[s
     return missing, unexpected
 
 
-def tokens_match(text: str | None, required: dict[str, int]) -> bool:
+def formatting_approval(text: str, required: dict[str, int], source_fingerprint: str) -> str:
+    """Bind explicit formatting review to one source, key and exact translation."""
+    if not re.fullmatch(r'[0-9a-f]{64}', source_fingerprint):
+        raise CatalogError('A current English source fingerprint is required for formatting review')
+    identity = {'source_fingerprint': source_fingerprint, 'text': text, 'tokens': required}
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                    separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def tokens_match(text: str | None, required: dict[str, int], *,
+                 approval: str = '', source_fingerprint: str = '') -> bool:
     """Use the same formatting rule for drafts, builds, exports and imports."""
-    return not any(token_difference(text, required))
+    if not any(token_difference(text, required)):
+        return True
+    return bool(isinstance(text, str) and isinstance(approval, str) and isinstance(source_fingerprint, str)
+                and re.fullmatch(r'[0-9a-f]{64}', approval)
+                and re.fullmatch(r'[0-9a-f]{64}', source_fingerprint)
+                and hmac.compare_digest(approval, formatting_approval(text, required, source_fingerprint)))
 
 
 def canonical_locale(locale: str, available: list[str]) -> str:

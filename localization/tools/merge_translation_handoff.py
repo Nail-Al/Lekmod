@@ -21,21 +21,21 @@ from sync_primary_english import marked_block
 
 
 FIELDS = ("key", "source_fingerprint", "text", "gender", "plurality",
-          "translator_note", "updated_at")
-MEANING = FIELDS[:-1]  # Changing only the save timestamp is not a conflict.
+          "translator_note", "updated_at", "formatting_approval")
+MEANING = tuple(field for field in FIELDS if field != 'updated_at')
 MAX_ARCHIVE = 48 * 1024 * 1024
 MAX_CSV = 8 * 1024 * 1024
 LOCALE = re.compile(r"[A-Z]{2,8}(?:_[A-Z0-9]{2,8}){1,2}")
 
 
 def csv_records(data: bytes, name: str) -> dict[str, dict[str, str]]:
-    """Accept either tracked six-column CSVs or the editor's seven-column CSVs."""
+    """Accept legacy CSVs and source-bound explicit formatting approvals."""
     if len(data) > MAX_CSV:
         raise CatalogError(f"translation CSV is too large: {name}")
     try:
         with io.StringIO(data.decode("utf-8-sig"), newline="") as handle:
             reader = csv.DictReader(handle)
-            if reader.fieldnames not in (list(FIELDS), list(FIELDS[:-1])):
+            if reader.fieldnames not in (list(FIELDS), list(FIELDS[:-1]), list(FIELDS[:-2])):
                 raise CatalogError(f"unexpected CSV columns: {name}")
             records = {}
             for row in reader:
@@ -47,6 +47,9 @@ def csv_records(data: bytes, name: str) -> dict[str, dict[str, str]]:
                         or not row["text"]):
                     raise CatalogError(f"invalid, empty or repeated translation: {name} {key}")
                 row.setdefault("updated_at", "")
+                row.setdefault('formatting_approval', '')
+                if row['formatting_approval'] and not re.fullmatch(r'[0-9a-f]{64}', row['formatting_approval']):
+                    raise CatalogError(f'invalid formatting approval: {name} {key}')
                 records[key] = row
                 if len(records) > 20000:
                     raise CatalogError(f"too many translated keys: {name}")
@@ -134,7 +137,7 @@ def handoff_rows(archive: Path | bytes, reference: bytes) -> tuple[dict, dict]:
 
 
 def encoded_records(rows: dict[str, dict[str, str]]) -> bytes:
-    """Keep the editor's BOM and seven-column CSV format after a safe union."""
+    """Keep a stable UTF-8 CSV including reviewed formatting after a safe union."""
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=FIELDS, lineterminator="\n")
     writer.writeheader()
@@ -174,7 +177,9 @@ def merge_handoff(archive: Path | bytes, project: Path, *, apply: bool = False,
                 status = "identical"
             elif (current is None or row["source_fingerprint"] != current["source_fingerprint"]
                   or PLACEHOLDER_RE.search(row["text"]) or
-                  not tokens_match(row["text"], json.loads(current["required_format_tokens"]))):
+                  not tokens_match(row["text"], json.loads(current["required_format_tokens"]),
+                                   approval=row['formatting_approval'],
+                                   source_fingerprint=row['source_fingerprint'])):
                 status = "stale"
             else:
                 status = "conflict" if team is not None else "new"
