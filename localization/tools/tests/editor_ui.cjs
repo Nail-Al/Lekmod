@@ -12,6 +12,8 @@ const prefs = {mode:"translator",onboarded:true,locale:"RU_RU",category:"all",pr
   translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
 let connected=true, gameRunning=false, revision=0, cursor=0, checkpoint={}, savedAt="", applying=null, simulatePartial=false;
 let applyIssues=[];
+let llm={configured:false,enabled:false,has_key:false,provider:"openai",model:"",civilopedia:false};
+let finishAI=null, failAI=false, candidateRow=null;
 const mergeFixture={handoff_id:"ui-merge",locales:["en_US","RU_RU"],identical_count:0,items:[
  {id:"en_US:TXT_KEY_UI_1",locale:"en_US",key:"TXT_KEY_UI_1",status:"conflict",choice:"review",team:"Team English",incoming:"Incoming English",resets:[]},
  {id:"RU_RU:TXT_KEY_UI_1",locale:"RU_RU",key:"TXT_KEY_UI_1",status:"conflict",choice:"review",team:"Team translation",incoming:"Incoming translation",resets:[]},
@@ -41,12 +43,27 @@ function rows(developer=false){
 function metadata(){return {ready:true,project:{version:"v35.4.003"},release:"v35.4",included_source:false,
  game:connected?{path:"game",state:"installed",selected_mod:"LEKMOD_v35.4",mods:[{name:"LEKMOD_v35.4",version:"v35.4.003",release:"v35.4"}],error:""}:{path:"",state:"missing_game",mods:[],error:""},
  preferences:{...prefs},locales:{RU_RU:["menus","buildings"]},vanilla_counts:{},version_history:{upgrade_versions:[],synced:[],available:[]},
- config:{checks:{},build:{shipped:true}},editor_version:"0.26",server_instance:"ui-test",apply_state:{state:"idle"},...status()};}
+ config:{checks:{},build:{shipped:true}},llm:{...llm},editor_version:"0.26",server_instance:"ui-test",apply_state:{state:"idle"},...status()};}
 async function response(url,options={}){
  const u=new URL(url,"http://localhost/"), body=options.body?JSON.parse(options.body):{};
  requests.push({path:u.pathname,body,query:u.searchParams.get("q")});
  let result={};
  if(u.pathname==="/api/meta")result=metadata();
+ else if(u.pathname==="/api/llm-settings"){
+  llm=body.disconnect?{configured:false,enabled:false,has_key:false,provider:"openai",model:""}:
+   {configured:true,enabled:true,has_key:true,provider:body.provider,model:body.model,civilopedia:false};
+  result={llm:{...llm}};
+ } else if(u.pathname==="/api/llm-models")result={models:[{id:"fixture-model",label:"Fixture model"}]};
+ else if(u.pathname==="/api/llm-translate"){
+  if(failAI)return {ok:false,json:async()=>({error:"Service HTTP 429. Check the account credit/rate limit, then retry."})};
+  candidateRow=body.key;
+  await new Promise(resolve=>{finishAI=resolve;});finishAI=null;
+  result={candidate_id:"fixture-candidate",translation:"ИИ перевод",model:"fixture-model",provider:"openai",warnings:[],sources:[]};
+ } else if(u.pathname==="/api/llm-use"){
+  const edit={...blank(),text:"ИИ перевод"},before={...(values[candidateRow]||blank())};values[candidateRow]=edit;
+  history.splice(cursor);history.push({key:candidateRow,before,after:edit});cursor=history.length;revision++;
+  result={edit,entry:{slot:"T:RU_RU:"+candidateRow,revision,payload:{edit,base:{approval:null}}},...status()};
+ }
  else if(u.pathname==="/api/preferences"){Object.assign(prefs,body);result={preferences:{...prefs}};}
  else if(u.pathname==="/api/rows"||u.pathname==="/api/primary"){
   const all=rows(u.pathname==="/api/primary"),q=u.searchParams.get("q")||"";
@@ -234,7 +251,37 @@ async function wait(fn,label){
  w.editorReflectDraft(renamed,{...blank(),identifier:"TXT_KEY_NEW",text:"English"},
   {entry:{slot:"P:0:TXT_KEY_OLD",revision:1,payload:{mode:"developer",edit:{...blank(),identifier:"TXT_KEY_NEW",text:"English"}}}}, {mode:"developer"});
  assert.equal(renamed.synced_to.game,false,"A renamed entity cannot match the old game's key");
+ assert(e("ai-translate").hidden);assert.equal(d.querySelectorAll("td .ai-translate").length,0);
+ // AI controls appear only after an explicit connection and only on empty Translator rows.
+ e("mode").click();await wait(()=>e("mode-name").textContent==="Translator"&&e("table-loading").hidden,"Translator for AI");
+ e("settings-button").click();await wait(()=>e("settings-dialog").open,"AI settings");
+ e("llm-enabled").checked=true;e("llm-api-key").value="fixture-private-key";e("llm-model").value="fixture-model";
+ e("llm-check").click();await wait(()=>e("llm-models").children.length===1,"account model list");
+ e("llm-save").click();await wait(()=>llm.configured&&!e("llm-save").disabled,"save AI connection");
+ assert.equal(e("llm-api-key").value,"");e("settings-close").click();
+ for(const key of keys)delete values[key];await w.editorRefresh();
+ e("category").value="all";e("category").dispatchEvent(new w.Event("change",{bubbles:true}));e("search-clear").click();
+ await wait(()=>w.currentRows?.length===4&&e("table-loading").hidden,"empty AI rows");
+ assert.equal(d.querySelectorAll("td .ai-translate").length,4);
+ select(0);assert(!e("ai-translate").hidden);e("ai-translate").click();
+ await wait(()=>finishAI,"AI request pending");assert(e("ai-translate").disabled);
+ input("Ручная правка");assert(e("ai-translate").hidden);finishAI();
+ await wait(()=>e("ai-result-dialog").open,"late result kept separately");
+ assert.equal(e("translation").value,"Ручная правка");assert.equal(e("ai-result-text").value,"ИИ перевод");
+ assert(!requests.some(x=>x.path==="/api/llm-use"),"Late answer cannot overwrite manual text");
+ e("ai-result-close").click();await wait(()=>values[keys[0]]?.text==="Ручная правка","manual autosave");
+ d.querySelectorAll("td .ai-translate")[0].click();await wait(()=>finishAI,"table wand requests AI");finishAI();
+ await wait(()=>values[keys[1]]?.text==="ИИ перевод"&&e("translation").value==="ИИ перевод","AI local draft inserted");
+ assert(e("ai-translate").hidden);assert.equal(d.querySelectorAll("td .ai-translate").length,2);
+ select(2);failAI=true;e("ai-translate").click();
+ await wait(()=>e("ai-row-status").textContent.includes("429")&&!e("ai-translate").disabled,"AI account error");
+ assert.equal(e("translation").value,"");failAI=false;
+ e("mode").click();await wait(()=>e("mode-name").textContent==="Developer"&&e("table-loading").hidden,"Developer hides AI");
+ assert(e("ai-translate").hidden);assert.equal(d.querySelectorAll("td .ai-translate").length,0);
+ e("settings-button").click();await wait(()=>e("settings-dialog").open,"disconnect settings");
+ e("llm-disconnect").click();await wait(()=>!llm.configured&&!e("llm-save").disabled,"disconnect AI");
+ assert(!JSON.stringify(llm).includes("fixture-private-key"));
  assert.deepEqual(errors,[]);
  dom.window.close();
- console.log("Editor UI: Search/Enter/clear, Save/history, partial Apply/Troubleshoot, formatting acceptance, autosave, undo/redo, explicit Merge decisions and split actions passed.");
+ console.log("Editor UI: Search, Save/history, Apply/Troubleshoot, Merge, AI settings, both wands, late-response/manual-edit protection, provider errors and mode visibility passed.");
 })().catch(error=>{console.error(error);process.exit(1);});

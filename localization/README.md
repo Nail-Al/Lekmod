@@ -2,6 +2,8 @@
 
 LLE is a local editor for Lekmod English and translations. It provides source comparison, drafts and Save history, reviewed ZIP handoffs, Merge, validation and separate Apply actions for Project and an installed Civilization V game. Developers can use the same services from an IDE/terminal.
 
+Optional AI translation uses your own OpenAI or Anthropic API account to draft empty Translator rows with language, game-token and reference context.
+
 Players only need the mod: the game reads generated language sections in `LEKMOD/Override/CIV5Units_Mongol.xml` using its language settings.
 
 ## Documentation

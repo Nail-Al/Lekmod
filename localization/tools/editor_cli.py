@@ -6,6 +6,8 @@ import argparse
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import json
+import getpass
+import os
 from pathlib import Path
 import sys
 import time
@@ -92,6 +94,18 @@ def save_form(editor, args) -> dict:
 
 def execute(editor, args) -> dict:
     action = args.action
+    if action in ('ai-context', 'ai-translate'):
+        row = editor.ai_row({'locale': args.locale, 'key': args.key}, check_identity=False)
+        identity = {'locale': args.locale, 'key': args.key, 'revision': row['draft_revision'],
+                    'source_fingerprint': row['source_fingerprint']}
+        if action == 'ai-context':
+            return editor.ai_context(identity)['context']
+        candidate = editor.ai_generate(identity)
+        if args.preview:
+            return {key: value for key, value in candidate.items() if key != 'candidate_id'}
+        result = editor.ai_use({'candidate_id': candidate['candidate_id']})
+        return {**result, 'provider': candidate['provider'], 'model': candidate['model'],
+                'next': 'Review the local draft, then Save / Apply when ready'}
     if action == 'status':
         return {'project': str(REPO_ROOT), **editor.drafts.status()}
     if action == 'rows':
@@ -158,6 +172,24 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest='action', required=True)
     for name in ('status', 'drafts', 'save', 'saves', 'restore', 'undo', 'redo', 'issues'):
         commands.add_parser(name)
+    commands.add_parser('ai-status', help='Show AI settings without the API key')
+    commands.add_parser('ai-disconnect', help='Forget the saved API key')
+    ai_config = commands.add_parser('ai-configure', help='Configure the same private AI connection as LLE')
+    ai_config.add_argument('--provider', choices=('openai', 'anthropic'))
+    ai_config.add_argument('--model')
+    key_input = ai_config.add_mutually_exclusive_group()
+    key_input.add_argument('--key-env', help='Name of an environment variable containing the key')
+    key_input.add_argument('--prompt-key', action='store_true', help='Read the key using a hidden terminal prompt')
+    ai_config.add_argument('--instructions-file', type=Path)
+    ai_config.add_argument('--max-output-tokens', type=int)
+    ai_config.add_argument('--no-civilopedia', action='store_true')
+    ai_config.add_argument('--disable', action='store_true', help='Keep settings/key but hide AI actions')
+    commands.add_parser('ai-models', help='List models using the saved connection without generating text')
+    for action in ('ai-context', 'ai-translate'):
+        ai = commands.add_parser(action)
+        ai.add_argument('--locale', required=True); ai.add_argument('--key', required=True)
+        if action == 'ai-translate':
+            ai.add_argument('--preview', action='store_true', help='Print a generated candidate without saving a draft')
     rows = commands.add_parser('rows'); rows.add_argument('--locale'); rows.add_argument('--search', default='')
     rows.add_argument('--category', default='all')
     draft = commands.add_parser('draft'); draft.add_argument('--key', required=True); draft.add_argument('--locale')
@@ -190,6 +222,29 @@ def main(argv: list[str] | None = None) -> int:
             raise CatalogError('Close the LLE session for this checkout before using editor_cli.py; direct IDE edits remain available')
         if args.action == 'accept-project-formatting':
             output = accept_project_formatting(args.locale, args.key)
+        elif args.action in ('ai-status', 'ai-configure', 'ai-disconnect', 'ai-models'):
+            from editor_server import APP_HOME
+            from lekmod_localization.llm_translation import LLMConnection
+            connection = LLMConnection(APP_HOME / 'localization/workspace')
+            if args.action == 'ai-status':
+                output = connection.status()
+            elif args.action == 'ai-disconnect':
+                output = connection.configure({'disconnect': True})
+            elif args.action == 'ai-models':
+                output = connection.models({})
+            else:
+                values = {key: getattr(args, key) for key in ('provider', 'model', 'max_output_tokens')
+                          if getattr(args, key) is not None}
+                values.update(enabled=not args.disable, civilopedia=not args.no_civilopedia)
+                if args.key_env:
+                    if not os.environ.get(args.key_env):
+                        raise CatalogError('The selected API key environment variable is empty')
+                    values['api_key'] = os.environ[args.key_env]
+                elif args.prompt_key:
+                    values['api_key'] = getpass.getpass('API key (hidden): ')
+                if args.instructions_file:
+                    values['instructions'] = args.instructions_file.read_text(encoding='utf-8-sig')
+                output = connection.configure(values)
         else:
             preferences = {'mode': 'developer', 'project_path': str(REPO_ROOT),
                            'game_path': str(args.game_folder.resolve()) if args.game_folder else ''}

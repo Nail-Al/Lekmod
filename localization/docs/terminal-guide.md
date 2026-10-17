@@ -9,6 +9,7 @@ Use this guide from a complete compatible checkout. Canonical English and transl
 - [Prepare and open the editor](#prepare-and-open-the-editor)
 - [Workflow and canonical files](#workflow-and-canonical-files)
 - [Use the shared local workflow](#use-the-shared-local-workflow)
+- [Use your own AI from the terminal](#use-your-own-ai-from-the-terminal)
 - [Review intentional formatting](#review-intentional-formatting)
 - [Exchange and merge handoffs](#exchange-and-merge-handoffs)
 - [Application maintenance and reference operations](#application-maintenance-and-reference-operations)
@@ -149,6 +150,44 @@ python -B localization/tools/manage.py diagnose-game --game-folder "C:\Games\Ste
 ```
 
 Game/All require one matching installed Lekmod copy and a closed Civilization V process. Game-only Apply builds the working version without updating canonical Project inputs; All applies Project first, then Game. Installed XML is backed up. A late Game error can leave Project already updated; inspect each destination's status. Diagnostics read localization/cache without deleting the cache. The game engine itself must be tested separately.
+
+## Use your own AI from the terminal
+
+These commands use the same provider adapter, context builder, token warnings and revision-checked local draft service as the browser. Close the LLE session for this checkout before running `editor_cli.py`. A separate portable application's private connection is not automatically imported into a source checkout.
+
+Configure a provider using a hidden prompt; never put an API key in a command argument, committed file or example script:
+
+```sh
+python -B localization/tools/editor_cli.py ai-configure --provider openai --prompt-key --disable
+python -B localization/tools/editor_cli.py ai-models
+python -B localization/tools/editor_cli.py ai-configure --model YOUR_TEXT_MODEL_ID
+# Alternative provider:
+python -B localization/tools/editor_cli.py ai-configure --provider anthropic --model YOUR_CLAUDE_MODEL_ID --prompt-key
+python -B localization/tools/editor_cli.py ai-status
+python -B localization/tools/editor_cli.py ai-models
+```
+
+The initial `--disable` saves the key so you can list models before choosing one. The following `ai-configure --model` enables the connection. `--key-env OPENAI_API_KEY` (or `--key-env ANTHROPIC_API_KEY`) reads an already-set environment variable by name instead of prompting. Load it through your normal secret handling. Status/model-list output omits the key. Leave off both key options when updating the same provider's saved connection. To change providers, supply its key. Available model IDs and permissions depend on the API account; use a text model with native structured JSON output.
+
+```sh
+# Inspect the row context locally; no provider or Civilopedia request:
+python -B localization/tools/editor_cli.py ai-context --locale RU_RU --key TXT_KEY_BUILDING_POLICE_STATION_HELP
+# Make one billable generation, print it, leave drafts unchanged:
+python -B localization/tools/editor_cli.py ai-translate --locale RU_RU --key TXT_KEY_BUILDING_POLICE_STATION_HELP --preview
+# Make one billable generation and save its result as an ordinary local draft:
+python -B localization/tools/editor_cli.py ai-translate --locale RU_RU --key TXT_KEY_BUILDING_POLICE_STATION_HELP
+python -B localization/tools/editor_cli.py drafts
+python -B localization/tools/editor_cli.py save
+python -B localization/tools/editor_cli.py apply --target project
+```
+
+Preview and normal generation are separate requests; normal generation does not reuse a previous preview. Review/edit a draft before Apply using the existing `draft --text-file` workflow. An already filled row, changed source/revision or source conflict is rejected. AI never applies files or grants formatting approval. Undo, Save history, formatting review and all Apply checks work as for manually entered text.
+
+Optional configuration flags: `--instructions-file preferences.txt` (UTF-8, up to 4000 characters), `--max-output-tokens 16384`, `--no-civilopedia` and `--disable`. Explicit configuration enables AI unless `--disable` is supplied; `--no-civilopedia` opts out of reference fetching for that configuration. Run `ai-disconnect` to delete the saved key. No custom endpoints are accepted; keys go only to the selected provider's fixed HTTPS API.
+
+The connected verified snapshot supplies official term pairs; successful Civilopedia (Civ5) lookups supply bounded excerpts. The result lists the references actually supplied and any lookup failures. References/notes in context are data, not instructions. Full snapshots and keys stay out of handoffs. See the [illustrated AI manual](LLE-manual.md#draft-a-translation-with-your-own-ai) for data sent, credential storage, error handling and late-result behavior.
+
+The shared implementation is `lekmod_localization/llm_translation.py`; `Editor.ai_context`, `Editor.ai_generate` and `Editor.ai_use` provide the project-aware service. The localhost UI routes are POST `/api/llm-settings`, `/api/llm-models`, `/api/llm-translate`, `/api/llm-use`, protected by the existing same-origin/token checks. Generation returns a short-lived candidate; insertion rechecks the empty row and draft revision. API keys appear only in explicit settings/model-check POST input and the private connection file, never metadata, prompts or normal event logs. For automation, prefer the CLI over persisting an editor's session token.
 
 ## Review intentional formatting
 

@@ -5,11 +5,13 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import editor_cli
+import manage
 import test_editor_drafts as fixtures
 from lekmod_localization.common import CatalogError
 
@@ -98,6 +100,15 @@ class EditorCLITests(unittest.TestCase):
         with patch('editor_server.Editor', return_value=self.editor), redirect_stdout(output):
             self.assertEqual(editor_cli.main(['status']), 0)
         self.assertEqual(json.loads(output.getvalue())['draft_count'], 0)
+
+    def test_child_preparation_reports_follow_the_cli_stdout_redirect(self):
+        # Exercise an actual subprocess: Python-only mocks missed fd 1 leaking
+        # into redirected JSON output in real checkout commands.
+        with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as reports:
+            with redirect_stdout(reports):
+                manage.run('-c', "print('preparation report')")
+            reports.seek(0)
+            self.assertEqual(reports.read(), 'preparation report\n')
 
 
 if __name__ == '__main__':

@@ -52,7 +52,9 @@ def read_config(path: Path = CONFIG) -> dict[str, dict[str, bool]]:
 def run(*args: str) -> None:
     """Run one tool from the repository root and stop on failure."""
     if not getattr(sys, "frozen", False):
-        subprocess.run([sys.executable, "-B", *args], cwd=REPO_ROOT, check=True)
+        # Respect the CLI's redirect_stdout(stderr) for preparation reports;
+        # inheriting fd 1 would mix child output into its JSON response.
+        subprocess.run([sys.executable, "-B", *args], cwd=REPO_ROOT, check=True, stdout=sys.stdout)
         return
     # sys.executable is the editor itself in a frozen build. Dispatch inside
     # the embedded interpreter so it cannot recursively start another editor.

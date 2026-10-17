@@ -148,6 +148,19 @@ def main() -> int:
             assert health["editor_version"] == meta["editor_version"]
             assert health["server_instance"] == meta["server_instance"]
             assert not meta["ready"] and not meta["locales"]
+            assert not meta['llm']['configured']
+            # Exercise the frozen module and current-user DPAPI with a fake key;
+            # no provider request or paid translation is made by this smoke test.
+            fake_key = 'lle-portable-smoke-not-a-provider-key'
+            configured = post(base, token, '/api/llm-settings', {'enabled': True,
+                'provider': 'openai', 'model': 'fixture-model', 'api_key': fake_key})
+            assert configured['llm']['configured']
+            assert fake_key not in json.dumps(configured)
+            secret_file = root / 'localization/workspace/llm-connection.json'
+            assert fake_key.encode() not in secret_file.read_bytes()
+            assert json.loads(get(base + '/api/meta'))['llm']['configured']
+            post(base, token, '/api/llm-settings', {'disconnect': True})
+            assert not secret_file.exists()
             initial_html = get(base + "/")
             assert b'id="snapshot-encrypt"' in initial_html
             assert initial_html.index(b'id="identifier"') < initial_html.index(b'id="translation"')

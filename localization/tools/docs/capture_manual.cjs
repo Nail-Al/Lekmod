@@ -25,6 +25,7 @@ const preferences={mode:"translator",onboarded:true,locale:"RU_RU",category:"all
  project_path:"C:\\Projects\\Lekmod",game_path:"C:\\Games\\Steam\\steamapps\\common\\Sid Meier's Civilization V",snapshot_url:"https://example.invalid/team-vanilla.enc",
  apply_target:"",translator_sync_column:"auto",developer_sync_column:"auto",developer_status_column:"auto"};
 let revision=0,issues=[],saves=[],pending={},applied=false;
+let llm={enabled:false,configured:false,has_key:false,provider:"openai",model:"",civilopedia:true};
 function status(){return {draft_count:Object.keys(pending).length,draft_undo_available:revision>0,draft_redo_available:false,
  saved_version_count:saves.length,checkpoint_saved_at:saves[0]?.saved_at||"",checkpoint_dirty:!!Object.keys(pending).length,apply_issue_count:issues.length};}
 function game(){return {path:preferences.game_path,state:"installed",selected_mod:"LEKMOD_v35.4",mods:[{name:"LEKMOD_v35.4",version:"v35.4.003",release:"v35.4"}],error:""};}
@@ -48,9 +49,21 @@ const merge={locales:["en_US","RU_RU"],identical_count:12,choices:{},items:[
 ]};
 function metadata(){return {ready:true,project:{version:"v35.4.003"},release:"v35.4",included_source:false,game:game(),preferences:{...preferences},
  locales:{RU_RU:["buildings","improvements","menus"],DE_DE:["buildings","menus"]},vanilla_counts:{},snapshot_error:"",version_history:{available:["v35.3","v35.4"],synced:["v35.4"],upgrade_versions:[]},
- config:{build:{shipped:true},checks:{}},editor_version:"0.27",server_instance:"manual-demo",apply_state:{state:"idle"},...status()};}
+ config:{build:{shipped:true},checks:{}},llm:{...llm},editor_version:"0.28",server_instance:"manual-demo",apply_state:{state:"idle"},...status()};}
 async function api(url,body){const pathname=url.pathname;
  if(pathname==="/api/meta")return metadata();
+ if(pathname==="/api/llm-settings"){
+  llm={enabled:body.enabled,configured:body.enabled,has_key:true,provider:body.provider,model:body.model,
+   instructions:body.instructions,civilopedia:body.civilopedia,max_output_tokens:body.max_output_tokens,key_storage:"Windows user encryption"};
+  return {llm:{...llm}};
+ }
+ if(pathname==="/api/llm-translate")return {candidate_id:"manual-demo-candidate",provider:llm.provider,model:llm.model,
+  translation:"Торговля с {1_CityName} приносит [ICON_GOLD] Золото.",warnings:[],sources:[{name:"Demonstration reference context",kind:"project"}]};
+ if(pathname==="/api/llm-use"){
+  const key=samples[3].key,edit={...empty(),text:"Торговля с {1_CityName} приносит [ICON_GOLD] Золото."};
+  const payload={mode:"translator",locale:"RU_RU",key,edit,base:{approval:null},source_fingerprint:fingerprint};
+  pending[key]=payload;revision++;return {edit,entry:{slot:"T:RU_RU:"+key,revision,payload},...status()};
+ }
  if(pathname==="/api/preferences"){Object.assign(preferences,body);return {preferences:{...preferences}};}
  if(pathname==="/api/rows"||pathname==="/api/primary"){
   const query=url.searchParams.get("q")||"",category=url.searchParams.get("category")||"all";
@@ -78,7 +91,7 @@ async function api(url,body){const pathname=url.pathname;
  }
  if(pathname==="/api/handoff-choices")return {choices:body.choices};
  if(pathname==="/api/versions")return {versions:[{version:"v35.4",supported:true,date:"2026-09-01"},{version:"v35.3",supported:true,date:"2026-07-01"}],warning:""};
- if(pathname==="/api/editor-latest")return {current:"0.27",latest:"0.27",available:false};
+ if(pathname==="/api/editor-latest")return {current:"0.28",latest:"0.28",available:false};
  if(pathname==="/api/game-process")return {processes:[]};
  if(pathname==="/api/game-status")return game();
  if(pathname==="/api/download-status")return {state:"idle"};
@@ -120,7 +133,21 @@ async function main(){
   await capture("02-settings-game",".settings-group:nth-child(2)");
   await page.locator("#vanilla-details > summary").click();await capture("03-settings-reference",".settings-group:nth-child(3)");
   await capture("15-editor-updates",".editor-update-group");
+  await page.locator("#llm-details > summary").click();
+  await page.check("#llm-enabled");await page.fill("#llm-api-key","demonstration-not-a-real-api-key");
+  await page.fill("#llm-model","your-text-model-id");
+  await page.fill("#llm-instructions","Use the team's established terminology. Keep all game tokens unchanged.");
+  await page.click("#llm-save");await page.locator("#llm-status").filter({hasText:"AI connection saved"}).waitFor();
+  await capture("16-ai-settings","#llm-details");
   await page.click("#settings-close");
+  await page.locator("#table tbody tr").filter({hasText:samples[3].key}).click();
+  await page.setViewportSize({width:1440,height:1480});await capture("17-ai-empty-row");
+  await page.click("#ai-translate");await page.locator("#draft-state").filter({hasText:"review before Apply"}).waitFor();
+  await capture("18-ai-draft");await page.setViewportSize({width:1440,height:1280});
+  // Each scenario starts from its documented baseline; AI demo drafts must
+  // not trigger the separate pending-work confirmation in the Merge scenario.
+  delete pending[samples[3].key];revision=0;
+  await page.reload();await ready();
   await page.locator("#table tbody tr").first().click();await page.setViewportSize({width:1440,height:1480});
   await capture("04-translator");await page.setViewportSize({width:1440,height:1280});
   await page.click("#filters-button");await page.selectOption("#filter-status","missing");await page.check("#filter-needs");
@@ -150,7 +177,7 @@ async function main(){
   await page.locator("#troubleshoot-table tbody tr").waitFor();await page.setViewportSize({width:1440,height:860});await capture("12-troubleshoot");
   await page.getByRole("button",{name:"Accept formatting",exact:true}).click();await capture("13-accept-formatting","#formatting-dialog");
   assert(applied,"Apply demonstration did not run");assert.deepEqual(errors,[],"Documentation capture encountered UI errors");
-  console.log("Captured 16 screenshots from the actual LLE interface using labelled demonstration data.");
+  console.log("Captured 19 screenshots from the actual LLE interface using labelled demonstration data, including simulated AI responses.");
  }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

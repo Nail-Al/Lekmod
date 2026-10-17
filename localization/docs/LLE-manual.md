@@ -12,6 +12,7 @@ Screenshots show the actual LLE interface with **demonstration data**, example W
 - [Connect source, game and reference](#connect-source-game-and-reference)
 - [Choose Translator or Developer](#choose-translator-or-developer)
 - [Translate a row](#translate-a-row)
+- [Draft a translation with your own AI](#draft-a-translation-with-your-own-ai)
 - [Find rows and arrange the table](#find-rows-and-arrange-the-table)
 - [Autosave, Save and recovery](#autosave-save-and-recovery)
 - [Apply to Project, Game or both](#apply-to-project-game-or-both)
@@ -143,6 +144,58 @@ Character counts help compare length; they do not impose a maximum. **Fill the e
 | `applied` | Project translation is included in generated runtime XML. |
 | `saved` | Translation is saved in CSV while shipped-XML generation is Off. |
 | `needs_source_review` | Resolve conflicting English before applying a translation. |
+
+## Draft a translation with your own AI
+
+AI translation is optional. LLE connects to your **OpenAI / GPT** or **Anthropic / Claude API account**; requests use that account's API billing and model access. A consumer chat subscription does not supply an LLE API connection.
+
+### Connect a provider
+
+1. Open **Settings → AI translation** and check **Enable AI translation**.
+2. Choose the provider and enter its **API key**. Use **Check key / list models** to check access and populate the **Model ID** suggestions. This action lists models without requesting a translation.
+3. Choose a text model that supports structured JSON output, or enter its exact API model ID. LLE does not guess a model or silently switch providers when a request fails.
+4. Leave **Maximum output tokens** at 8192 initially; increase it if a long row is truncated. This is an output limit, not a price estimate.
+5. Leave **Use relevant Civilopedia (Civ5) page excerpts when available** checked to request supporting reference text. Optional **Additional translation preferences** supply your team's style guidance.
+6. Click **Save AI connection**. It takes effect immediately; **Save connections** is for the separate source/game connections. The password box clears after saving; leaving it blank preserves the saved key for the same provider. Changing providers requires that provider's key.
+
+![AI Settings with a saved demonstration connection, model ID and terminology preferences](images/16-ai-settings.png)
+
+*The model ID is a placeholder. Choose a model your own API account can use.*
+
+The key is stored separately from browser preferences and project CSVs, in this application's private workspace. Windows encrypts it for the current Windows user; source runs on other systems use a local file with owner-only permissions. The key is not returned by the metadata API or included in handoffs, generated XML or normal logs. **Disconnect / forget key** deletes it and hides AI actions. Clear **Enable AI translation** and save to disable actions while retaining the connection. Separate application folders/checkouts have separate connections.
+
+### Generate and review a row
+
+1. Use **Translator** and select the target **Language**. Find a row whose **My translation** is empty.
+2. Click the small **magic wand** in the top-right of that table cell, or select the row and click the same icon inside **My translation text**. Both buttons run the same operation. They appear only when AI is enabled and the row has an unambiguous English source. A filled row, Developer mode or a disconnected provider hides the action. Turning off **Prefill** does not make an already translated row eligible.
+3. Wait for the request. Only one AI generation runs at a time in an LLE session. Failed requests are not automatically retried.
+4. The result fills **My translation** and is saved as a **local draft**. Read the reference/status message below the text field. Review meaning, terminology, numbers, tokens, grammar and length; edit as needed. Use Undo, Save and Apply as with any other draft.
+
+![Empty Translator cell and selected text field with matching magic-wand actions](images/17-ai-empty-row.png)
+
+![Demonstration AI result inserted and saved locally for review before Apply](images/18-ai-draft.png)
+
+*These screenshots use a simulated response, not a live model or a verified translation.*
+
+Generation alone does not Apply to the project/game or approve formatting differences. Missing/extra tokens and text over 110% of the visible English length produce review warnings; normal Apply validation still runs. If you edit the selected form while waiting, the generated text opens separately for copying. If another view, IDE edit or changed English makes the row stale, insertion is rejected and the candidate remains available for manual review. Your existing text is preserved.
+
+### What is sent and where terminology comes from
+
+Each generation sends the selected key, target language, full current English, required token counts, category, English grammar, translator note and bounded related rows. It also sends the configured style preferences, relevant official term pairs and comparison excerpts from the **verified connected Vanilla reference**, plus supporting Civilopedia excerpts when successfully retrieved. It does not upload the full snapshot, project, game installation or other languages' catalogs. Reference excerpts are shared with the selected API provider when you click the wand; only send reference text you are permitted to share.
+
+For Russian, reviewed project terminology includes **Refrigeration → Криогеника**. Related target-language drafts are not treated as approved terms. The optional Civilopedia lookup accepts Civilization V pages, caches successful excerpts locally for seven days and failed lookups for one hour. If no title is found, the site is blocked, or the request fails, the status explicitly says the reference is unavailable and generation proceeds using the supplied local context. A link in a prompt is not treated as a visited source. AI can still mistranslate: the references guide the request and do not replace review.
+
+| Problem | Action |
+| --- | --- |
+| No wand | Check Translator mode, enabled AI connection, empty saved translation and absence of an English source conflict. |
+| HTTP 401 / 403 | Check the selected provider, key and API account permissions. |
+| HTTP 404 / 400 | Check the exact model ID and structured-output support. Model-list access alone does not guarantee generation support. |
+| HTTP 429 | Check API credit and rate limits, then retry manually. |
+| Timeout / incomplete response | Check the connection; increase output tokens for long rows or choose a suitable model. No partial translation is inserted. |
+| Connection changed / row changed | Review the current row and settings, then retry or copy the preserved candidate. |
+| Key cannot be read after moving LLE | Enter it again under the current Windows user. |
+
+The [terminal guide](terminal-guide.md#use-your-own-ai-from-the-terminal) provides the same context, generation and local-draft workflow for IDE users.
 
 ## Find rows and arrange the table
 

@@ -10,7 +10,12 @@ const fs=require("node:fs"),path=require("node:path"),assert=require("node:asser
    .replace(/<script[^>]*src="\/app\.js"[^>]*><\/script>/g,"");
   for(const width of [1440,1280,768,375,280]){
    await page.setViewportSize({width,height:900});await page.setContent(html);
-   await page.evaluate(()=>{document.querySelector('#workspace').hidden=false;document.querySelector('#app-loading').hidden=true;});
+   await page.evaluate(()=>{
+    document.querySelector('#workspace').hidden=false;document.querySelector('#app-loading').hidden=true;
+    document.querySelector('#row-panel').open=true;
+    document.querySelector('#ai-translate').hidden=false;
+    document.querySelector('#table tbody').innerHTML='<tr><td class="ai-cell" style="width:245px"><button type="button" class="ai-translate" aria-label="Translate with AI">✧</button></td></tr>';
+   });
    await page.locator("#search-input").fill("TXT_KEY_BUILDING_POLICE_STATION_HELP");
    await page.locator("#search-clear").evaluate(button=>button.disabled=false);
    const rectangles=await page.evaluate(()=>Object.fromEntries([".search-box","#search-clear","#search-submit"].map(selector=>{
@@ -22,7 +27,12 @@ const fs=require("node:fs"),path=require("node:path"),assert=require("node:asser
     `Clear control protrudes at ${width}px: ${JSON.stringify(rectangles)}`);
    assert(clear.right<submit.left,"Clear control overlaps the Search button");
    assert.equal(box.height,38);assert.equal(clear.height,27);
+   for(const [container,control] of [[".translation-input","#ai-translate"],["td.ai-cell","td .ai-translate"]]){
+    const outer=await page.locator(container).boundingBox(),inner=await page.locator(control).boundingBox();
+    assert(inner.x>=outer.x&&inner.x+inner.width<=outer.x+outer.width&&inner.y>=outer.y&&inner.y+inner.height<=outer.y+outer.height,
+     `AI control protrudes from ${container} at ${width}px: ${JSON.stringify({outer,inner})}`);
+   }
   }
-  console.log("Search geometry passed in Chromium at 1440, 1280, 768, 375 and 280px.");
+  console.log("Search and both AI control bounds passed in Chromium at 1440, 1280, 768, 375 and 280px.");
  } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});

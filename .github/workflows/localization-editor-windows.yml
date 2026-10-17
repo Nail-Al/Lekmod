@@ -38,6 +38,10 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install "pyinstaller==6.22.3" "cryptography>=45,<47"
+          python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_llm_translation.py -q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -B -W error::ResourceWarning -m unittest discover -s localization/tools/tests -p test_editor_ai.py -q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name LekmodLocalizationEditor --paths localization/tools --add-data "localization/editor/favicon.svg;." --add-data "localization/reference/lekmod-versions.json.gz;." --add-data "localization/reference/vanilla-fingerprints.json.gz;." localization/tools/editor_main.py
       - name: Regression test fast local drafts and batch Apply on Windows
         shell: pwsh
@@ -111,9 +115,9 @@ jobs:
           # Updater code is unchanged. Exercise the current release plus the
           # two legacy duplicate/lock cases on each build; keep the complete
           # historical sweep available for changes to the updater itself.
-          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.26')
+          $previousVersions = @('editor-v0.17', 'editor-v0.19', 'editor-v0.27')
           if ($env:FULL_UPGRADE_MATRIX -eq 'true') {
-            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26')
+            $previousVersions = @('editor-v0.11', 'editor-v0.12', 'editor-v0.13', 'editor-v0.14', 'editor-v0.15', 'editor-v0.16', 'editor-v0.17', 'editor-v0.18', 'editor-v0.19', 'editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26', 'editor-v0.27')
           }
           foreach ($previous in $previousVersions) {
             $folder = "dist/previous-$previous"
@@ -127,7 +131,7 @@ jobs:
             if ($previous -eq 'editor-v0.17') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-reference-migration', '--test-extra-instance') }
             if ($previous -eq 'editor-v0.18') { $upgradeArgs += @('--test-repair', '--connected-project') }
             if ($previous -eq 'editor-v0.19') { $upgradeArgs += @('--test-repair', '--connected-project', '--test-extra-instance') }
-            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26')) { $upgradeArgs += @('--test-repair', '--connected-project') }
+            if ($previous -in @('editor-v0.20', 'editor-v0.21', 'editor-v0.22', 'editor-v0.23', 'editor-v0.24', 'editor-v0.25', 'editor-v0.26', 'editor-v0.27')) { $upgradeArgs += @('--test-repair', '--connected-project') }
             python -B localization/tools/test_editor_upgrade_online.py @upgradeArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

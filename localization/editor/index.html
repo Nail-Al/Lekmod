@@ -20,6 +20,20 @@
     button.primary { color: #fff; background: #23619a; border-color: #23619a; }
     button.primary:hover:not(:disabled) { background: #164c7c; }
     button.icon { min-width: var(--control-height); padding: 6px; font-size: 1.25rem; line-height: 1; }
+    .ai-cell, .translation-input { position: relative; }
+    td.ai-cell { height: 42px; }
+    .translation-field { display: grid; gap: 4px; }
+    .translation-input textarea { width: 100%; padding-right: 46px; }
+    button.ai-translate { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px;
+      min-width: 0; min-height: 0; padding: 4px; display: grid; place-items: center;
+      color: #7853b4; border-color: #cdbce3; background: #faf7ff; }
+    button.ai-translate:hover:not(:disabled) { background: #eee5fb; }
+    button.ai-translate[hidden] { display: none; }
+    .ai-translate svg { width: 18px; height: 18px; fill: none; stroke: currentColor;
+      stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    .ai-translate[data-busy="true"] svg { animation: ai-pulse 1s ease-in-out infinite alternate; }
+    @keyframes ai-pulse { to { opacity: .35; transform: rotate(12deg); } }
+    #ai-result-text { width: 100%; min-height: 180px; }
     input, textarea, select { padding: 8px; border: 1px solid #b6c4d4; border-radius: var(--control-radius); background: white; min-width: 0; }
     input:disabled:not([type=checkbox]), textarea:disabled, select:disabled {
       background: #edf1f5; border-color: #c5d0db; color: #647384;
@@ -295,7 +309,8 @@
         <div class="tokens" id="tokens"></div>
       </div>
       <div id="key-tools" class="fields" hidden><label>Change TXT_KEY identifier<input id="identifier" placeholder="Select an English source row" disabled></label></div>
-      <label><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Auto-saved locally. Apply updates the project CSV and game XML.</small><textarea id="translation" disabled></textarea></label>
+      <div class="translation-field"><label for="translation"><strong id="text-heading">My translation text</strong><small id="text-help" class="hint">Auto-saved locally. Apply updates the project CSV and game XML.</small></label><div class="translation-input"><textarea id="translation" disabled></textarea><button id="ai-translate" type="button" class="ai-translate" title="Translate this empty row with AI" aria-label="Translate this empty row with AI" hidden></button></div></div>
+      <p id="ai-row-status" class="hint" role="status" aria-live="polite" hidden></p>
       <p id="characters" class="hint">Characters: 0 · spaces: 0</p>
       <p id="draft-state" class="hint" role="status" aria-live="polite"></p>
       <label class="inline compact-check"><input type="checkbox" id="prefill" checked> Fill the editor from the selected row</label>
@@ -356,6 +371,7 @@
 <dialog id="formatting-dialog"><section><h2>Accept this formatting?</h2><p id="formatting-key"></p><p id="formatting-detail"></p><p class="hint">Accept these differences for this exact translation and English source. Missing substitutions will no longer display their values. Changing either text requires another review. Apply again to update the project or game.</p><p id="formatting-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="formatting-cancel">Cancel</button><button id="formatting-confirm" class="primary">Accept formatting</button></div></section></dialog>
 <dialog id="saved-versions-dialog"><section><div class="dialog-heading"><h2>Saved versions</h2><button id="saved-versions-x" class="icon-control" title="Close" aria-label="Close saved versions">×</button></div><p class="hint">The latest 50 explicit Saves are kept across restarts and updates, for both modes and all languages in this project.</p><div id="saved-version-list"></div><p class="hint">Loading replaces the current local version and clears Undo/Redo. Save the current version first if you want to keep it. Apply updates the project or game afterwards. Trash always restores the latest explicit Save.</p><p id="saved-versions-status" class="section-status" role="status" aria-live="polite"></p><div class="foot"><button id="saved-versions-save">Save current version</button><button id="saved-versions-close">Cancel</button><button id="saved-versions-load" class="primary" disabled>Load selected Save</button></div></section></dialog>
 <dialog id="drafts-dialog"><section><div class="dialog-heading"><h2>Saved local drafts</h2><button id="drafts-x" class="icon-control" title="Close" aria-label="Close local drafts">×</button></div><p class="hint">These edits stay on disk across restarts and editor updates. Apply checks the current English and project translations before rebuilding once. A backup includes incomplete drafts too.</p><div id="draft-list"></div><div class="foot"><button id="drafts-backup">Download draft backup</button><button id="drafts-close">Done</button></div></section></dialog>
+<dialog id="ai-result-dialog"><h2>Generated translation</h2><p id="ai-result-notice" class="hint"></p><textarea id="ai-result-text" readonly aria-label="Generated translation for manual review"></textarea><div class="foot"><button id="ai-result-copy" type="button">Copy translation</button><button id="ai-result-close" type="button">Close</button></div></dialog>
 <dialog id="settings-dialog">
   <section>
     <div class="settings-group"><h2>Connections and settings</h2>
@@ -392,7 +408,23 @@
         <label>New snapshot password<input id="snapshot-new-password" type="password" autocomplete="new-password"></label>
         <label>Repeat password<input id="snapshot-confirm-password" type="password" autocomplete="new-password"></label>
         <button id="snapshot-encrypt">Encrypt and download .enc</button></div>
-        <p class="hint">Vanilla text stays on this computer. Translation works without it.</p>
+        <p class="hint">The full Vanilla reference stays on this computer. Optional AI translation sends only relevant excerpts to your provider. Translation works without the reference.</p>
+      </div></details>
+    </div>
+    <div class="settings-group"><details id="llm-details"><summary>AI translation <span id="llm-summary" class="hint">Optional · use your own API account</span></summary>
+      <div class="accordion-body">
+        <p class="hint">Send a selected empty row and relevant reference snippets to your provider. Requests use your API account and its billing. Results are local drafts for review; Apply stays separate.</p>
+        <label class="inline"><input id="llm-enabled" type="checkbox">Enable AI translation</label>
+        <label>Provider<select id="llm-provider"><option value="openai">OpenAI / GPT</option><option value="anthropic">Anthropic / Claude</option></select></label>
+        <label>API key<input id="llm-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Enter your provider API key"></label>
+        <p id="llm-key-hint" class="hint">The key stays in this editor's private workspace and is never exported.</p>
+        <div class="row"><label>Model ID<input id="llm-model" list="llm-models" placeholder="Choose a model from your API account" autocomplete="off"><datalist id="llm-models"></datalist></label><button id="llm-check" type="button">Check key / list models</button></div>
+        <label>Maximum output tokens<input id="llm-output-tokens" type="number" min="1024" max="32768" step="1024" value="8192"></label>
+        <label class="inline"><input id="llm-civilopedia" type="checkbox" checked>Use relevant Civilopedia (Civ5) page excerpts when available</label>
+        <label>Additional translation preferences<textarea id="llm-instructions" rows="3" maxlength="4000" placeholder="Optional style preferences for your translations"></textarea></label>
+        <p class="hint">Verified Vanilla reference supplies official terms. Reviewed project terms and available Civilopedia excerpts add context. A missing web source is reported with the result.</p>
+        <p id="llm-status" class="section-status" role="status" aria-live="polite"></p>
+        <div class="row"><button id="llm-save" type="button" class="primary">Save AI connection</button><button id="llm-disconnect" type="button">Disconnect / forget key</button></div>
       </div></details>
     </div>
     <div class="settings-group editor-update-group"><h2>Editor updates</h2>

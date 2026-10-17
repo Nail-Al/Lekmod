@@ -74,6 +74,9 @@ let blockedGameTarget = "game", blockedGameRetry = null;
 let historyQueue = Promise.resolve(), historyQueued = 0;
 let mergeReview = null, mergeChoices = {}, mergePage = 0, inMerge = false;
 let mergeApplying = false, mergeChecking = false;
+let aiRequest = null;
+const aiNotes = new Map();
+const aiGlyph = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 11-11 3 3L7 23M14 10l3-3 3 3-3 3M5 3v6M2 6h6M19 1v4M17 3h4M21 16v6M18 19h6"/></svg>';
 function emptyFilters() {
   return {kind: "", status: "", date_field: "english_edited_at", date_from: "", date_to: "", version: "", needs_translation: ""};
 }
@@ -187,6 +190,7 @@ function markDraft() {
     el("draft-state").textContent = "Saving locally…";
     autoSaveTimer = setTimeout(() => saveCurrent(false), 350);
   }
+  renderAIControls();
 }
 async function guardNavigation(action) {
   clearTimeout(autoSaveTimer);
@@ -199,6 +203,85 @@ function countText() {
   el("characters").textContent = "Characters: " + Array.from(value).length +
     " · spaces: " + (value.match(/ /g) || []).length +
     (chosen && !developer() ? " · English: " + chosen.lekmod_en_US_characters : "");
+  renderAIControls();
+}
+function aiEligible(row) {
+  return !!(meta?.ready && meta.llm?.configured && !developer() && row &&
+    row.classification !== "source_conflict" && !String(row.translation || "").trim());
+}
+function aiKey(row, locale = el("locale").value) { return locale + ":" + row.key; }
+function renderAIControls() {
+  const button = el("ai-translate");
+  button.innerHTML = aiGlyph;
+  button.hidden = !aiEligible(chosen) || !!el("translation").value.trim();
+  const busy = !!aiRequest;
+  button.disabled = busy || applyPending || historyPending;
+  button.dataset.busy = String(busy && chosen && aiRequest.key === aiKey(chosen));
+  document.querySelectorAll("td .ai-translate").forEach(item => {
+    item.disabled = busy || applyPending || historyPending;
+    item.dataset.busy = String(busy && item.dataset.row === aiRequest.key);
+  });
+  const status = el("ai-row-status");
+  const note = chosen && aiNotes.get(aiKey(chosen));
+  status.hidden = !note || developer();
+  status.textContent = note || "";
+}
+function preserveAIResult(result, notice) {
+  el("ai-result-text").value = result.translation;
+  el("ai-result-notice").textContent = notice + " The generated text is available here for manual review and copying.";
+  if (!el("ai-result-dialog").open) el("ai-result-dialog").showModal();
+}
+async function generateAI(row) {
+  if (aiRequest || !aiEligible(row) || applyPending || historyPending) return;
+  const locale = el("locale").value, key = aiKey(row, locale);
+  aiRequest = {key};
+  aiNotes.set(key, "Generating translation… You can keep editing; your changes will be preserved.");
+  renderAIControls();
+  let candidate;
+  try {
+    if (!await saveCurrent(false) || !aiEligible(row)) return;
+    const context = {...selectionContext}, form = captureDraft();
+    const sameSelection = () => !developer() && chosen?.key === row.key && el("locale").value === locale;
+    candidate = await api("/api/llm-translate", {locale, key: row.key,
+      revision: row.draft_revision || 0, source_fingerprint: row.source_fingerprint}, 120000);
+    if (sameSelection() && captureDraft() !== form) {
+      preserveAIResult(candidate, "You edited this row while the request was running. Your edits have been kept.");
+      aiNotes.set(key, "Generated translation kept for manual review; your edits were preserved.");
+      return;
+    }
+    const result = await api("/api/llm-use", {candidate_id: candidate.candidate_id});
+    reflectDraft(row, result.edit, result, context);
+    const currentRow = !developer() && el("locale").value === locale &&
+      (window.currentRows || []).find(item => item.key === row.key);
+    if (currentRow && currentRow !== row) reflectDraft(currentRow, result.edit, result, context);
+    updateHistory(result);
+    if (sameSelection()) {
+      if (captureDraft() === form) {
+        el("translation").value = result.edit.text;
+        selectionContext.textTouched = true;
+        selectionContext.textBaseline = result.edit.text;
+        savedDraft = captureDraft();
+        el("draft-state").textContent = "Saved locally · review before Apply";
+      } else {
+        // A new edit can arrive during the short local save request too.
+        savedDraft = JSON.stringify({...result.edit, identifier: ""});
+        selectionContext.textTouched = true;
+      }
+      countText(); markDraft();
+    }
+    const evidence = (candidate.sources || []).map(source => source.name).join("; ");
+    aiNotes.set(key, "AI draft · " + candidate.model + ". Review before Apply. " +
+      (candidate.warnings || []).join(" ") + (evidence ? " References: " + evidence : ""));
+    renderTable(window.currentRows || []);
+    message("AI translation saved locally. Review it before Apply.");
+  } catch (error) {
+    aiNotes.set(key, "AI translation: " + error.message);
+    if (candidate) preserveAIResult(candidate, error.message);
+    message(error.name === "AbortError" ? "AI request timed out. No translation was inserted; retry when ready." : error.message, true);
+  } finally {
+    if (aiNotes.get(key)?.startsWith("Generating")) aiNotes.delete(key);
+    aiRequest = null; renderAIControls();
+  }
 }
 function grammarValue(name) {
   return el(name).value === "__custom__" ? el(name + "-custom").value.trim() : el(name).value;
@@ -542,6 +625,25 @@ function renderTable(rows) {
             (row.draft_delete ? " This version removes the entity." : "");
           td.append(chip);
         }
+      } else if (field === "translation" && aiEligible(row)) {
+        td.classList.add("ai-cell");
+        td.textContent = value;
+        const magic = document.createElement("button");
+        magic.type = "button"; magic.className = "ai-translate";
+        magic.dataset.row = aiKey(row); magic.innerHTML = aiGlyph;
+        magic.title = "Translate this empty row with AI";
+        magic.setAttribute("aria-label", magic.title);
+        magic.disabled = !!aiRequest || applyPending || historyPending;
+        magic.addEventListener("click", event => {
+          event.stopPropagation();
+          guardNavigation(async () => {
+            if (aiRequest) return;
+            if (chosen !== row) selectRow(row,
+              el("table").querySelectorAll("tbody tr")[(window.currentRows || []).indexOf(row)] || tr);
+            await generateAI(row);
+          }).catch(error => message(error.message, true));
+        });
+        td.append(magic);
       } else if (value && copyFields.has(field)) {
         const content = document.createElement("div");
         content.className = "cell";
@@ -690,7 +792,64 @@ function clearSelection() {
   document.querySelectorAll("tbody tr.selected").forEach(row => row.classList.remove("selected"));
   countText();
 }
+function fillLLMSettings() {
+  const config = meta.llm || {};
+  el("llm-enabled").checked = !!config.enabled;
+  el("llm-provider").value = config.provider || "openai";
+  el("llm-api-key").value = "";
+  el("llm-api-key").placeholder = config.has_key ? "Key saved · leave blank to keep it" : "Enter your provider API key";
+  el("llm-model").value = config.model || "";
+  el("llm-instructions").value = config.instructions || "";
+  el("llm-civilopedia").checked = config.civilopedia !== false;
+  el("llm-output-tokens").value = config.max_output_tokens || 8192;
+  el("llm-key-hint").textContent = config.key_storage || "The key stays in this editor's private workspace and is never exported.";
+  el("llm-summary").textContent = config.configured ? config.provider + " · " + config.model : "Optional · use your own API account";
+  el("llm-disconnect").disabled = !config.has_key;
+  sectionMessage("llm", config.error || (config.configured ? "Configured. AI drafts are available for empty Translator rows; provider access is checked on request." :
+    "Choose a provider, enter an API key and select a model. Save AI connection to enable the buttons."), config.error ? "error" : "success");
+}
+function llmForm() {
+  return {enabled: el("llm-enabled").checked, provider: el("llm-provider").value,
+    api_key: el("llm-api-key").value.trim(), model: el("llm-model").value.trim(),
+    instructions: el("llm-instructions").value,
+    civilopedia: el("llm-civilopedia").checked,
+    max_output_tokens: Number(el("llm-output-tokens").value)};
+}
+el("ai-translate").addEventListener("click", () => generateAI(chosen));
+el("ai-result-close").addEventListener("click", () => el("ai-result-dialog").close());
+el("ai-result-copy").addEventListener("click", () => copyText(el("ai-result-text").value));
+el("llm-provider").addEventListener("change", () => {
+  el("llm-api-key").value = "";
+  el("llm-api-key").placeholder = "Enter this provider's API key";
+  el("llm-model").value = ""; el("llm-models").replaceChildren();
+});
+el("llm-check").addEventListener("click", async () => {
+  el("llm-check").disabled = true;
+  sectionMessage("llm", "Checking the key and listing available models…", "busy");
+  try {
+    const result = await api("/api/llm-models", llmForm(), 20000);
+    el("llm-models").replaceChildren();
+    for (const model of result.models) el("llm-models").append(new Option(model.label, model.id));
+    sectionMessage("llm", result.models.length ? "Key accepted. Choose a model in Model ID, then Save AI connection. Translation requests use your API account's billing." :
+      "The provider returned no models. Check your account's model access.", result.models.length ? "success" : "warning");
+  } catch (error) { sectionMessage("llm", error.message, "error"); }
+  finally { el("llm-check").disabled = false; }
+});
+async function saveLLM(disconnect = false) {
+  el("llm-save").disabled = true; el("llm-disconnect").disabled = true;
+  try {
+    const result = await api("/api/llm-settings", disconnect ? {disconnect: true} : llmForm());
+    meta.llm = result.llm; fillLLMSettings();
+    renderTable(window.currentRows || []); renderAIControls();
+    sectionMessage("llm", disconnect ? "Disconnected. The saved API key was removed." :
+      "AI connection saved. Model access is checked by Check key / list models or the first translation request.");
+  } catch (error) { sectionMessage("llm", error.message, "error"); }
+  finally { el("llm-save").disabled = false; el("llm-disconnect").disabled = !meta.llm?.has_key; }
+}
+el("llm-save").addEventListener("click", () => saveLLM());
+el("llm-disconnect").addEventListener("click", () => saveLLM(true));
 function fillSettings() {
+  fillLLMSettings();
   el("project-path").value = prefs.project_path;
   el("game-path").value = prefs.game_path || meta.game.path;
   el("snapshot-url").value = prefs.snapshot_url || "";
@@ -916,6 +1075,7 @@ el("editor-quit").addEventListener("click", () => guardNavigation(async () => {
 }));
 el("settings-dialog").addEventListener("close", () => {
   clearInterval(downloadTimer); downloadTimer = undefined;
+  el("llm-api-key").value = "";
 });
 el("settings-dialog").addEventListener("cancel", event => {
   if (editorUpdateLocked) event.preventDefault();

@@ -38,6 +38,7 @@ import sync_primary_english
 from merge_translation_handoff import MAX_ARCHIVE, merge_handoff
 from merge_localization import review_merge, english_base, candidate_sources
 from lekmod_localization.drafts import DraftStore
+from lekmod_localization.llm_translation import LLMConnection, Civilopedia, build_context, key_family
 from lekmod_localization.runtime_xml import runtime_text, preserve_rejected_rows
 from lekmod_localization.game_process import GameRunningError, require_game_closed, running_game_processes
 from lekmod_localization.common import (
@@ -262,6 +263,8 @@ class Editor:
         self.save_state = {"state": "idle"}
         self.apply_state = {"state": "idle"}
         self.project_lock = threading.Lock()
+        self.ai_lock = threading.Lock()
+        self.ai_candidates = {}
         self.row_cache = {}
         self.download_cancel = threading.Event()
         self.handoff_data = self.handoff_preview = None
@@ -400,6 +403,117 @@ class Editor:
     def preferences(self) -> dict:
         """Allow IDE commands to use explicit destinations without changing UI settings."""
         return {**settings(), **getattr(self, 'preference_overrides', {})}
+
+    def llm_connection(self) -> LLMConnection:
+        if not hasattr(self, 'llm'):
+            self.llm = LLMConnection(APP_HOME / 'localization/workspace')
+        return self.llm
+
+    def ai_row(self, data: dict, *, check_identity: bool = True) -> dict:
+        """Read an empty working row and verify its current canonical English."""
+        if not self.ready:
+            raise CatalogError('Connect a compatible project before generating a translation')
+        if self.save_state.get('state') == 'running':
+            raise CatalogError('Wait for Apply to finish before generating or inserting a translation')
+        locale, key = data.get('locale'), data.get('key')
+        if not isinstance(locale, str) or locale not in self.manifest()['locales'] or not isinstance(key, str) or not KEY_RE.fullmatch(key):
+            raise CatalogError('Select a translation language and TXT_KEY row')
+        rows = self.rows(locale, 'all', key, 0, 'all')['rows']
+        row = next((item for item in rows if item['key'] == key), None)
+        if row is None or row.get('classification') == 'source_conflict':
+            raise CatalogError('Select a row with an unambiguous English source')
+        if row.get('translation', '').strip():
+            raise CatalogError('AI translation is available only for an empty My translation')
+        english_drafts = [entry for entry in self.drafts.entries()
+                          if entry['payload']['mode'] == 'developer' and
+                          (entry['payload']['key'] == key or entry['payload']['edit']['identifier'] == key)]
+        plan = self.draft_plan(english_drafts, partial=True)
+        if plan['issues']:
+            raise CatalogError('Review the English draft for this row before requesting a translation')
+        source = candidate_sources(REPO_ROOT, plan['document']).get(key)
+        if not source or source.get('classification') == 'source_conflict' or source['source_fingerprint'] != row['source_fingerprint']:
+            raise CatalogError('English changed outside this view. Refresh/review the row before using AI')
+        if check_identity and (data.get('source_fingerprint') != row['source_fingerprint'] or
+                type(data.get('revision')) is not int or data['revision'] != row['draft_revision']):
+            raise CatalogError('This row changed. Refresh it before using the generated translation')
+        return row
+
+    @staticmethod
+    def ai_identity(row: dict) -> dict:
+        return {name: row.get(name) for name in ('key', 'locale', 'draft_slot', 'draft_revision',
+                'source_fingerprint', 'draft_base', 'translation', 'translation_gender',
+                'translation_plurality', 'translator_note')}
+
+    def ai_context(self, data: dict, *, online: bool = False) -> dict:
+        row = self.ai_row(data)
+        vanilla = {}
+        if self.snapshot is not None:
+            stamp = (str(self.snapshot), self.snapshot.stat().st_mtime_ns, self.snapshot.stat().st_size)
+            if getattr(self, 'ai_snapshot_stamp', None) != stamp:
+                verify_snapshot_reference(self.snapshot)
+                self.ai_snapshot_rows = read_snapshot(self.snapshot)[0]
+                self.ai_snapshot_stamp = stamp
+            vanilla = self.ai_snapshot_rows
+        related = self.rows(data['locale'], 'all', key_family(row['key']), 0, 'all')['rows']
+        context = build_context(row, data['locale'], vanilla=vanilla, related=related)
+        if online and self.llm_connection().status()['civilopedia']:
+            Civilopedia(self.llm_connection().workspace).augment(context)
+        else:
+            context.pop('wiki_query', None)
+        return {'row': row, 'context': context}
+
+    def ai_generate(self, data: dict) -> dict:
+        """Generate a candidate; a late response never writes a draft by itself."""
+        connection = self.llm_connection()
+        if not connection.status()['configured']:
+            raise CatalogError('Connect your AI provider in Settings first')
+        if not hasattr(self, 'ai_lock'):
+            self.ai_lock = threading.Lock()
+        if not self.ai_lock.acquire(blocking=False):
+            raise CatalogError('An AI translation is already running; wait for its result')
+        try:
+            prepared = self.ai_context(data, online=True)
+            result = connection.generate(prepared['context'])
+            if not hasattr(self, 'ai_candidates'):
+                self.ai_candidates = {}
+            self.ai_candidates = {key: value for key, value in self.ai_candidates.items()
+                                  if time.monotonic() - value['created'] < 1800}
+            while len(self.ai_candidates) >= 20:
+                self.ai_candidates.pop(next(iter(self.ai_candidates)))
+            identifier = secrets.token_urlsafe(18)
+            self.ai_candidates[identifier] = {'identity': self.ai_identity(prepared['row']),
+                'row': prepared['row'], 'result': result, 'created': time.monotonic()}
+            self.record_event('llm-generate', 'success')
+            return {**result, 'candidate_id': identifier, 'key': data['key'], 'locale': data['locale']}
+        finally:
+            self.ai_lock.release()
+
+    def ai_use(self, data: dict) -> dict:
+        """Commit only the candidate's unchanged empty row through normal drafts."""
+        identifier = data.get('candidate_id')
+        if not isinstance(identifier, str):
+            raise CatalogError('Choose a generated AI candidate')
+        candidate = getattr(self, 'ai_candidates', {}).get(identifier)
+        if not candidate or time.monotonic() - candidate['created'] > 1800:
+            raise CatalogError('This AI candidate expired. Keep its text for manual review')
+        old = candidate['row']
+        current = self.ai_row({'key': old['key'], 'locale': old['locale'],
+            'revision': old['draft_revision'], 'source_fingerprint': old['source_fingerprint']})
+        if self.ai_identity(current) != candidate['identity']:
+            raise CatalogError('The row changed during generation. Your current draft is preserved')
+        edit = {'text': candidate['result']['translation'],
+                'gender': current.get('translation_gender', ''),
+                'plurality': current.get('translation_plurality', ''),
+                'note': current.get('translator_note', ''), 'identifier': ''}
+        result = self.save_draft({'mode': 'translator', 'locale': old['locale'], 'key': old['key'],
+            'slot': current['draft_slot'], 'revision': current['draft_revision'], 'base': current['draft_base'],
+            'source_fingerprint': current['source_fingerprint'], 'edit': edit,
+            'group': 'ai-' + identifier})
+        if result.get('conflict'):
+            raise CatalogError('The draft changed during insertion. Your current draft is preserved')
+        self.ai_candidates.pop(identifier, None)
+        return {**result, 'edit': edit, 'row': old, 'warnings': candidate['result']['warnings'],
+                'sources': candidate['result']['sources']}
 
     def record_event(self, name: str, result: str) -> None:
         """Keep a bounded, text-free local action journal for troubleshooting."""
@@ -565,6 +679,7 @@ class Editor:
             "release": release_version(REPO_ROOT) if self.ready else "",
             "game": game,
             "preferences": prefs,
+            "llm": self.llm_connection().status(),
             **(self.drafts.status() if hasattr(self, 'drafts') else {"draft_count": 0}),
             "apply_state": getattr(self, 'apply_state', {"state": "idle"}),
             **self.history_state(),
@@ -2222,7 +2337,7 @@ def make_handler(editor: Editor, token: str, port: int):
             try:
                 if getattr(editor, 'initializing', False) is True:
                     self.respond(503, {'error': 'Preparing the connected project; please wait'}); return
-                if self.path in {'/api/apply-project', '/api/draft-accept-formatting', '/api/translate', '/api/translate-async',
+                if self.path in {'/api/llm-use', '/api/apply-project', '/api/draft-accept-formatting', '/api/translate', '/api/translate-async',
                         '/api/primary', '/api/create-primary', '/api/rename-primary', '/api/connect',
                         '/api/snapshot', '/api/snapshot-cloud', '/api/check', '/api/apply-game',
                         '/api/undo', '/api/redo', '/api/handoff-apply', '/api/handoff-review',
@@ -2265,7 +2380,15 @@ def make_handler(editor: Editor, token: str, port: int):
                     "/api/handoff-apply", "/api/handoff-review", "/api/history-sync", "/api/stop", '/api/apply-project',
                 }:
                     raise CatalogError("wait until the current row finishes saving")
-                if self.path == '/api/draft':
+                if self.path == '/api/llm-settings':
+                    result = {'llm': editor.llm_connection().configure(data)}
+                elif self.path == '/api/llm-models':
+                    result = editor.llm_connection().models(data)
+                elif self.path == '/api/llm-translate':
+                    result = editor.ai_generate(data)
+                elif self.path == '/api/llm-use':
+                    result = editor.ai_use(data)
+                elif self.path == '/api/draft':
                     result = editor.save_draft(data)
                 elif self.path == '/api/draft-accept-formatting':
                     result = editor.accept_formatting(data)
